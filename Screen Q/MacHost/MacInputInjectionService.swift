@@ -66,8 +66,7 @@ final class MacInputInjectionService: ObservableObject {
     // MARK: - Geometry
 
     private func currentDisplayBounds() -> CGRect? {
-        guard let info = displaySelection.selectedDisplay() else { return nil }
-        return CGDisplayBounds(info.id)
+        displaySelection.selectedCGBounds()
     }
 
     private func screenPoint(from normalised: NormalisedPoint) -> CGPoint? {

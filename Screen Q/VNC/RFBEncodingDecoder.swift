@@ -14,7 +14,11 @@ import ImageIO
 
 nonisolated enum RFBEncodingDecoder {
     static let bytesPerPixel = 4
+    #if os(iOS)
+    static let maxDecodedRectBytes = 32 * 1024 * 1024
+    #else
     static let maxDecodedRectBytes = 256 * 1024 * 1024
+    #endif
     private static let tightMinToCompress = 12
     private static let tightExplicitFilter: UInt8 = 0x04
     private static let tightFill: UInt8 = 0x08
@@ -49,11 +53,19 @@ nonisolated enum RFBEncodingDecoder {
     }
 
     static func decodedByteCount(width: UInt16, height: UInt16) throws -> Int {
-        let byteCount = Int(width) * Int(height) * bytesPerPixel
-        guard byteCount <= maxDecodedRectBytes else {
+        guard width > 0, height > 0 else {
+            throw RFBError.protocolError("Framebuffer rectangle has invalid dimensions: \(width)x\(height)")
+        }
+        let pixelProduct = Int(width).multipliedReportingOverflow(by: Int(height))
+        guard !pixelProduct.overflow else {
             throw RFBError.protocolError("Framebuffer rectangle too large: \(width)x\(height)")
         }
-        return byteCount
+        let byteProduct = pixelProduct.partialValue.multipliedReportingOverflow(by: bytesPerPixel)
+        guard !byteProduct.overflow,
+              byteProduct.partialValue <= maxDecodedRectBytes else {
+            throw RFBError.protocolError("Framebuffer rectangle too large: \(width)x\(height)")
+        }
+        return byteProduct.partialValue
     }
 
     static func decodeHextile(

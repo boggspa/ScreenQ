@@ -331,28 +331,26 @@ and App Store-friendly. Clipboard, audio, drive redirection, and dynamic
 channel features should be re-enabled one at a time with explicit iOS
 dependency packaging and tests.
 
-## iOS Broadcast Upload Extension (scaffolding)
+## iOS Broadcast Upload Extension
 
-The companion `ScreenQBroadcastExtension/` folder contains:
+The companion `ScreenQBroadcastExtension/` target is embedded in iOS builds so
+the system broadcast picker can offer **Screen Q Broadcast**. The target
+currently provides the stable ReplayKit capture entry point and setup UI; the
+next transport slice is to upload those sample buffers into a paired Screen Q
+viewer session.
+
+The `ScreenQBroadcastExtension/` folder contains:
 
 - `SampleHandler.swift` — your subclass of `RPBroadcastSampleHandler`.
 - `BroadcastSetupViewController.swift` — optional ReplayKit setup UI.
 - `Info.plist` — extension principal class declaration.
-- `README-EXT.md` — exact steps to wire it up as a real Xcode target.
+- `README-EXT.md` — implementation notes for the capture/upload transport.
 
-The files are intentionally outside the main `Screen Q` target so they
-do not affect the current build. To activate them:
-
-1. In Xcode: **File → New → Target → Broadcast Upload Extension**, name
-   it `ScreenQBroadcastExtension`, bundle id
-   `com.chrisizatt.Screen-Q.ScreenQBroadcastExtension`.
-2. Replace Xcode's auto-generated files with the ones in
-   `ScreenQBroadcastExtension/`.
-3. (Optional) Add an App Group shared between the host and the
-   extension to pass session details.
-4. In the host app set
-   `appState.replayKitModel.broadcastExtensionBundleID =
-   "com.chrisizatt.Screen-Q.ScreenQBroadcastExtension"`.
+Screen Q also advertises iPhone and iPad devices over Bonjour as
+ReplayKit-capable, share-only peers. They appear in Nearby Devices with
+truthful capabilities: view-only screen capture is possible through Apple's
+broadcast flow, but system-wide remote control is not exposed to third-party
+apps.
 
 ## How to enable native Mac Screen Sharing as an alternative
 

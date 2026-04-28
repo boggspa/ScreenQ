@@ -78,6 +78,8 @@ final class TrackpadTouchView: UIView {
     private var pinchStartDistance: CGFloat?
     private var previousPinchDistance: CGFloat?
     private var isViewportGesture = false
+    private var pendingOneFingerTapTimer: Timer?
+    private var lastOneFingerTapTime: Date?
     private var touchStartTime: Date?
     private var touchStartPoint: CGPoint = .zero
     private var touchStartCenter: CGPoint = .zero
@@ -85,6 +87,9 @@ final class TrackpadTouchView: UIView {
     private var dragButton: PointerButton?
     private var didMoveBeyondTap = false
     private var lastTwoFingerTapTime: Date?
+    private var previousTrackpadPoint: CGPoint?
+    private var previousIndirectScrollTranslation: CGPoint = .zero
+    private var lastViewportFollowUpdate = Date.distantPast
     private let longPressDuration: TimeInterval = 0.5
     private let tapMaxDistance: CGFloat = 10
     private let pinchActivationDistance: CGFloat = 8
@@ -92,6 +97,10 @@ final class TrackpadTouchView: UIView {
     private let doubleTapInterval: TimeInterval = 0.32
     private let edgeActivationInset: CGFloat = 28
     private let edgeSwipeDistance: CGFloat = 52
+    private let viewportFollowInset: CGFloat = 78
+    private let viewportFollowMaxStep: CGFloat = 42
+    private let viewportFollowInterval: TimeInterval = 1.0 / 60.0
+    private let trackpadSensitivity: CGFloat = 1.15
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -99,6 +108,7 @@ final class TrackpadTouchView: UIView {
         isOpaque = false
         if #available(iOS 13.4, *) {
             addGestureRecognizer(UIHoverGestureRecognizer(target: self, action: #selector(handleHover(_:))))
+            configureIndirectPointerGestures()
         }
     }
 
@@ -116,6 +126,7 @@ final class TrackpadTouchView: UIView {
 
         if allTouches.count == 1, touchMode != .scrollOnly {
             isDragging = false
+            previousTrackpadPoint = touchStartPoint
 
             // One-finger long press begins a left-button drag.
             longPressTimer?.invalidate()
@@ -123,7 +134,11 @@ final class TrackpadTouchView: UIView {
                 guard let self else { return }
                 Task { @MainActor in
                     guard !self.didMoveBeyondTap else { return }
-                    self.inputMapper?.sendPointerDown(localPoint: self.touchStartPoint, button: .left)
+                    if self.touchMode == .trackpad {
+                        self.inputMapper?.sendPointerDownAtCurrent(button: .left)
+                    } else {
+                        self.inputMapper?.sendPointerDown(localPoint: self.touchStartPoint, button: .left)
+                    }
                     self.dragButton = .left
                     self.isDragging = true
                     self.onDragFeedbackChange?(IOSDragFeedback(kind: .left, point: self.touchStartPoint))
@@ -135,6 +150,7 @@ final class TrackpadTouchView: UIView {
             let center = averageLocation(allTouches)
             previousScrollPoint = center
             previousPinchCenter = center
+            previousTrackpadPoint = center
             let distance = distanceBetweenTouches(allTouches)
             pinchStartDistance = distance
             previousPinchDistance = distance
@@ -145,7 +161,11 @@ final class TrackpadTouchView: UIView {
                     guard let self else { return }
                     Task { @MainActor in
                         guard !self.didMoveBeyondTap, !self.isViewportGesture else { return }
-                        self.inputMapper?.sendPointerDown(localPoint: center, button: .right)
+                        if self.touchMode == .trackpad {
+                            self.inputMapper?.sendPointerDownAtCurrent(button: .right)
+                        } else {
+                            self.inputMapper?.sendPointerDown(localPoint: center, button: .right)
+                        }
                         self.dragButton = .right
                         self.isDragging = true
                         self.onDragFeedbackChange?(IOSDragFeedback(kind: .right, point: center))
@@ -169,11 +189,21 @@ final class TrackpadTouchView: UIView {
             }
         }
 
-        // Cancel long-press if moved too far.
+        // Trackpad mode mirrors Screens-style cursor control: one finger
+        // moves the pointer. Direct-touch mode keeps one-finger movement
+        // local until a hold-drag has explicitly started.
         if touchStartTime != nil, allTouches.count == 1, touchMode != .scrollOnly {
             if let touch = touches.first {
                 let loc = touch.location(in: self)
-                mapper.sendPointerMove(localPoint: loc)
+                if touchMode == .trackpad {
+                    let previous = previousTrackpadPoint ?? loc
+                    let delta = CGSize(width: loc.x - previous.x, height: loc.y - previous.y)
+                    let pointer = mapper.sendPointerMove(relativeLocalDelta: delta, sensitivity: trackpadSensitivity)
+                    followViewportIfNeeded(pointer: pointer)
+                    previousTrackpadPoint = loc
+                } else if isDragging {
+                    mapper.sendPointerMove(localPoint: loc)
+                }
                 if isDragging {
                     onDragFeedbackChange?(IOSDragFeedback(kind: dragButton == .right ? .right : .left, point: loc))
                 }
@@ -195,12 +225,27 @@ final class TrackpadTouchView: UIView {
                 longPressTimer?.invalidate()
                 applyViewportGesture(center: center, distance: distance)
             } else if isDragging {
-                mapper.sendPointerMove(localPoint: center)
+                if touchMode == .trackpad {
+                    let previous = previousTrackpadPoint ?? center
+                    let delta = CGSize(width: center.x - previous.x, height: center.y - previous.y)
+                    let pointer = mapper.sendPointerMove(relativeLocalDelta: delta, sensitivity: trackpadSensitivity)
+                    followViewportIfNeeded(pointer: pointer)
+                    previousTrackpadPoint = center
+                } else {
+                    mapper.sendPointerMove(localPoint: center)
+                }
                 onDragFeedbackChange?(IOSDragFeedback(kind: dragButton == .right ? .right : .left, point: center))
             } else if let prev = previousScrollPoint {
-                let dx = Double(center.x - prev.x) * 3.0
-                let dy = Double(center.y - prev.y) * 3.0
-                mapper.sendScroll(deltaX: dx, deltaY: dy, localPoint: center)
+                let delta = CGSize(width: center.x - prev.x, height: center.y - prev.y)
+                if touchMode == .trackpad {
+                    if viewport.scale > ViewportTransform.minimumScale + 0.001 {
+                        panViewport(by: delta)
+                    } else {
+                        mapper.sendScrollAtCurrent(deltaX: Double(delta.width) * 3.0, deltaY: Double(delta.height) * 3.0)
+                    }
+                } else {
+                    mapper.sendScroll(deltaX: Double(delta.width) * 3.0, deltaY: Double(delta.height) * 3.0, localPoint: center)
+                }
             }
             previousScrollPoint = center
             previousPinchCenter = center
@@ -215,7 +260,11 @@ final class TrackpadTouchView: UIView {
 
         if isDragging {
             let loc = touches.first?.location(in: self) ?? touchStartCenter
-            mapper.sendPointerUp(localPoint: loc, button: dragButton ?? .left)
+            if touchMode == .trackpad {
+                mapper.sendPointerUpAtCurrent(button: dragButton ?? .left)
+            } else {
+                mapper.sendPointerUp(localPoint: loc, button: dragButton ?? .left)
+            }
             clearDragState()
             resetGestureState()
             return
@@ -233,11 +282,15 @@ final class TrackpadTouchView: UIView {
         if isQuickTap, touchMode != .scrollOnly {
             switch lastTouchCount {
             case 1:
-                mapper.sendTap(localPoint: endPoint, button: .left)
+                handleOneFingerTap(at: endPoint)
             case 2:
                 handleTwoFingerTap(at: touchStartCenter)
             case 3:
-                mapper.sendTap(localPoint: touchStartCenter, button: .middle)
+                if touchMode == .trackpad {
+                    mapper.sendTapAtCurrent(button: .middle)
+                } else {
+                    mapper.sendTap(localPoint: touchStartCenter, button: .middle)
+                }
             default:
                 break
             }
@@ -248,7 +301,12 @@ final class TrackpadTouchView: UIView {
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         longPressTimer?.invalidate()
+        pendingOneFingerTapTimer?.invalidate()
+        pendingOneFingerTapTimer = nil
+        lastOneFingerTapTime = nil
         pendingTwoFingerTapTimer?.invalidate()
+        pendingTwoFingerTapTimer = nil
+        previousIndirectScrollTranslation = .zero
         onViewportScaleChange?(nil)
         clearDragState()
         resetGestureState()
@@ -259,6 +317,7 @@ final class TrackpadTouchView: UIView {
         previousPinchCenter = nil
         pinchStartDistance = nil
         previousPinchDistance = nil
+        previousTrackpadPoint = nil
         isViewportGesture = false
         lastTouchCount = 0
         touchStartTime = nil
@@ -269,6 +328,35 @@ final class TrackpadTouchView: UIView {
         isDragging = false
         dragButton = nil
         onDragFeedbackChange?(nil)
+    }
+
+    private func handleOneFingerTap(at point: CGPoint) {
+        let now = Date()
+        if let last = lastOneFingerTapTime, now.timeIntervalSince(last) < doubleTapInterval {
+            pendingOneFingerTapTimer?.invalidate()
+            pendingOneFingerTapTimer = nil
+            lastOneFingerTapTime = nil
+            if touchMode == .trackpad {
+                inputMapper?.sendDoubleTapAtCurrent()
+            } else {
+                inputMapper?.sendDoubleTap(localPoint: point)
+            }
+            return
+        }
+
+        lastOneFingerTapTime = now
+        pendingOneFingerTapTimer?.invalidate()
+        pendingOneFingerTapTimer = Timer.scheduledTimer(withTimeInterval: doubleTapInterval, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in
+                if self.touchMode == .trackpad {
+                    self.inputMapper?.sendTapAtCurrent(button: .left)
+                } else {
+                    self.inputMapper?.sendTap(localPoint: point, button: .left)
+                }
+                self.pendingOneFingerTapTimer = nil
+            }
+        }
     }
 
     private func handleTwoFingerTap(at point: CGPoint) {
@@ -286,7 +374,11 @@ final class TrackpadTouchView: UIView {
         pendingTwoFingerTapTimer = Timer.scheduledTimer(withTimeInterval: doubleTapInterval, repeats: false) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
-                self.inputMapper?.sendTap(localPoint: point, button: .right)
+                if self.touchMode == .trackpad {
+                    self.inputMapper?.sendTapAtCurrent(button: .right)
+                } else {
+                    self.inputMapper?.sendTap(localPoint: point, button: .right)
+                }
                 self.pendingTwoFingerTapTimer = nil
             }
         }
@@ -349,17 +441,72 @@ final class TrackpadTouchView: UIView {
         }
 
         if nextViewport != viewport {
-            viewport = nextViewport
-            onViewportChange?(nextViewport)
-            onViewportScaleChange?(nextViewport.scale)
+            setLocalViewport(nextViewport)
         }
     }
 
     @available(iOS 13.4, *)
     @objc private func handleHover(_ recognizer: UIHoverGestureRecognizer) {
-        guard touchMode == .trackpad else { return }
+        guard touchMode != .scrollOnly, let inputMapper else { return }
         let loc = recognizer.location(in: self)
-        inputMapper?.sendPointerMove(localPoint: loc)
+        let pointer = inputMapper.sendPointerMove(localPoint: loc)
+        if touchMode == .trackpad {
+            followViewportIfNeeded(pointer: pointer)
+        }
+    }
+
+    @available(iOS 13.4, *)
+    private func configureIndirectPointerGestures() {
+        let primaryClick = indirectPointerTapGesture(buttonMask: .primary, action: #selector(handleIndirectPrimaryClick(_:)))
+        let secondaryClick = indirectPointerTapGesture(buttonMask: .secondary, action: #selector(handleIndirectSecondaryClick(_:)))
+        let scroll = UIPanGestureRecognizer(target: self, action: #selector(handleIndirectScroll(_:)))
+        scroll.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
+        scroll.allowedScrollTypesMask = [.continuous, .discrete]
+        addGestureRecognizer(primaryClick)
+        addGestureRecognizer(secondaryClick)
+        addGestureRecognizer(scroll)
+    }
+
+    @available(iOS 13.4, *)
+    private func indirectPointerTapGesture(buttonMask: UIEvent.ButtonMask, action: Selector) -> UITapGestureRecognizer {
+        let tap = UITapGestureRecognizer(target: self, action: action)
+        tap.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
+        tap.buttonMaskRequired = buttonMask
+        return tap
+    }
+
+    @available(iOS 13.4, *)
+    @objc private func handleIndirectPrimaryClick(_ recognizer: UITapGestureRecognizer) {
+        guard recognizer.state == .ended, touchMode != .scrollOnly else { return }
+        inputMapper?.sendTap(localPoint: recognizer.location(in: self), button: .left)
+    }
+
+    @available(iOS 13.4, *)
+    @objc private func handleIndirectSecondaryClick(_ recognizer: UITapGestureRecognizer) {
+        guard recognizer.state == .ended, touchMode != .scrollOnly else { return }
+        inputMapper?.sendTap(localPoint: recognizer.location(in: self), button: .right)
+    }
+
+    @available(iOS 13.4, *)
+    @objc private func handleIndirectScroll(_ recognizer: UIPanGestureRecognizer) {
+        let translation = recognizer.translation(in: self)
+        switch recognizer.state {
+        case .began:
+            previousIndirectScrollTranslation = translation
+        case .changed:
+            let dx = Double(translation.x - previousIndirectScrollTranslation.x) * 3.0
+            let dy = Double(translation.y - previousIndirectScrollTranslation.y) * 3.0
+            if dx != 0 || dy != 0 {
+                if touchMode == .trackpad, viewport.scale > ViewportTransform.minimumScale + 0.001 {
+                    panViewport(by: CGSize(width: CGFloat(dx / 3.0), height: CGFloat(dy / 3.0)))
+                } else {
+                    inputMapper?.sendScroll(deltaX: dx, deltaY: dy, localPoint: recognizer.location(in: self))
+                }
+            }
+            previousIndirectScrollTranslation = translation
+        default:
+            previousIndirectScrollTranslation = .zero
+        }
     }
 
     private func averageLocation(_ touches: Set<UITouch>) -> CGPoint {
@@ -378,6 +525,60 @@ final class TrackpadTouchView: UIView {
         let points = touches.map { $0.location(in: self) }
         guard points.count >= 2 else { return 0 }
         return hypot(points[0].x - points[1].x, points[0].y - points[1].y)
+    }
+
+    private var currentGeometry: CanvasGeometry {
+        CanvasGeometry(
+            canvasSize: canvasSize,
+            remotePixelSize: remotePixelSize,
+            fit: fit,
+            viewport: viewport
+        )
+    }
+
+    private func setLocalViewport(_ nextViewport: ViewportTransform) {
+        guard nextViewport != viewport else { return }
+        viewport = nextViewport
+        inputMapper?.canvas = currentGeometry
+        onViewportChange?(nextViewport)
+        onViewportScaleChange?(nextViewport.scale)
+    }
+
+    private func panViewport(by delta: CGSize) {
+        guard viewport.scale > ViewportTransform.minimumScale + 0.001 else { return }
+        let nextViewport = viewport.translated(by: delta, in: currentGeometry)
+        setLocalViewport(nextViewport)
+    }
+
+    private func followViewportIfNeeded(pointer: NormalisedPoint?) {
+        guard viewport.scale > ViewportTransform.minimumScale + 0.001,
+              Date().timeIntervalSince(lastViewportFollowUpdate) >= viewportFollowInterval,
+              let pointer,
+              let localPoint = currentGeometry.localPoint(for: pointer),
+              bounds.width > 0,
+              bounds.height > 0 else {
+            return
+        }
+
+        let horizontalInset = min(viewportFollowInset, bounds.width * 0.35)
+        let verticalInset = min(viewportFollowInset, bounds.height * 0.35)
+        var delta = CGSize.zero
+
+        if localPoint.x < horizontalInset {
+            delta.width = min(viewportFollowMaxStep, horizontalInset - localPoint.x)
+        } else if localPoint.x > bounds.width - horizontalInset {
+            delta.width = -min(viewportFollowMaxStep, localPoint.x - (bounds.width - horizontalInset))
+        }
+
+        if localPoint.y < verticalInset {
+            delta.height = min(viewportFollowMaxStep, verticalInset - localPoint.y)
+        } else if localPoint.y > bounds.height - verticalInset {
+            delta.height = -min(viewportFollowMaxStep, localPoint.y - (bounds.height - verticalInset))
+        }
+
+        guard abs(delta.width) > 0.5 || abs(delta.height) > 0.5 else { return }
+        lastViewportFollowUpdate = Date()
+        panViewport(by: delta)
     }
 }
 #endif

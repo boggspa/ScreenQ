@@ -43,6 +43,11 @@ nonisolated enum ScreenQProtocol {
         static let supportsControl = "supportsControl"
         static let supportsVideo = "supportsVideo"
         static let deviceName = "deviceName"
+        static let deviceID = "deviceID"
+        static let presence = "presence"
+        static let supportsReplayKit = "supportsReplayKit"
+        static let acceptsScreenQ = "acceptsScreenQ"
+        static let status = "status"
     }
 
     enum Flags {

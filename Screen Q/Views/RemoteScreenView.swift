@@ -28,6 +28,7 @@ final class ViewerSession: ObservableObject {
     let terminalState = RemoteTerminalState()
     let reportState = SystemReportState()
     let recorder = SessionRecorder()
+    let controlPreferenceScope: ViewerControlPreferenceScope
 
     @Published var phase: SessionState = .handshake
     @Published var pairingPrompt: String = ""
@@ -45,10 +46,20 @@ final class ViewerSession: ObservableObject {
     private var localPeerID: UUID?
     private var localIdentityFingerprint: String?
 
-    init(connection: ScreenQConnection, peerLabel: String, app: AppState) {
+    init(
+        connection: ScreenQConnection,
+        peerLabel: String,
+        app: AppState,
+        controlPreferenceScope: ViewerControlPreferenceScope? = nil
+    ) {
         self.connection = connection
         self.peerLabel = peerLabel
         self.app = app
+        self.controlPreferenceScope = controlPreferenceScope ?? ViewerControlPreferenceScope(
+            connectionProtocol: .screenQ,
+            host: peerLabel,
+            port: ScreenQProtocol.defaultPort
+        )
 
         inputMapper.sendEvent = { [weak self] event in
             guard let self else { return }
@@ -189,6 +200,7 @@ final class ViewerSession: ObservableObject {
             renderer.ingest(meta: meta, payload: payload, stats: stats)
         case .cursorUpdate(let cursor):
             cursorState.update(cursor)
+            inputMapper.updateRemotePointer(NormalisedPoint(x: cursor.x, y: cursor.y))
         case .audioFormat(let fmt):
             audioPlayer.configure(format: fmt)
         case .audioFrame(let data):
@@ -282,13 +294,14 @@ enum TouchMode: String, CaseIterable, Identifiable {
 
 struct RemoteScreenView: View {
 
+    @EnvironmentObject private var app: AppState
     @ObservedObject var session: ViewerSession
     @ObservedObject private var renderer: RemoteScreenRenderer
     @ObservedObject private var stats: TransportStats
     var onDisconnect: () -> Void
 
     #if os(iOS)
-    @StateObject private var controlPreferences = ViewerControlPreferences()
+    @StateObject private var controlPreferences: ViewerControlPreferences
     @StateObject private var modifierLatch = ModifierLatchController()
     #endif
 
@@ -297,6 +310,9 @@ struct RemoteScreenView: View {
         self.renderer = session.renderer
         self.stats = session.stats
         self.onDisconnect = onDisconnect
+        #if os(iOS)
+        self._controlPreferences = StateObject(wrappedValue: ViewerControlPreferences(scope: session.controlPreferenceScope))
+        #endif
     }
 
     @State private var showStats = true
@@ -329,6 +345,15 @@ struct RemoteScreenView: View {
         }
         .onAppear {
             configureViewerControls()
+        }
+        .onReceive(renderer.$currentImage.compactMap { $0 }.throttle(for: .seconds(5), scheduler: RunLoop.main, latest: true)) { image in
+            app.savedConnections.updateThumbnail(
+                host: session.controlPreferenceScope.host,
+                port: session.controlPreferenceScope.port,
+                displayName: session.peerLabel,
+                connectionProtocol: .screenQ,
+                image: image
+            )
         }
     }
 
@@ -559,8 +584,16 @@ struct RemoteScreenView: View {
                     ProgressView("Waiting for first frame…")
                         .foregroundColor(.white)
                 }
-                CursorOverlayView(state: session.cursorState, canvasGeometry: canvasGeometry(size: proxy.size))
-                FileTransferOverlay(service: session.fileTransfer)
+                CursorOverlayView(
+                    state: session.cursorState,
+                    inputMapper: session.inputMapper,
+                    canvasGeometry: canvasGeometry(size: proxy.size)
+                )
+                FileTransferOverlay(
+                    service: session.fileTransfer,
+                    isTransferEnabled: session.grantedPermissions.contains(.fileTransfer),
+                    disabledReason: "File transfer is disabled for this session"
+                )
                 #if os(iOS)
                 if let zoomHUDScale {
                     zoomHUD(scale: zoomHUDScale)

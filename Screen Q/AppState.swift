@@ -10,6 +10,10 @@
 import Foundation
 import SwiftUI
 import Combine
+import Network
+#if os(iOS)
+import UIKit
+#endif
 
 @MainActor
 final class AppState: ObservableObject {
@@ -31,6 +35,10 @@ final class AppState: ObservableObject {
     @Published var discoveredHosts: [DiscoveredHost] = []
     @Published var discoveredRFBHosts: [DiscoveredHost] = []
     @Published var browserStatus = BrowserStatus()
+    @Published var tailnetDevices: [TailnetDevice] = []
+    @Published var tailnetDiscoveryStatus = TailnetDiscoveryStatus()
+    @Published var tailnetAuthConfigured = false
+    @Published var tailnetCredentialKind: TailscaleCredentialStore.CredentialKind?
 
     // MARK: - Networking / Sessions
 
@@ -69,6 +77,9 @@ final class AppState: ObservableObject {
 
     #if os(iOS)
     let replayKitModel: ReplayKitBroadcastModel
+    let iosPresenceAdvertiser: BonjourAdvertiser
+    @Published var iosPresenceAdvertising: Bool = false
+    @Published var iosPresenceError: String?
     #endif
 
     // MARK: - Trusted Peers
@@ -109,6 +120,10 @@ final class AppState: ObservableObject {
 
         self.bonjourBrowser = BonjourBrowser()
         self.connectionManager = ConnectionManager()
+        let tailnetCredentialKind = TailscaleCredentialStore.configuredKind
+        self.tailnetCredentialKind = tailnetCredentialKind
+        self.tailnetAuthConfigured = tailnetCredentialKind != nil
+        self.tailnetDiscoveryStatus = TailnetDiscoveryStatus(phase: tailnetCredentialKind == nil ? .signedOut : .idle)
 
         #if os(macOS)
         let permissions = MacPermissionsService()
@@ -137,9 +152,16 @@ final class AppState: ObservableObject {
 
         #if os(iOS)
         self.replayKitModel = ReplayKitBroadcastModel()
+        self.iosPresenceAdvertiser = BonjourAdvertiser()
         #endif
 
         bindBrowser()
+
+        #if os(iOS)
+        Task { [weak self] in
+            await self?.startIOSPresenceAdvertising()
+        }
+        #endif
     }
 
     // MARK: - Wiring
@@ -148,7 +170,7 @@ final class AppState: ObservableObject {
         Task { [weak self] in
             guard let self = self else { return }
             for await hosts in await self.bonjourBrowser.hostsStream() {
-                self.discoveredHosts = hosts
+                self.discoveredHosts = hosts.filter { $0.advertisedDeviceID != self.localDeviceID.uuidString }
             }
         }
         Task { [weak self] in
@@ -165,6 +187,55 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: - Tailnet discovery
+
+    func refreshTailnetDevices() async {
+        guard let credentials = TailscaleCredentialStore.loadCredentials() else {
+            tailnetAuthConfigured = false
+            tailnetCredentialKind = nil
+            tailnetDevices = []
+            tailnetDiscoveryStatus = TailnetDiscoveryStatus(phase: .signedOut)
+            return
+        }
+
+        tailnetAuthConfigured = true
+        tailnetCredentialKind = TailscaleCredentialStore.configuredKind
+        tailnetDiscoveryStatus = TailnetDiscoveryStatus(phase: .loading)
+        do {
+            let devices = try await TailnetDeviceProvider.fetchDevices(credentials: credentials)
+            tailnetDevices = devices
+            tailnetDiscoveryStatus = TailnetDiscoveryStatus(phase: .loaded(count: devices.count))
+        } catch {
+            tailnetDiscoveryStatus = TailnetDiscoveryStatus(phase: .failed(error.localizedDescription))
+        }
+    }
+
+    func saveTailscaleAPIToken(_ token: String) async {
+        TailscaleCredentialStore.saveAPIToken(token)
+        tailnetCredentialKind = TailscaleCredentialStore.configuredKind
+        tailnetAuthConfigured = TailscaleCredentialStore.hasCredentials
+        await refreshTailnetDevices()
+    }
+
+    func saveTailscaleOAuthClient(id: String, secret: String) async {
+        TailscaleCredentialStore.saveOAuthClientCredentials(id: id, secret: secret)
+        tailnetCredentialKind = TailscaleCredentialStore.configuredKind
+        tailnetAuthConfigured = TailscaleCredentialStore.hasCredentials
+        await refreshTailnetDevices()
+    }
+
+    func forgetTailscaleAPIToken() {
+        forgetTailscaleCredentials()
+    }
+
+    func forgetTailscaleCredentials() {
+        TailscaleCredentialStore.deleteCredentials()
+        tailnetAuthConfigured = false
+        tailnetCredentialKind = nil
+        tailnetDevices = []
+        tailnetDiscoveryStatus = TailnetDiscoveryStatus(phase: .signedOut)
+    }
+
     // MARK: - Role selection
 
     func selectRole(_ role: DeviceRole) {
@@ -175,6 +246,45 @@ final class AppState: ObservableObject {
     func clearRole() {
         selectedRole = nil
     }
+
+    // MARK: - iOS / iPadOS presence
+
+    #if os(iOS)
+    func startIOSPresenceAdvertising() async {
+        do {
+            try await iosPresenceAdvertiser.start(
+                deviceName: localDeviceName,
+                capabilities: .iosViewOnlyHost,
+                deviceID: localDeviceID,
+                metadata: [
+                    ScreenQProtocol.TXT.platform: localMobilePeerPlatform.rawValue,
+                    ScreenQProtocol.TXT.presence: "iosScreenShare",
+                    ScreenQProtocol.TXT.supportsReplayKit: "true",
+                    ScreenQProtocol.TXT.acceptsScreenQ: "false",
+                    ScreenQProtocol.TXT.status: replayKitModel.isBroadcastingHint ? "broadcasting" : "ready"
+                ]
+            ) { connection in
+                Logger.shared.info("Rejected Screen Q control connection to iOS share-only presence from \(connection.endpoint)")
+                connection.cancel()
+            }
+            iosPresenceAdvertising = true
+            iosPresenceError = nil
+        } catch {
+            iosPresenceAdvertising = false
+            iosPresenceError = error.localizedDescription
+            Logger.shared.error("iOS presence advertising failed: \(error.localizedDescription)")
+        }
+    }
+
+    func stopIOSPresenceAdvertising() async {
+        try? await iosPresenceAdvertiser.stop()
+        iosPresenceAdvertising = false
+    }
+
+    var localMobilePeerPlatform: PeerPlatform {
+        UIDevice.current.userInterfaceIdiom == .pad ? .iPadOS : .iOS
+    }
+    #endif
 
     // MARK: - Trusted peers
 

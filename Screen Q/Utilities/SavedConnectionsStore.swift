@@ -9,6 +9,9 @@
 
 import Foundation
 import Combine
+import CoreGraphics
+import ImageIO
+import UniformTypeIdentifiers
 
 nonisolated enum RemoteConnectionProtocol: String, Codable, Hashable, Sendable, CaseIterable {
     case screenQ
@@ -59,6 +62,8 @@ struct SavedConnection: Codable, Identifiable, Hashable, Sendable {
     var isBookmark: Bool = false
     var lastConnected: Date = Date()
     var peerFingerprint: String?  // optional encryption fingerprint for trust
+    var thumbnailData: Data?
+    var thumbnailUpdatedAt: Date?
 
     var address: String { "\(host):\(port)" }
     var resolvedProtocol: RemoteConnectionProtocol {
@@ -108,6 +113,20 @@ final class SavedConnectionsStore: ObservableObject {
         save()
     }
 
+    func updateThumbnail(host: String, port: UInt16, displayName: String, connectionProtocol: RemoteConnectionProtocol, image: CGImage?) {
+        guard let image,
+              let thumbnailData = Self.makeThumbnailData(from: image) else { return }
+        guard let idx = connections.firstIndex(where: {
+            $0.host == host && $0.port == port && $0.resolvedProtocol == connectionProtocol
+        }) ?? connections.firstIndex(where: { $0.host == host && $0.port == port }) else {
+            return
+        }
+        connections[idx].displayName = displayName
+        connections[idx].thumbnailData = thumbnailData
+        connections[idx].thumbnailUpdatedAt = Date()
+        save()
+    }
+
     func toggleBookmark(_ id: UUID) {
         if let idx = connections.firstIndex(where: { $0.id == id }) {
             connections[idx].isBookmark.toggle()
@@ -138,5 +157,41 @@ final class SavedConnectionsStore: ObservableObject {
     private func save() {
         guard let data = try? JSONEncoder().encode(connections) else { return }
         UserDefaults.standard.set(data, forKey: key)
+    }
+
+    private static func makeThumbnailData(from image: CGImage) -> Data? {
+        let maxDimension: CGFloat = 360
+        let sourceWidth = CGFloat(image.width)
+        let sourceHeight = CGFloat(image.height)
+        guard sourceWidth > 0, sourceHeight > 0 else { return nil }
+        let scale = min(1, maxDimension / max(sourceWidth, sourceHeight))
+        let width = max(1, Int((sourceWidth * scale).rounded()))
+        let height = max(1, Int((sourceHeight * scale).rounded()))
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo.rawValue
+        ) else { return nil }
+        context.interpolationQuality = .medium
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let scaled = context.makeImage() else { return nil }
+
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            data,
+            UTType.jpeg.identifier as CFString,
+            1,
+            nil
+        ) else { return nil }
+        let options: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: 0.72]
+        CGImageDestinationAddImage(destination, scaled, options as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return data as Data
     }
 }

@@ -19,6 +19,7 @@ nonisolated struct BrowserStatus: Sendable, Equatable {
 
     var bonjourHealthy: Bool { rfbCount > 0 || screenQCount > 0 }
     var summary: String {
+        if let browserError { return browserError }
         if !isBrowsing { return "Not searching" }
         if screenQCount > 0 { return "Found \(screenQCount) Screen Q host\(screenQCount == 1 ? "" : "s")" }
         if rfbCount > 0 {
@@ -104,8 +105,9 @@ actor BonjourBrowser {
                 for: .bonjour(type: ScreenQProtocol.rfbServiceType, domain: nil),
                 using: params
             )
-            rfb.stateUpdateHandler = { state in
+            rfb.stateUpdateHandler = { [weak self] state in
                 Logger.shared.debug("RFB browser state: \(String(describing: state))")
+                Task { await self?.handleRFBBrowserState(state) }
             }
             rfb.browseResultsChangedHandler = { [weak self] results, _ in
                 Logger.shared.debug("RFB browse results updated: \(results.count) result(s)")
@@ -200,7 +202,7 @@ actor BonjourBrowser {
     private func handleBrowserState(_ state: NWBrowser.State) {
         switch state {
         case .failed(let err):
-            lastBrowserError = err.localizedDescription
+            lastBrowserError = Self.userFacingBrowserError(err)
             isBrowsing = false
         case .cancelled:
             isBrowsing = false
@@ -210,6 +212,35 @@ actor BonjourBrowser {
             break
         }
         publishStatus()
+    }
+
+    private func handleRFBBrowserState(_ state: NWBrowser.State) {
+        switch state {
+        case .failed(let err):
+            let message = Self.userFacingBrowserError(err)
+            if Self.isLocalNetworkAuthorizationError(err) || lastBrowserError == nil {
+                lastBrowserError = message
+            }
+        case .ready:
+            if lastBrowserError?.contains("Local Network") == true {
+                lastBrowserError = nil
+            }
+        default:
+            break
+        }
+        publishStatus()
+    }
+
+    private nonisolated static func userFacingBrowserError(_ error: NWError) -> String {
+        if isLocalNetworkAuthorizationError(error) {
+            return "Local Network discovery is blocked. Enable Local Network for Screen Q in Settings, and ensure the app bundle declares _screenq._tcp. and _rfb._tcp. Bonjour services."
+        }
+        return error.localizedDescription
+    }
+
+    private nonisolated static func isLocalNetworkAuthorizationError(_ error: NWError) -> Bool {
+        let raw = String(describing: error)
+        return raw.contains("NoAuth") || raw.contains("-65555")
     }
 
     private func publishStatus() {

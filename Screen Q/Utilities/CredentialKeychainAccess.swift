@@ -46,4 +46,32 @@ nonisolated enum CredentialKeychainAccess {
             .lowercased()
         return "\(normalizedHost):\(port)"
     }
+
+    static func endpoint(fromNormalizedAccount account: String) -> (host: String, port: UInt16)? {
+        guard let separator = account.lastIndex(of: ":"),
+              let port = UInt16(account[account.index(after: separator)...]) else {
+            return nil
+        }
+        let host = String(account[..<separator])
+        guard !host.isEmpty else { return nil }
+        return (host, port)
+    }
+
+    static func genericPasswordAccounts(service: String) -> [String] {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll
+        ]
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess,
+              let items = item as? [[String: Any]] else {
+            return []
+        }
+
+        return items.compactMap { $0[kSecAttrAccount as String] as? String }
+    }
 }

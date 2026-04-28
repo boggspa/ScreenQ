@@ -61,6 +61,13 @@ nonisolated enum RDPKeychainCredentialStore {
             addQuery[key] = value
         }
         SecItemAdd(addQuery as CFDictionary, nil)
+        CredentialInventoryStore.upsert(
+            kind: .rdp,
+            host: host,
+            port: port,
+            username: credentials.normalizedUsername,
+            requiresLocalAuthentication: requireLocalAuthentication
+        )
     }
 
     static func delete(host: String, port: UInt16) {
@@ -70,6 +77,23 @@ nonisolated enum RDPKeychainCredentialStore {
             kSecAttrAccount as String: account(host: host, port: port)
         ]
         SecItemDelete(query as CFDictionary)
+        CredentialInventoryStore.remove(kind: .rdp, host: host, port: port)
+    }
+
+    static func knownCredentialMetadata() -> [StoredCredentialMetadata] {
+        CredentialKeychainAccess.genericPasswordAccounts(service: service).compactMap { account in
+            guard let endpoint = CredentialKeychainAccess.endpoint(fromNormalizedAccount: account) else {
+                return nil
+            }
+            return StoredCredentialMetadata(
+                kind: .rdp,
+                host: endpoint.host,
+                port: endpoint.port,
+                username: nil,
+                requiresLocalAuthentication: false,
+                lastUpdated: .distantPast
+            )
+        }
     }
 
     private static func account(host: String, port: UInt16) -> String {

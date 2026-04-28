@@ -14,6 +14,7 @@ import Combine
 
 @MainActor
 final class DisplaySelectionService: ObservableObject {
+    nonisolated static let allDisplaysID: CGDirectDisplayID = 0
 
     struct DisplayInfo: Identifiable, Hashable {
         let id: CGDirectDisplayID
@@ -47,14 +48,72 @@ final class DisplaySelectionService: ObservableObject {
             }
         }
         displays = collected
-        if selectedDisplayID == nil {
-            selectedDisplayID = collected.first?.id
-        }
+        validateSelection()
     }
 
     func selectedDisplay() -> DisplayInfo? {
+        if selectedDisplayID == Self.allDisplaysID {
+            return allDisplaysInfo()
+        }
         guard let selectedDisplayID else { return displays.first }
         return displays.first { $0.id == selectedDisplayID }
+    }
+
+    var isAllDisplaysSelected: Bool {
+        selectedDisplayID == Self.allDisplaysID
+    }
+
+    var canSelectAllDisplays: Bool {
+        displays.count > 1
+    }
+
+    func displayOptions(includeAllDisplays: Bool = true) -> [DisplayInfo] {
+        var options: [DisplayInfo] = []
+        if includeAllDisplays, canSelectAllDisplays, let all = allDisplaysInfo() {
+            options.append(all)
+        }
+        options.append(contentsOf: displays)
+        return options
+    }
+
+    func allDisplaysInfo() -> DisplayInfo? {
+        guard canSelectAllDisplays else { return nil }
+        let pointFrame = Self.appKitDisplayFrameUnion()
+        guard !pointFrame.isNull, !pointFrame.isEmpty else { return nil }
+        let scale = NSScreen.screens.map(\.backingScaleFactor).max() ?? 1.0
+        return DisplayInfo(
+            id: Self.allDisplaysID,
+            name: "All Displays",
+            pixelWidth: Int((pointFrame.width * scale).rounded()),
+            pixelHeight: Int((pointFrame.height * scale).rounded()),
+            pointWidth: Double(pointFrame.width),
+            pointHeight: Double(pointFrame.height),
+            scaleFactor: Double(scale)
+        )
+    }
+
+    func selectedCGBounds() -> CGRect? {
+        if selectedDisplayID == Self.allDisplaysID {
+            return Self.cgDisplayBoundsUnion()
+        }
+        guard let info = selectedDisplay() else { return nil }
+        return CGDisplayBounds(info.id)
+    }
+
+    nonisolated static func cgDisplayBoundsUnion() -> CGRect? {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return nil }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &ids, &count) == .success else { return nil }
+        return ids
+            .map { CGDisplayBounds($0) }
+            .reduce(CGRect.null) { $0.union($1) }
+    }
+
+    nonisolated static func appKitDisplayFrameUnion() -> CGRect {
+        NSScreen.screens
+            .map(\.frame)
+            .reduce(CGRect.null) { $0.union($1) }
     }
 
     /// Async version using SCShareableContent (preferred when stream config
@@ -81,13 +140,25 @@ final class DisplaySelectionService: ObservableObject {
                 collected.append(info)
             }
             self.displays = collected
-            if self.selectedDisplayID == nil {
-                self.selectedDisplayID = collected.first?.id
-            }
+            self.validateSelection()
         } catch {
             Logger.shared.warn("SCShareableContent failed (\(error.localizedDescription)); falling back to NSScreen")
             refreshFromNSScreen()
         }
+    }
+
+    private func validateSelection() {
+        guard !displays.isEmpty else {
+            selectedDisplayID = nil
+            return
+        }
+        if selectedDisplayID == Self.allDisplaysID, canSelectAllDisplays {
+            return
+        }
+        if let selectedDisplayID, displays.contains(where: { $0.id == selectedDisplayID }) {
+            return
+        }
+        selectedDisplayID = displays.first?.id
     }
 }
 #endif

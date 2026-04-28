@@ -15,6 +15,17 @@ import Security
 
 actor RFBConnection {
 
+    nonisolated static let preferredClientEncodings: [RFBEncoding] = [
+        // ZRLE uses a persistent zlib stream across rectangles. Keep it out of
+        // negotiation until the decoder owns connection-lifetime inflate state.
+        .tight,
+        .tightPNG,
+        .hextile,
+        .raw,
+        .copyRect,
+        .desktopSize
+    ]
+
     private let connection: NWConnection
     private var buffer = Data()
     private(set) var isOpen = false
@@ -55,7 +66,7 @@ actor RFBConnection {
         try await sendSetPixelFormat(.xrgb32)
 
         // 6. Set encodings we support
-        try await sendSetEncodings([.zrle, .tight, .tightPNG, .hextile, .raw, .copyRect, .desktopSize])
+        try await sendSetEncodings(Self.preferredClientEncodings)
 
         return serverInit
     }
@@ -301,44 +312,50 @@ actor RFBConnection {
         let md5 = Insecure.MD5.hash(data: sharedSecretData)
         let aesKey = Data(md5)
 
-        // Credential block: [username zero-padded to 64][password zero-padded to 64]
+        // Credential block: [username][password], each null-terminated in a
+        // 64-byte slot. Apple ARD fills unused bytes with random data and uses
+        // AES-128-ECB for this fixed-size block.
         var credentials = Data(count: 128)
-        let uBytes = Data(username.utf8).prefix(63)
-        let pBytes = Data(password.utf8).prefix(63)
+        let randomCredentialStatus = credentials.withUnsafeMutableBytes { ptr in
+            SecRandomCopyBytes(kSecRandomDefault, ptr.count, ptr.baseAddress!)
+        }
+        guard randomCredentialStatus == errSecSuccess else {
+            throw RFBError.authFailed("Unable to generate Apple DH credential padding")
+        }
+        var uBytes = Data(username.utf8.prefix(63))
+        var pBytes = Data(password.utf8.prefix(63))
+        uBytes.append(0)
+        pBytes.append(0)
         credentials.replaceSubrange(0..<uBytes.count, with: uBytes)
         credentials.replaceSubrange(64..<(64 + pBytes.count), with: pBytes)
 
-        // Try AES-128-CBC with zero IV first, then fall back to ECB
-        let iv = Data(count: kCCBlockSizeAES128)
-        let encBufferSize = 128 + kCCBlockSizeAES128
+        // AES-128-ECB with no padding.
+        let encBufferSize = 128
         var encBuffer = Data(count: encBufferSize)
         var encryptedLen = 0
         let status: CCCryptorStatus = aesKey.withUnsafeBytes { keyPtr in
-            iv.withUnsafeBytes { ivPtr in
-                credentials.withUnsafeBytes { inPtr in
-                    encBuffer.withUnsafeMutableBytes { outPtr in
-                        CCCrypt(
-                            CCOperation(kCCEncrypt),
-                            CCAlgorithm(kCCAlgorithmAES),
-                            CCOptions(0), // CBC, no padding
-                            keyPtr.baseAddress, kCCKeySizeAES128,
-                            ivPtr.baseAddress,
-                            inPtr.baseAddress, 128,
-                            outPtr.baseAddress, encBufferSize,
-                            &encryptedLen
-                        )
-                    }
+            credentials.withUnsafeBytes { inPtr in
+                encBuffer.withUnsafeMutableBytes { outPtr in
+                    CCCrypt(
+                        CCOperation(kCCEncrypt),
+                        CCAlgorithm(kCCAlgorithmAES),
+                        CCOptions(kCCOptionECBMode),
+                        keyPtr.baseAddress, kCCKeySizeAES128,
+                        nil,
+                        inPtr.baseAddress, 128,
+                        outPtr.baseAddress, encBufferSize,
+                        &encryptedLen
+                    )
                 }
             }
         }
-        guard status == kCCSuccess else {
+        guard status == kCCSuccess, encryptedLen == 128 else {
             throw RFBError.authFailed("AES encryption failed (\(status))")
         }
-        let encrypted = encBuffer
 
-        // Send: clientPublicKey + encryptedCredentials
+        // Apple ARD expects ciphertext first, then the generated DH public key.
+        try await write(encBuffer)
         try await write(clientPubData)
-        try await write(Data(encrypted.prefix(128)))
 
         Logger.shared.info("Apple DH auth exchange complete (keyLength=\(keyLength))")
     }

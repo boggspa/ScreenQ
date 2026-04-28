@@ -80,6 +80,115 @@ nonisolated final class MacCaptureCrossState: @unchecked Sendable {
     }
 }
 
+@available(macOS 12.3, *)
+private struct AllDisplaysCaptureEntry: Sendable {
+    let displayID: CGDirectDisplayID
+    let frame: CGRect
+    let streamPixelWidth: Int
+}
+
+@available(macOS 12.3, *)
+nonisolated final class AllDisplaysFrameCompositor: @unchecked Sendable {
+    private let entries: [AllDisplaysCaptureEntry]
+    private let unionFrame: CGRect
+    private let targetScale: CGFloat
+    private let displayID: CGDirectDisplayID
+    private let quality: CGFloat
+    private let context = CIContext(options: [.useSoftwareRenderer: false])
+    private let colorspace = CGColorSpaceCreateDeviceRGB()
+    private let lock = NSLock()
+    private var latestFrames: [CGDirectDisplayID: CIImage] = [:]
+
+    let outputWidth: Int
+    let outputHeight: Int
+
+    fileprivate init(entries: [AllDisplaysCaptureEntry], quality: CGFloat, displayID: CGDirectDisplayID) {
+        self.entries = entries
+        self.quality = max(0.1, min(1.0, quality))
+        self.displayID = displayID
+        self.unionFrame = entries.map(\.frame).reduce(CGRect.null) { $0.union($1) }
+        self.targetScale = entries
+            .map { CGFloat($0.streamPixelWidth) / max(1, $0.frame.width) }
+            .max() ?? 1
+        self.outputWidth = max(160, Int((unionFrame.width * targetScale).rounded(.up)))
+        self.outputHeight = max(120, Int((unionFrame.height * targetScale).rounded(.up)))
+    }
+
+    func ingest(_ sampleBuffer: CMSampleBuffer, displayID: CGDirectDisplayID) {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let image = CIImage(cvPixelBuffer: pixelBuffer)
+        lock.lock()
+        latestFrames[displayID] = image
+        lock.unlock()
+    }
+
+    func makeFrame(sequence: UInt64) -> (VideoFrameMeta, Data)? {
+        lock.lock()
+        let frames = latestFrames
+        lock.unlock()
+        guard !frames.isEmpty else { return nil }
+
+        let targetRect = CGRect(x: 0, y: 0, width: outputWidth, height: outputHeight)
+        var composite = CIImage(color: .black).cropped(to: targetRect)
+
+        for entry in entries {
+            guard let source = frames[entry.displayID] else { continue }
+            let destinationWidth = entry.frame.width * targetScale
+            let destinationHeight = entry.frame.height * targetScale
+            let scaleX = destinationWidth / max(1, source.extent.width)
+            let scaleY = destinationHeight / max(1, source.extent.height)
+            let x = (entry.frame.minX - unionFrame.minX) * targetScale
+            let yFromTop = (entry.frame.minY - unionFrame.minY) * targetScale
+            let y = CGFloat(outputHeight) - yFromTop - destinationHeight
+            let placed = source
+                .transformed(by: CGAffineTransform(translationX: -source.extent.minX, y: -source.extent.minY))
+                .transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+                .transformed(by: CGAffineTransform(translationX: x, y: y))
+            composite = placed.composited(over: composite)
+        }
+
+        let options = [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: quality]
+        guard let data = context.jpegRepresentation(of: composite.cropped(to: targetRect), colorSpace: colorspace, options: options) else {
+            return nil
+        }
+        let meta = VideoFrameMeta(
+            sequence: sequence,
+            captureTimestamp: CACurrentMediaTime(),
+            pixelWidth: outputWidth,
+            pixelHeight: outputHeight,
+            displayID: displayID,
+            encoding: .jpeg,
+            isKeyFrame: true,
+            payloadSize: data.count
+        )
+        return (meta, data)
+    }
+}
+
+@available(macOS 12.3, *)
+nonisolated final class AllDisplaysSCStreamOutput: NSObject, SCStreamOutput {
+    private let displayID: CGDirectDisplayID
+    private let onFrame: @Sendable (CGDirectDisplayID, CMSampleBuffer) -> Void
+
+    init(displayID: CGDirectDisplayID, onFrame: @escaping @Sendable (CGDirectDisplayID, CMSampleBuffer) -> Void) {
+        self.displayID = displayID
+        self.onFrame = onFrame
+    }
+
+    nonisolated func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen else { return }
+        guard sampleBuffer.isValid else { return }
+        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
+           let attach = attachments.first,
+           let statusRaw = attach[SCStreamFrameInfo.status] as? Int,
+           let status = SCFrameStatus(rawValue: statusRaw),
+           status != .complete {
+            return
+        }
+        onFrame(displayID, sampleBuffer)
+    }
+}
+
 @MainActor
 @available(macOS 12.3, *)
 final class MacScreenCaptureService: NSObject, ObservableObject {
@@ -95,6 +204,9 @@ final class MacScreenCaptureService: NSObject, ObservableObject {
     nonisolated let xstate = MacCaptureCrossState()
 
     private var stream: SCStream?
+    private var allDisplayStreams: [SCStream] = []
+    private var allDisplayOutputs: [AllDisplaysSCStreamOutput] = []
+    private var allDisplayCompositeTimer: DispatchSourceTimer?
     private var activeFormat: VideoFormat?
 
     init(displaySelection: DisplaySelectionService, permissions: MacPermissionsService) {
@@ -123,6 +235,15 @@ final class MacScreenCaptureService: NSObject, ObservableObject {
                 domain: "ScreenQ.Capture", code: 1,
                 userInfo: [NSLocalizedDescriptionKey: "Screen Recording permission required"]
             )
+        }
+
+        if displaySelection.isAllDisplaysSelected {
+            try await startAllDisplaysCapture(
+                subscriberID: subscriberID,
+                onFormat: onFormat,
+                onFrame: onFrame
+            )
+            return
         }
 
         guard let display = await chooseSCDisplay() else {
@@ -215,6 +336,18 @@ final class MacScreenCaptureService: NSObject, ObservableObject {
     }
 
     func stop() async {
+        allDisplayCompositeTimer?.cancel()
+        allDisplayCompositeTimer = nil
+        for stream in allDisplayStreams {
+            do {
+                try await stream.stopCapture()
+            } catch {
+                Logger.shared.warn("stopCapture all-displays error: \(error.localizedDescription)")
+            }
+        }
+        allDisplayStreams.removeAll()
+        allDisplayOutputs.removeAll()
+
         if let stream {
             do {
                 try await stream.stopCapture()
@@ -228,6 +361,118 @@ final class MacScreenCaptureService: NSObject, ObservableObject {
         xstate.encoder.reset()
         isCapturing = false
         Logger.shared.info("ScreenCaptureKit stopped")
+    }
+
+    private func startAllDisplaysCapture(
+        subscriberID: UUID,
+        onFormat: @escaping (VideoFormat) async -> Void,
+        onFrame: @escaping @Sendable (VideoFrameMeta, Data) -> Void
+    ) async throws {
+        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+        let displays = content.displays
+        guard displays.count > 1 else {
+            throw NSError(
+                domain: "ScreenQ.Capture", code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "All Displays requires more than one shareable display"]
+            )
+        }
+
+        let bundleID = Bundle.main.bundleIdentifier ?? ""
+        let excludedApps = content.applications.filter { $0.bundleIdentifier == bundleID }
+        let scale = max(0.25, min(1.0, settings.scale))
+        let fps = max(1, settings.fps)
+        let allDisplaysID = DisplaySelectionService.allDisplaysID
+
+        let entries = displays.map { display in
+            AllDisplaysCaptureEntry(
+                displayID: display.displayID,
+                frame: display.frame,
+                streamPixelWidth: max(160, Int(Double(display.width) * scale))
+            )
+        }
+        let compositor = AllDisplaysFrameCompositor(
+            entries: entries,
+            quality: settings.jpegQuality,
+            displayID: allDisplaysID
+        )
+
+        var streams: [SCStream] = []
+        var outputs: [AllDisplaysSCStreamOutput] = []
+        for display in displays {
+            let filter = SCContentFilter(display: display, excludingApplications: excludedApps, exceptingWindows: [])
+            let config = SCStreamConfiguration()
+            config.width = max(160, Int(Double(display.width) * scale))
+            config.height = max(120, Int(Double(display.height) * scale))
+            config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+            config.queueDepth = 2
+            config.showsCursor = settings.showCursor
+            config.pixelFormat = kCVPixelFormatType_32BGRA
+            if #available(macOS 13.0, *) {
+                config.capturesAudio = false
+            }
+
+            let output = AllDisplaysSCStreamOutput(displayID: display.displayID) { displayID, sampleBuffer in
+                compositor.ingest(sampleBuffer, displayID: displayID)
+            }
+            let stream = SCStream(filter: filter, configuration: config, delegate: self)
+            try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: outputQueue)
+            streams.append(stream)
+            outputs.append(output)
+        }
+
+        do {
+            for stream in streams {
+                try await stream.startCapture()
+            }
+        } catch {
+            for stream in streams {
+                try? await stream.stopCapture()
+            }
+            throw error
+        }
+
+        let jpeg = JPEGFrameEncoder()
+        jpeg.setQuality(settings.jpegQuality)
+        xstate.encoder = jpeg
+        xstate.removeAllFrameSinks()
+        xstate.displayID = allDisplaysID
+        xstate.encoder.reset()
+        xstate.sequence = 0
+
+        let format = VideoFormat(
+            pixelWidth: compositor.outputWidth,
+            pixelHeight: compositor.outputHeight,
+            pointWidth: Double(compositor.outputWidth),
+            pointHeight: Double(compositor.outputHeight),
+            displayID: allDisplaysID,
+            scaleFactor: 1.0,
+            encoding: .jpeg,
+            targetFPS: fps
+        )
+
+        let timer = DispatchSource.makeTimerSource(queue: outputQueue)
+        timer.schedule(
+            deadline: .now() + .milliseconds(Int(1000 / fps)),
+            repeating: .milliseconds(Int(1000 / fps)),
+            leeway: .milliseconds(4)
+        )
+        timer.setEventHandler { [xstate, compositor] in
+            xstate.sequence &+= 1
+            let sequence = xstate.sequence
+            guard let result = compositor.makeFrame(sequence: sequence) else { return }
+            xstate.emitFrame(result.0, result.1)
+        }
+
+        allDisplayStreams = streams
+        allDisplayOutputs = outputs
+        allDisplayCompositeTimer = timer
+        isCapturing = true
+        activeFormat = format
+
+        await onFormat(format)
+        xstate.addFrameSink(id: subscriberID, onFrame)
+        timer.resume()
+        Logger.shared.info("ScreenCaptureKit all-displays started: \(format.pixelWidth)x\(format.pixelHeight) @ \(fps)fps")
     }
 
     private func chooseSCDisplay() async -> SCDisplay? {

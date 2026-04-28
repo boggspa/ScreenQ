@@ -24,8 +24,8 @@ struct VNCInputView: NSViewRepresentable {
     func updateNSView(_ nsView: VNCCanvasNSView, context: Context) {
         nsView.session = session
         nsView.image = session.currentImage
-        nsView.serverWidth = session.serverWidth
-        nsView.serverHeight = session.serverHeight
+        nsView.serverWidth = session.viewWidth
+        nsView.serverHeight = session.viewHeight
         nsView.needsDisplay = true
     }
 }

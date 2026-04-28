@@ -28,7 +28,11 @@ final class CursorTracker {
         if timer == nil || self.displayID != displayID {
             stop()
             self.displayID = displayID
-            self.displayFrame = appKitFrame(for: displayID) ?? CGDisplayBounds(displayID)
+            if displayID == DisplaySelectionService.allDisplaysID {
+                self.displayFrame = DisplaySelectionService.appKitDisplayFrameUnion()
+            } else {
+                self.displayFrame = appKitFrame(for: displayID) ?? CGDisplayBounds(displayID)
+            }
             lastPoint = .zero
             lastCursorType = "arrow"
             lastCursorImageBase64 = nil

@@ -7,6 +7,7 @@
 //
 
 import SwiftUI
+import Combine
 
 #if os(iOS)
 import UIKit
@@ -31,7 +32,7 @@ struct RDPViewerView: View {
     @State private var lastCanvasSize: CGSize = .zero
 
     #if os(iOS)
-    @StateObject private var controlPreferences = ViewerControlPreferences()
+    @StateObject private var controlPreferences: ViewerControlPreferences
     @StateObject private var modifierLatch = ModifierLatchController()
     @State private var touchMode: TouchMode = .directTouch
     @State private var isKeyboardActive = false
@@ -44,6 +45,13 @@ struct RDPViewerView: View {
         self.session = session
         self._stats = ObservedObject(wrappedValue: session.stats)
         self.onDisconnect = onDisconnect
+        #if os(iOS)
+        self._controlPreferences = StateObject(wrappedValue: ViewerControlPreferences(scope: ViewerControlPreferenceScope(
+            connectionProtocol: .rdp,
+            host: session.profile.host,
+            port: session.profile.port
+        )))
+        #endif
     }
 
     var body: some View {
@@ -148,6 +156,15 @@ struct RDPViewerView: View {
         }
         .onChange(of: session.phase) { newPhase in
             syncCredentialFields(from: newPhase)
+        }
+        .onReceive(session.$currentImage.compactMap { $0 }.throttle(for: .seconds(5), scheduler: RunLoop.main, latest: true)) { image in
+            app.savedConnections.updateThumbnail(
+                host: session.profile.host,
+                port: session.profile.port,
+                displayName: session.profile.displayName,
+                connectionProtocol: .rdp,
+                image: image
+            )
         }
     }
 
@@ -312,6 +329,10 @@ struct RDPViewerView: View {
                             dragFeedback = feedback
                         }
                     )
+                    PredictedCursorOverlayView(
+                        inputMapper: session.inputMapper,
+                        canvasGeometry: canvasGeometry(size: proxy.size)
+                    )
                     #else
                     rdpInputOverlay(canvasSize: proxy.size)
                     #endif
@@ -446,6 +467,7 @@ struct RDPViewerView: View {
     private func updateCanvas(size: CGSize, viewport: ViewportTransform) {
         lastCanvasSize = size
         session.updateCanvas(size: size, fit: session.fitMode, viewport: viewport)
+        session.inputMapper.ensurePredictedPointerVisible()
     }
 
     private func canvasGeometry(size: CGSize, viewport: ViewportTransform? = nil) -> CanvasGeometry {
@@ -482,6 +504,7 @@ struct RDPViewerView: View {
         session.inputMapper.consumeMomentaryModifiers = { [modifierLatch] in
             modifierLatch.clearMomentaryModifiers()
         }
+        session.inputMapper.keepsPredictedPointerVisible = true
         #endif
     }
 
@@ -873,58 +896,74 @@ private struct RDPIOSControlSurface: View {
             Group {
                 if isCollapsed && isPad {
                     stack(vertical: vertical) {
-                        statusPill
-                        iconButton(systemName: "chevron.up.chevron.down", label: "Expand controls") {
-                            isCollapsed = false
+                        toolbarSection(vertical: vertical) {
+                            statusPill
+                            iconButton(systemName: "chevron.up.chevron.down", label: "Expand controls") {
+                                isCollapsed = false
+                            }
                         }
-                        keyboardButton
-                        touchModeMenu
-                        actionMenu
+                        toolbarSection(vertical: vertical) {
+                            keyboardButton
+                            touchModeMenu
+                        }
+                        toolbarSection(vertical: vertical) {
+                            actionMenu
+                        }
                     }
                 } else {
                     stack(vertical: vertical) {
-                        statusPill
-                        iconButton(systemName: "minus", label: isPad ? "Collapse controls" : "Hide controls") {
-                            if isPad {
-                                isCollapsed = true
-                            } else {
-                                controlsVisible = false
+                        toolbarSection(vertical: vertical) {
+                            statusPill
+                            iconButton(systemName: "minus", label: isPad ? "Collapse controls" : "Hide controls") {
+                                if isPad {
+                                    isCollapsed = true
+                                } else {
+                                    controlsVisible = false
+                                }
                             }
                         }
-                        keyboardButton
-                        touchModeMenu
-                        iconButton(
-                            systemName: fitMode ? "rectangle.arrowtriangle.2.outward" : "rectangle.arrowtriangle.2.inward",
-                            label: fitMode ? "Fill screen" : "Fit to screen"
-                        ) {
-                            fitMode.toggle()
-                            preferences.fitMode = fitMode
+                        toolbarSection(vertical: vertical) {
+                            touchModeMenu
                         }
-                        if !viewport.isIdentity {
-                            iconButton(systemName: "minus.magnifyingglass", label: "Reset zoom") {
-                                resetViewport()
+                        toolbarSection(vertical: vertical) {
+                            iconButton(
+                                systemName: fitMode ? "rectangle.arrowtriangle.2.outward" : "rectangle.arrowtriangle.2.inward",
+                                label: fitMode ? "Fill screen" : "Fit to screen"
+                            ) {
+                                fitMode.toggle()
+                                preferences.fitMode = fitMode
+                            }
+                            if !viewport.isIdentity {
+                                iconButton(systemName: "minus.magnifyingglass", label: "Reset zoom") {
+                                    resetViewport()
+                                }
                             }
                         }
-                        modifierButtons(vertical: vertical)
-                        arrowsMenu
-                        specialKeysMenu
-                        functionKeysMenu
-                        shortcutsMenu
-                        actionMenu
-                        iconButton(systemName: "xmark.circle", label: "Disconnect", tint: .red) {
-                            onDisconnect()
+                        toolbarSection(vertical: vertical) {
+                            keyboardButton
+                            modifierButtons(vertical: vertical)
+                            arrowsMenu
+                            specialKeysMenu
+                            functionKeysMenu
+                            shortcutsMenu
+                            actionMenu
+                        }
+                        toolbarSection(vertical: vertical, prominent: true) {
+                            iconButton(systemName: "xmark.circle", label: "Disconnect", tint: .red) {
+                                onDisconnect()
+                            }
                         }
                     }
                 }
             }
-            .padding(8)
+            .padding(7)
         }
         .frame(
-            maxWidth: vertical ? 58 : min(UIScreen.main.bounds.width - 20, 760),
-            maxHeight: vertical ? min(UIScreen.main.bounds.height - 20, 620) : 58
+            maxWidth: vertical ? 68 : min(UIScreen.main.bounds.width - 20, isPad ? 900 : 760),
+            maxHeight: vertical ? min(UIScreen.main.bounds.height - 20, 660) : 66
         )
         .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .shadow(color: .black.opacity(0.25), radius: 14, x: 0, y: 6)
         .accessibilityElement(children: .contain)
     }
@@ -1111,10 +1150,23 @@ private struct RDPIOSControlSurface: View {
     @ViewBuilder
     private func stack<Content: View>(vertical: Bool, @ViewBuilder content: () -> Content) -> some View {
         if vertical {
-            VStack(spacing: 8, content: content)
+            VStack(spacing: 7, content: content)
         } else {
-            HStack(spacing: 8, content: content)
+            HStack(spacing: 7, content: content)
         }
+    }
+
+    private func toolbarSection<Content: View>(
+        vertical: Bool,
+        prominent: Bool = false,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        stack(vertical: vertical, content: content)
+            .padding(3)
+            .background(
+                prominent ? Color.red.opacity(0.14) : Color.primary.opacity(0.08),
+                in: RoundedRectangle(cornerRadius: vertical ? 22 : 24, style: .continuous)
+            )
     }
 
     private func send(_ key: KeyCode, modifiers explicitModifiers: KeyModifiers = []) {

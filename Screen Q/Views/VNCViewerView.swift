@@ -13,11 +13,13 @@ import UIKit
 #endif
 
 struct VNCViewerView: View {
+    @EnvironmentObject private var app: AppState
     @ObservedObject var session: VNCSession
     var onDisconnect: () -> Void
     #if os(iOS)
     @StateObject private var iosInputState = VNCIOSInputState()
     @State private var isKeyboardActive = false
+    @State private var viewportNavigationMode = true
     #endif
 
     var body: some View {
@@ -31,10 +33,8 @@ struct VNCViewerView: View {
                     inputState: iosInputState,
                     securityStatus: session.securityStatus,
                     isKeyboardActive: $isKeyboardActive,
-                    onDisconnect: {
-                        Task { await session.disconnect() }
-                        onDisconnect()
-                    }
+                    viewportNavigationMode: $viewportNavigationMode,
+                    onDisconnect: disconnectAndExit
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 .padding(.horizontal, 10)
@@ -59,10 +59,7 @@ struct VNCViewerView: View {
                 VNCConnectionSecurityMenu(status: session.securityStatus)
             }
             ToolbarItem(placement: .automatic) {
-                Button("Disconnect") {
-                    Task { await session.disconnect() }
-                    onDisconnect()
-                }
+                Button("Disconnect", action: disconnectAndExit)
                 .foregroundColor(.red)
             }
         }
@@ -74,7 +71,7 @@ struct VNCViewerView: View {
                 rememberCredentials: $session.rememberCredentials,
                 requireLocalAuthenticationForSavedCredentials: $session.requireLocalAuthenticationForSavedCredentials,
                 onConnect: { Task { await session.retryWithPassword() } },
-                onCancel: onDisconnect
+                onCancel: disconnectAndExit
             )
         }
         .sheet(isPresented: $session.needsCredentials) {
@@ -84,7 +81,21 @@ struct VNCViewerView: View {
                 rememberCredentials: $session.rememberCredentials,
                 requireLocalAuthenticationForSavedCredentials: $session.requireLocalAuthenticationForSavedCredentials,
                 onConnect: { Task { await session.retryWithCredentials() } },
-                onCancel: onDisconnect
+                onCancel: disconnectAndExit
+            )
+        }
+        #if os(iOS)
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+            Task { await session.handleMemoryPressure() }
+        }
+        #endif
+        .onReceive(session.$currentImage.compactMap { $0 }.throttle(for: .seconds(5), scheduler: RunLoop.main, latest: true)) { image in
+            app.savedConnections.updateThumbnail(
+                host: session.savedConnectionHost,
+                port: session.savedConnectionPort,
+                displayName: session.peerLabel,
+                connectionProtocol: session.savedConnectionProtocol,
+                image: image
             )
         }
     }
@@ -98,6 +109,9 @@ struct VNCViewerView: View {
                 Text("Connecting to \(session.peerLabel)…")
                     .foregroundColor(.secondary)
                 VNCConnectionSecurityBadge(status: session.securityStatus)
+                Button("Cancel", action: disconnectAndExit)
+                    .buttonStyle(.bordered)
+                    .foregroundColor(.red)
             }
 
         case .authenticating:
@@ -107,6 +121,9 @@ struct VNCViewerView: View {
                 Text("Authenticating…")
                     .foregroundColor(.secondary)
                 VNCConnectionSecurityBadge(status: session.securityStatus)
+                Button("Cancel", action: disconnectAndExit)
+                    .buttonStyle(.bordered)
+                    .foregroundColor(.red)
             }
 
         case .connected:
@@ -150,28 +167,37 @@ struct VNCViewerView: View {
         #else
         if let image = session.currentImage {
             GeometryReader { geo in
-                let imgW = CGFloat(session.serverWidth)
-                let imgH = CGFloat(session.serverHeight)
-                let scale = min(geo.size.width / imgW, geo.size.height / imgH, 1.0)
-                let displayW = imgW * scale
-                let displayH = imgH * scale
-                let offsetX = (geo.size.width - displayW) / 2
-                let offsetY = (geo.size.height - displayH) / 2
+                ZStack {
+                    let imgW = CGFloat(session.viewWidth)
+                    let imgH = CGFloat(session.viewHeight)
+                    let scale = min(geo.size.width / imgW, geo.size.height / imgH, 1.0)
+                    let displayW = imgW * scale
+                    let displayH = imgH * scale
+                    let offsetX = (geo.size.width - displayW) / 2
+                    let offsetY = (geo.size.height - displayH) / 2
 
-                Image(decorative: image, scale: 1.0)
-                    .resizable()
-                    .interpolation(.high)
+                    Image(decorative: image, scale: 1.0)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: displayW, height: displayH)
+                        .position(x: offsetX + displayW / 2, y: offsetY + displayH / 2)
+
+                    VNCIOSTouchInputOverlay(
+                        session: session,
+                        inputState: iosInputState,
+                        serverSize: CGSize(width: imgW, height: imgH),
+                        displayScale: scale,
+                        viewportNavigationMode: viewportNavigationMode
+                    )
                     .frame(width: displayW, height: displayH)
                     .position(x: offsetX + displayW / 2, y: offsetY + displayH / 2)
-
-                VNCIOSTouchInputOverlay(
-                    session: session,
-                    inputState: iosInputState,
-                    serverSize: CGSize(width: imgW, height: imgH),
-                    displayScale: scale
-                )
-                .frame(width: displayW, height: displayH)
-                .position(x: offsetX + displayW / 2, y: offsetY + displayH / 2)
+                }
+                .onAppear {
+                    Task { await session.updateViewportCanvasSize(geo.size) }
+                }
+                .onChange(of: geo.size) { _, newSize in
+                    Task { await session.updateViewportCanvasSize(newSize) }
+                }
             }
         } else {
             ProgressView("Waiting for framebuffer…")
@@ -183,7 +209,14 @@ struct VNCViewerView: View {
         switch session.phase {
         case .connecting: return "Connecting…"
         case .authenticating: return "Authenticating…"
-        case .connected: return "\(session.serverWidth)×\(session.serverHeight) — \(session.profile.displayName)"
+        case .connected:
+            if let summary = session.streamViewportSummary {
+                return "Viewport \(summary) — \(session.profile.displayName)"
+            }
+            if let region = session.selectedDisplayRegion, !region.isFullDesktop {
+                return "\(region.name) \(region.detail) — \(session.profile.displayName)"
+            }
+            return "\(session.serverWidth)×\(session.serverHeight) — \(session.profile.displayName)"
         case .failed: return "Failed"
         case .ended: return "Ended"
         }
@@ -198,6 +231,13 @@ struct VNCViewerView: View {
             return "The Mac did not accept or offer macOS account authentication. Enter the separate VNC password from Screen Sharing settings; do not reuse an admin password."
         }
         return "Enter the VNC password configured on the remote host."
+    }
+
+    private func disconnectAndExit() {
+        Task {
+            await session.disconnect()
+            onDisconnect()
+        }
     }
 }
 
@@ -290,9 +330,16 @@ private struct VNCIOSTouchInputOverlay: UIViewRepresentable {
     @ObservedObject var inputState: VNCIOSInputState
     let serverSize: CGSize
     let displayScale: CGFloat
+    let viewportNavigationMode: Bool
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(session: session, inputState: inputState, serverSize: serverSize, displayScale: displayScale)
+        Coordinator(
+            session: session,
+            inputState: inputState,
+            serverSize: serverSize,
+            displayScale: displayScale,
+            viewportNavigationMode: viewportNavigationMode
+        )
     }
 
     func makeUIView(context: Context) -> TouchInputView {
@@ -344,9 +391,14 @@ private struct VNCIOSTouchInputOverlay: UIViewRepresentable {
         scroll.delegate = context.coordinator
         view.addGestureRecognizer(scroll)
 
+        let pinch = UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePinch(_:)))
+        pinch.delegate = context.coordinator
+        view.addGestureRecognizer(pinch)
+
         context.coordinator.dragRecognizer = drag
         context.coordinator.longPressRecognizer = longPress
         context.coordinator.scrollRecognizer = scroll
+        context.coordinator.pinchRecognizer = pinch
         return view
     }
 
@@ -355,6 +407,7 @@ private struct VNCIOSTouchInputOverlay: UIViewRepresentable {
         context.coordinator.inputState = inputState
         context.coordinator.serverSize = serverSize
         context.coordinator.displayScale = displayScale
+        context.coordinator.viewportNavigationMode = viewportNavigationMode
     }
 
     final class TouchInputView: UIView {
@@ -368,18 +421,35 @@ private struct VNCIOSTouchInputOverlay: UIViewRepresentable {
         var inputState: VNCIOSInputState
         var serverSize: CGSize
         var displayScale: CGFloat
+        var viewportNavigationMode: Bool
         weak var dragRecognizer: UIPanGestureRecognizer?
         weak var longPressRecognizer: UILongPressGestureRecognizer?
         weak var scrollRecognizer: UIPanGestureRecognizer?
+        weak var pinchRecognizer: UIPinchGestureRecognizer?
         private var scrollRemainder: CGFloat = 0
         private var isDragging = false
+        private var isPinchingViewport = false
+        private var previousPinchScale: CGFloat = 1
+        private var pendingViewportPan = CGSize.zero
+        private var pendingPinchMagnification: CGFloat = 1
+        private var lastViewportPanCommit = Date.distantPast
+        private var lastViewportZoomCommit = Date.distantPast
         private let scrollStep: CGFloat = 18
+        private let viewportPanStep: CGFloat = 40
+        private let viewportGestureInterval: TimeInterval = 0.08
 
-        init(session: VNCSession, inputState: VNCIOSInputState, serverSize: CGSize, displayScale: CGFloat) {
+        init(
+            session: VNCSession,
+            inputState: VNCIOSInputState,
+            serverSize: CGSize,
+            displayScale: CGFloat,
+            viewportNavigationMode: Bool
+        ) {
             self.session = session
             self.inputState = inputState
             self.serverSize = serverSize
             self.displayScale = displayScale
+            self.viewportNavigationMode = viewportNavigationMode
         }
 
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
@@ -452,8 +522,21 @@ private struct VNCIOSTouchInputOverlay: UIViewRepresentable {
             switch recognizer.state {
             case .began:
                 scrollRemainder = 0
+                pendingViewportPan = .zero
+                lastViewportPanCommit = .distantPast
             case .changed:
                 let translation = recognizer.translation(in: view)
+                if viewportNavigationMode || isPinchingViewport {
+                    pendingViewportPan.width += translation.x / max(displayScale, 0.001)
+                    pendingViewportPan.height += translation.y / max(displayScale, 0.001)
+                    recognizer.setTranslation(.zero, in: view)
+                    guard shouldFlushViewportPan else {
+                        return
+                    }
+                    flushPendingViewportPan()
+                    return
+                }
+
                 scrollRemainder += translation.y
                 recognizer.setTranslation(.zero, in: view)
 
@@ -462,7 +545,37 @@ private struct VNCIOSTouchInputOverlay: UIViewRepresentable {
                     scrollRemainder += scrollRemainder > 0 ? -scrollStep : scrollStep
                 }
             case .ended, .cancelled, .failed:
+                if viewportNavigationMode || isPinchingViewport {
+                    flushPendingViewportPan(force: true)
+                }
                 scrollRemainder = 0
+                pendingViewportPan = .zero
+            default:
+                break
+            }
+        }
+
+        @objc func handlePinch(_ recognizer: UIPinchGestureRecognizer) {
+            guard let view = recognizer.view else { return }
+            let anchor = remotePoint(from: recognizer.location(in: view))
+            switch recognizer.state {
+            case .began:
+                isPinchingViewport = true
+                previousPinchScale = recognizer.scale
+                pendingPinchMagnification = 1
+                lastViewportZoomCommit = .distantPast
+            case .changed:
+                let delta = recognizer.scale / max(previousPinchScale, 0.001)
+                previousPinchScale = recognizer.scale
+                guard delta.isFinite, abs(delta - 1) > 0.01 else { return }
+                pendingPinchMagnification *= delta
+                guard shouldFlushViewportZoom else { return }
+                flushPendingViewportZoom(anchor: anchor)
+            case .ended, .cancelled, .failed:
+                flushPendingViewportZoom(anchor: anchor, force: true)
+                isPinchingViewport = false
+                previousPinchScale = 1
+                pendingPinchMagnification = 1
             default:
                 break
             }
@@ -470,7 +583,9 @@ private struct VNCIOSTouchInputOverlay: UIViewRepresentable {
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
             (gestureRecognizer === dragRecognizer && otherGestureRecognizer === longPressRecognizer) ||
-            (gestureRecognizer === longPressRecognizer && otherGestureRecognizer === dragRecognizer)
+            (gestureRecognizer === longPressRecognizer && otherGestureRecognizer === dragRecognizer) ||
+            (gestureRecognizer === scrollRecognizer && otherGestureRecognizer === pinchRecognizer) ||
+            (gestureRecognizer === pinchRecognizer && otherGestureRecognizer === scrollRecognizer)
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRequireFailureOf otherGestureRecognizer: UIGestureRecognizer) -> Bool {
@@ -479,6 +594,52 @@ private struct VNCIOSTouchInputOverlay: UIViewRepresentable {
 
         private func sendClick(at point: (x: Int, y: Int), button: Int) {
             inputState.sendMouseClick(session: session, x: point.x, y: point.y, button: button)
+        }
+
+        private var shouldFlushViewportPan: Bool {
+            guard abs(pendingViewportPan.width) >= viewportPanStep ||
+                    abs(pendingViewportPan.height) >= viewportPanStep else {
+                return false
+            }
+            return Date().timeIntervalSince(lastViewportPanCommit) >= viewportGestureInterval
+        }
+
+        private var shouldFlushViewportZoom: Bool {
+            guard pendingPinchMagnification.isFinite,
+                  abs(pendingPinchMagnification - 1) > 0.035 else {
+                return false
+            }
+            return Date().timeIntervalSince(lastViewportZoomCommit) >= viewportGestureInterval
+        }
+
+        private func flushPendingViewportPan(force: Bool = false) {
+            guard force || shouldFlushViewportPan else { return }
+            let dx = Int(pendingViewportPan.width.rounded())
+            let dy = Int(pendingViewportPan.height.rounded())
+            pendingViewportPan = .zero
+            guard dx != 0 || dy != 0 else { return }
+            lastViewportPanCommit = Date()
+            Task { @MainActor in
+                await self.session?.panStreamViewport(deltaViewX: dx, deltaViewY: dy)
+            }
+        }
+
+        private func flushPendingViewportZoom(anchor: (x: Int, y: Int), force: Bool = false) {
+            guard pendingPinchMagnification.isFinite,
+                  force || shouldFlushViewportZoom else {
+                return
+            }
+            let magnification = pendingPinchMagnification
+            pendingPinchMagnification = 1
+            guard abs(magnification - 1) > 0.01 else { return }
+            lastViewportZoomCommit = Date()
+            Task { @MainActor in
+                await self.session?.zoomStreamViewport(
+                    magnification: magnification,
+                    anchorViewX: anchor.x,
+                    anchorViewY: anchor.y
+                )
+            }
         }
 
         private func remotePoint(from localPoint: CGPoint) -> (x: Int, y: Int) {
@@ -513,6 +674,7 @@ private enum VNCKeySym {
     static let shiftLeft: UInt32 = 0xFFE1
     static let controlLeft: UInt32 = 0xFFE3
     static let altLeft: UInt32 = 0xFFE9
+    static let commandLeft: UInt32 = 0xFFE7
     static let superLeft: UInt32 = 0xFFEB
 
     static func function(_ index: Int) -> UInt32 {
@@ -537,6 +699,13 @@ private enum VNCIOSModifier: CaseIterable, Identifiable {
         }
     }
 
+    func label(profile: RFBConnectionProfile) -> String {
+        if self == .windows, profile == .macScreenSharing {
+            return "Command"
+        }
+        return label
+    }
+
     var symbol: String {
         switch self {
         case .shift: return "S"
@@ -546,6 +715,13 @@ private enum VNCIOSModifier: CaseIterable, Identifiable {
         }
     }
 
+    func symbol(profile: RFBConnectionProfile) -> String {
+        if self == .windows, profile == .macScreenSharing {
+            return "Cmd"
+        }
+        return symbol
+    }
+
     var keysym: UInt32 {
         switch self {
         case .shift: return VNCKeySym.shiftLeft
@@ -553,6 +729,13 @@ private enum VNCIOSModifier: CaseIterable, Identifiable {
         case .alt: return VNCKeySym.altLeft
         case .windows: return VNCKeySym.superLeft
         }
+    }
+
+    func keysym(profile: RFBConnectionProfile) -> UInt32 {
+        if self == .windows, profile == .macScreenSharing {
+            return VNCKeySym.commandLeft
+        }
+        return keysym
     }
 }
 
@@ -590,7 +773,7 @@ private final class VNCIOSInputState: ObservableObject {
     }
 
     func sendKey(_ key: UInt32, session: VNCSession?, explicitModifiers: [UInt32] = []) {
-        let modifiers = mergedModifiers(explicitModifiers)
+        let modifiers = mergedModifiers(explicitModifiers, profile: session?.profile ?? .genericVNC)
         if modifiers.isEmpty {
             session?.sendKeyTap(code: key)
         } else {
@@ -605,10 +788,10 @@ private final class VNCIOSInputState: ObservableObject {
         clearMomentary()
     }
 
-    private func mergedModifiers(_ explicit: [UInt32]) -> [UInt32] {
+    private func mergedModifiers(_ explicit: [UInt32], profile: RFBConnectionProfile) -> [UInt32] {
         var result = explicit
         for modifier in VNCIOSModifier.allCases where state(for: modifier) != .off {
-            let keysym = modifier.keysym
+            let keysym = modifier.keysym(profile: profile)
             if !result.contains(keysym) {
                 result.append(keysym)
             }
@@ -630,6 +813,7 @@ private struct VNCIOSControlStrip: View {
     @ObservedObject var inputState: VNCIOSInputState
     let securityStatus: RemoteSecurityStatus
     @Binding var isKeyboardActive: Bool
+    @Binding var viewportNavigationMode: Bool
     var onDisconnect: () -> Void
 
     var body: some View {
@@ -641,6 +825,13 @@ private struct VNCIOSControlStrip: View {
                 }
 
                 VNCConnectionSecurityMenu(status: securityStatus)
+                displayMenu
+                viewportModeButton
+                if session.isUsingStreamViewport {
+                    iconButton(systemName: "minus.magnifyingglass", label: "Reset viewport") {
+                        Task { await session.resetStreamViewport() }
+                    }
+                }
 
                 ForEach(VNCIOSModifier.allCases) { modifier in
                     modifierButton(modifier)
@@ -649,7 +840,7 @@ private struct VNCIOSControlStrip: View {
                 specialKeysMenu
                 arrowsMenu
                 functionKeysMenu
-                windowsMenu
+                platformShortcutsMenu
 
                 iconButton(systemName: "xmark.circle", label: "Disconnect", tint: .red) {
                     onDisconnect()
@@ -665,8 +856,9 @@ private struct VNCIOSControlStrip: View {
 
     private func modifierButton(_ modifier: VNCIOSModifier) -> some View {
         let state = inputState.state(for: modifier)
-        return Text(modifier.symbol)
-            .font(.system(size: modifier == .windows ? 12 : 15, weight: .semibold))
+        let symbol = modifier.symbol(profile: session.profile)
+        return Text(symbol)
+            .font(.system(size: symbol.count > 1 ? 12 : 15, weight: .semibold))
             .frame(width: 38, height: 38)
             .foregroundStyle(state == .off ? Color.primary : Color.white)
             .background(modifierBackground(for: state))
@@ -677,7 +869,7 @@ private struct VNCIOSControlStrip: View {
             .onTapGesture {
                 inputState.toggleMomentary(modifier)
             }
-            .accessibilityLabel("\(modifier.label) modifier")
+            .accessibilityLabel("\(modifier.label(profile: session.profile)) modifier")
     }
 
     private func modifierBackground(for state: ModifierLatchState) -> Color {
@@ -738,6 +930,79 @@ private struct VNCIOSControlStrip: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Function keys")
+    }
+
+    private var displayMenu: some View {
+        Menu {
+            if session.displayRegions.isEmpty {
+                Text("No display regions available")
+            } else {
+                ForEach(session.displayRegions) { region in
+                    Button {
+                        Task { await session.selectDisplayRegion(region) }
+                    } label: {
+                        if region == session.selectedDisplayRegion {
+                            Label("\(region.name) — \(region.detail)", systemImage: "checkmark")
+                        } else {
+                            Text("\(region.name) — \(region.detail)")
+                        }
+                    }
+                }
+                if session.profile == .macScreenSharing {
+                    Divider()
+                    Text("Apple RFB exposes one combined framebuffer. Screen Q may use a memory-safe viewport when the selected region is too large.")
+                }
+            }
+        } label: {
+            Image(systemName: session.displayRegions.count > 1 ? "display.2" : "display")
+                .font(.system(size: 17, weight: .semibold))
+                .frame(width: 38, height: 38)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Display region")
+    }
+
+    private var viewportModeButton: some View {
+        iconButton(
+            systemName: viewportNavigationMode ? "hand.draw.fill" : "scroll",
+            label: viewportNavigationMode ? "Two-finger pan moves the viewport" : "Two-finger pan scrolls the remote screen",
+            tint: viewportNavigationMode ? .accentColor : .primary
+        ) {
+            viewportNavigationMode.toggle()
+        }
+    }
+
+    private var platformShortcutsMenu: some View {
+        if session.profile == .macScreenSharing {
+            return AnyView(macShortcutsMenu)
+        }
+        return AnyView(windowsMenu)
+    }
+
+    private var macShortcutsMenu: some View {
+        Menu {
+            Button("Command Tab") {
+                session.sendKeyCombo(code: VNCKeySym.tab, modifiers: [VNCKeySym.commandLeft])
+            }
+            Button("Command Space") {
+                session.sendKeyCombo(code: 0x0020, modifiers: [VNCKeySym.commandLeft])
+            }
+            Button("Command W") {
+                session.sendKeyCombo(code: 0x0077, modifiers: [VNCKeySym.commandLeft])
+            }
+            Button("Command Q") {
+                session.sendKeyCombo(code: 0x0071, modifiers: [VNCKeySym.commandLeft])
+            }
+            Button("Force Quit") {
+                session.sendKeyCombo(code: VNCKeySym.escape, modifiers: [VNCKeySym.commandLeft, VNCKeySym.altLeft])
+            }
+        } label: {
+            Image(systemName: "command")
+                .font(.system(size: 17, weight: .semibold))
+                .frame(width: 38, height: 38)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Mac shortcuts")
     }
 
     private var windowsMenu: some View {

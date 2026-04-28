@@ -10,16 +10,30 @@ import Foundation
 import CoreGraphics
 
 final class RFBFrameBuffer: @unchecked Sendable {
+    private static let bytesPerPixel = 4
+    #if os(iOS)
+    private static let maxBackingBytes = 128 * 1024 * 1024
+    #else
+    private static let maxBackingBytes = 512 * 1024 * 1024
+    #endif
 
     private(set) var width: Int
     private(set) var height: Int
+    private(set) var originX: Int
+    private(set) var originY: Int
     private var pixels: Data // 32bpp XRGB, row-major
     private let lock = NSLock()
 
-    init(width: Int, height: Int) {
+    init(width: Int, height: Int, originX: Int = 0, originY: Int = 0) {
         self.width = width
         self.height = height
-        self.pixels = Data(count: width * height * 4)
+        self.originX = originX
+        self.originY = originY
+        self.pixels = Data(count: Self.validatedByteCount(width: width, height: height) ?? 0)
+        if pixels.isEmpty {
+            self.width = 0
+            self.height = 0
+        }
     }
 
     // MARK: - Apply updates
@@ -39,26 +53,58 @@ final class RFBFrameBuffer: @unchecked Sendable {
         }
     }
 
-    func resize(width: Int, height: Int) {
+    func resize(width: Int, height: Int, originX: Int = 0, originY: Int = 0) {
         lock.lock()
         defer { lock.unlock() }
         self.width = width
         self.height = height
-        self.pixels = Data(count: width * height * 4)
+        self.originX = originX
+        self.originY = originY
+        guard let byteCount = Self.validatedByteCount(width: width, height: height) else {
+            self.width = 0
+            self.height = 0
+            self.pixels = Data()
+            return
+        }
+        if pixels.count == byteCount {
+            pixels.resetBytes(in: pixels.startIndex..<pixels.endIndex)
+        } else {
+            self.pixels = Data(count: byteCount)
+        }
     }
 
     // MARK: - CGImage output
 
-    func makeCGImage() -> CGImage? {
+    func makeCGImage(maxDimension: Int? = nil) -> CGImage? {
         lock.lock()
-        let snapshot = pixels
         let w = width
         let h = height
+        guard w > 0 && h > 0,
+              let byteCount = Self.validatedByteCount(width: w, height: h),
+              pixels.count == byteCount else {
+            lock.unlock()
+            return nil
+        }
+
+        let bitmapInfo = Self.bitmapInfo
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        if let maxDimension,
+           maxDimension > 0,
+           max(w, h) > maxDimension,
+           let scaled = makeScaledCGImageLocked(
+                width: w,
+                height: h,
+                maxDimension: maxDimension,
+                bitmapInfo: bitmapInfo,
+                colorSpace: colorSpace
+           ) {
+            lock.unlock()
+            return scaled
+        }
+
+        let snapshot = pixels
         lock.unlock()
 
-        guard w > 0 && h > 0 else { return nil }
-
-        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
         guard let provider = CGDataProvider(data: snapshot as CFData) else { return nil }
         return CGImage(
             width: w,
@@ -66,7 +112,7 @@ final class RFBFrameBuffer: @unchecked Sendable {
             bitsPerComponent: 8,
             bitsPerPixel: 32,
             bytesPerRow: w * 4,
-            space: CGColorSpaceCreateDeviceRGB(),
+            space: colorSpace,
             bitmapInfo: bitmapInfo,
             provider: provider,
             decode: nil,
@@ -78,26 +124,47 @@ final class RFBFrameBuffer: @unchecked Sendable {
     // MARK: - Private: Raw encoding
 
     private func applyRaw(_ rect: RFBRect) {
-        let rx = Int(rect.x)
-        let ry = Int(rect.y)
+        let rx = Int(rect.x) - originX
+        let ry = Int(rect.y) - originY
         let rw = Int(rect.width)
         let rh = Int(rect.height)
-        let stride = width * 4
-        let srcStride = rw * 4
+        let stride = width * Self.bytesPerPixel
+        let srcStride = rw * Self.bytesPerPixel
 
-        guard rect.data.count >= rw * rh * 4 else { return }
+        guard rw > 0, rh > 0,
+              rect.data.count >= rw * rh * Self.bytesPerPixel else { return }
 
-        for row in 0..<rh {
-            let dstY = ry + row
-            guard dstY < height else { continue }
-            let dstOffset = dstY * stride + rx * 4
-            let srcOffset = row * srcStride
-            let copyLen = min(srcStride, (width - rx) * 4)
-            guard dstOffset + copyLen <= pixels.count,
-                  srcOffset + copyLen <= rect.data.count else { continue }
+        let srcStartX = max(0, -rx)
+        let srcStartY = max(0, -ry)
+        let dstStartX = max(0, rx)
+        let dstStartY = max(0, ry)
+        let copyWidth = min(rw - srcStartX, width - dstStartX)
+        let copyHeight = min(rh - srcStartY, height - dstStartY)
+        guard copyWidth > 0, copyHeight > 0 else { return }
+        let pixelByteCount = pixels.count
+        let rectDataByteCount = rect.data.count
 
-            pixels.replaceSubrange(dstOffset..<(dstOffset + copyLen),
-                                   with: rect.data[srcOffset..<(srcOffset + copyLen)])
+        pixels.withUnsafeMutableBytes { dstRaw in
+            rect.data.withUnsafeBytes { srcRaw in
+                guard let dstBase = dstRaw.baseAddress,
+                      let srcBase = srcRaw.baseAddress else {
+                    return
+                }
+
+                for row in 0..<copyHeight {
+                    let dstY = dstStartY + row
+                    let srcY = srcStartY + row
+                    let dstOffset = dstY * stride + dstStartX * Self.bytesPerPixel
+                    let srcOffset = srcY * srcStride + srcStartX * Self.bytesPerPixel
+                    let copyLen = copyWidth * Self.bytesPerPixel
+                    guard dstOffset + copyLen <= pixelByteCount,
+                          srcOffset + copyLen <= rectDataByteCount else { continue }
+
+                    dstBase
+                        .advanced(by: dstOffset)
+                        .copyMemory(from: srcBase.advanced(by: srcOffset), byteCount: copyLen)
+                }
+            }
         }
     }
 
@@ -105,35 +172,136 @@ final class RFBFrameBuffer: @unchecked Sendable {
 
     private func applyCopyRect(_ rect: RFBRect) {
         guard rect.data.count >= 4 else { return }
-        let srcX = Int(UInt16(rect.data[0]) << 8 | UInt16(rect.data[1]))
-        let srcY = Int(UInt16(rect.data[2]) << 8 | UInt16(rect.data[3]))
+        let srcX = Int(UInt16(rect.data[0]) << 8 | UInt16(rect.data[1])) - originX
+        let srcY = Int(UInt16(rect.data[2]) << 8 | UInt16(rect.data[3])) - originY
         let rw = Int(rect.width)
         let rh = Int(rect.height)
-        let dstX = Int(rect.x)
-        let dstY = Int(rect.y)
-        let stride = width * 4
+        let dstX = Int(rect.x) - originX
+        let dstY = Int(rect.y) - originY
+        let stride = width * Self.bytesPerPixel
+        guard rw > 0, rh > 0,
+              srcX >= 0, srcY >= 0, dstX >= 0, dstY >= 0,
+              srcX + rw <= width, srcY + rh <= height,
+              dstX + rw <= width, dstY + rh <= height else {
+            return
+        }
 
         // Copy to temp buffer to handle overlapping regions.
-        var tmp = Data(count: rw * rh * 4)
-        for row in 0..<rh {
-            let sy = srcY + row
-            guard sy < height else { continue }
-            let srcOff = sy * stride + srcX * 4
-            let tmpOff = row * rw * 4
-            let copyLen = min(rw * 4, (width - srcX) * 4)
-            guard srcOff + copyLen <= pixels.count else { continue }
-            tmp.replaceSubrange(tmpOff..<(tmpOff + copyLen),
-                                with: pixels[srcOff..<(srcOff + copyLen)])
+        guard let tmpByteCount = Self.validatedByteCount(width: rw, height: rh) else { return }
+        var tmp = Data(count: tmpByteCount)
+        let pixelByteCount = pixels.count
+        tmp.withUnsafeMutableBytes { tmpRaw in
+            pixels.withUnsafeBytes { srcRaw in
+                guard let tmpBase = tmpRaw.baseAddress,
+                      let srcBase = srcRaw.baseAddress else {
+                    return
+                }
+
+                for row in 0..<rh {
+                    let sy = srcY + row
+                    guard sy < height else { continue }
+                    let srcOff = sy * stride + srcX * Self.bytesPerPixel
+                    let tmpOff = row * rw * Self.bytesPerPixel
+                    let copyLen = min(rw * Self.bytesPerPixel, (width - srcX) * Self.bytesPerPixel)
+                    guard srcOff + copyLen <= pixelByteCount,
+                          tmpOff + copyLen <= tmpByteCount else { continue }
+
+                    tmpBase
+                        .advanced(by: tmpOff)
+                        .copyMemory(from: srcBase.advanced(by: srcOff), byteCount: copyLen)
+                }
+            }
         }
-        for row in 0..<rh {
-            let dy = dstY + row
-            guard dy < height else { continue }
-            let dstOff = dy * stride + dstX * 4
-            let tmpOff = row * rw * 4
-            let copyLen = min(rw * 4, (width - dstX) * 4)
-            guard dstOff + copyLen <= pixels.count else { continue }
-            pixels.replaceSubrange(dstOff..<(dstOff + copyLen),
-                                   with: tmp[tmpOff..<(tmpOff + copyLen)])
+
+        pixels.withUnsafeMutableBytes { dstRaw in
+            tmp.withUnsafeBytes { tmpRaw in
+                guard let dstBase = dstRaw.baseAddress,
+                      let tmpBase = tmpRaw.baseAddress else {
+                    return
+                }
+
+                for row in 0..<rh {
+                    let dy = dstY + row
+                    guard dy < height else { continue }
+                    let dstOff = dy * stride + dstX * Self.bytesPerPixel
+                    let tmpOff = row * rw * Self.bytesPerPixel
+                    let copyLen = min(rw * Self.bytesPerPixel, (width - dstX) * Self.bytesPerPixel)
+                    guard dstOff + copyLen <= pixelByteCount,
+                          tmpOff + copyLen <= tmpByteCount else { continue }
+
+                    dstBase
+                        .advanced(by: dstOff)
+                        .copyMemory(from: tmpBase.advanced(by: tmpOff), byteCount: copyLen)
+                }
+            }
         }
+    }
+
+    private static var bitmapInfo: CGBitmapInfo {
+        CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+    }
+
+    private static func validatedByteCount(width: Int, height: Int) -> Int? {
+        guard width > 0, height > 0 else { return nil }
+        let pixelProduct = width.multipliedReportingOverflow(by: height)
+        guard !pixelProduct.overflow else { return nil }
+        let byteProduct = pixelProduct.partialValue.multipliedReportingOverflow(by: bytesPerPixel)
+        guard !byteProduct.overflow,
+              byteProduct.partialValue <= maxBackingBytes else {
+            return nil
+        }
+        return byteProduct.partialValue
+    }
+
+    private func makeScaledCGImageLocked(
+        width sourceWidth: Int,
+        height sourceHeight: Int,
+        maxDimension: Int,
+        bitmapInfo: CGBitmapInfo,
+        colorSpace: CGColorSpace
+    ) -> CGImage? {
+        let scale = CGFloat(maxDimension) / CGFloat(max(sourceWidth, sourceHeight))
+        let scaledWidth = max(1, Int((CGFloat(sourceWidth) * scale).rounded(.down)))
+        let scaledHeight = max(1, Int((CGFloat(sourceHeight) * scale).rounded(.down)))
+        guard let scaledByteCount = Self.validatedByteCount(width: scaledWidth, height: scaledHeight) else {
+            return nil
+        }
+
+        var scaledPixels = Data(count: scaledByteCount)
+        pixels.withUnsafeBytes { sourceRaw in
+            scaledPixels.withUnsafeMutableBytes { destinationRaw in
+                guard let sourceBase = sourceRaw.baseAddress,
+                      let destinationBase = destinationRaw.baseAddress else {
+                    return
+                }
+
+                for y in 0..<scaledHeight {
+                    let sourceY = min(sourceHeight - 1, y * sourceHeight / scaledHeight)
+                    for x in 0..<scaledWidth {
+                        let sourceX = min(sourceWidth - 1, x * sourceWidth / scaledWidth)
+                        let sourceOffset = (sourceY * sourceWidth + sourceX) * Self.bytesPerPixel
+                        let destinationOffset = (y * scaledWidth + x) * Self.bytesPerPixel
+                        destinationBase
+                            .advanced(by: destinationOffset)
+                            .copyMemory(from: sourceBase.advanced(by: sourceOffset), byteCount: Self.bytesPerPixel)
+                    }
+                }
+            }
+        }
+
+        guard let provider = CGDataProvider(data: scaledPixels as CFData) else { return nil }
+        return CGImage(
+            width: scaledWidth,
+            height: scaledHeight,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: scaledWidth * Self.bytesPerPixel,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo,
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        )
     }
 }

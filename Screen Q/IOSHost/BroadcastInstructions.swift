@@ -14,7 +14,7 @@ enum BroadcastInstructions {
     static let viewOnlyTitle = "iPhone / iPad screens are share-only"
 
     static let viewOnlyBody = """
-    Screen Q can share this device's screen using Apple's ReplayKit. Apple does \
+    Screen Q uses Apple's ReplayKit path for view-only iPhone and iPad screen capture. Apple does \
     not expose any third-party API for injecting touches, key presses, or pointer \
     events into iOS or iPadOS — so a viewer on the other side will see your screen \
     but cannot operate it.

@@ -39,10 +39,11 @@ final class CursorOverlayState: ObservableObject {
 
 struct CursorOverlayView: View {
     @ObservedObject var state: CursorOverlayState
+    @ObservedObject var inputMapper: InputMappingService
     let canvasGeometry: CanvasGeometry
 
     var body: some View {
-        if state.visible, let position = cursorPosition {
+        if (state.visible || inputMapper.predictedPointer != nil), let position = cursorPosition {
             cursorContent
                 .position(position)
                 .allowsHitTesting(false)
@@ -52,7 +53,7 @@ struct CursorOverlayView: View {
     }
 
     private var cursorPosition: CGPoint? {
-        canvasGeometry.localPoint(for: NormalisedPoint(x: state.x, y: state.y))
+        canvasGeometry.localPoint(for: inputMapper.predictedPointer ?? NormalisedPoint(x: state.x, y: state.y))
     }
 
     @ViewBuilder
@@ -79,6 +80,23 @@ struct CursorOverlayView: View {
         case "openHand":     return "hand.raised"
         case "closedHand":   return "hand.raised.fill"
         default:             return "cursorarrow"
+        }
+    }
+}
+
+struct PredictedCursorOverlayView: View {
+    @ObservedObject var inputMapper: InputMappingService
+    let canvasGeometry: CanvasGeometry
+
+    var body: some View {
+        if let pointer = inputMapper.predictedPointer,
+           let position = canvasGeometry.localPoint(for: pointer) {
+            Image(systemName: "cursorarrow")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundColor(.white)
+                .shadow(color: .black.opacity(0.65), radius: 1, x: 0, y: 1)
+                .position(position)
+                .allowsHitTesting(false)
         }
     }
 }

@@ -105,20 +105,18 @@ final class RemoteKeyboardTextField: UITextField {
     // Intercept hardware keyboard commands.
     override var keyCommands: [UIKeyCommand]? {
         var cmds: [UIKeyCommand] = []
-        let special: [(UIKeyboardHIDUsage, String)] = [
-            (.keyboardEscape, UIKeyCommand.inputEscape),
-            (.keyboardTab, "\t"),
-            (.keyboardUpArrow, UIKeyCommand.inputUpArrow),
-            (.keyboardDownArrow, UIKeyCommand.inputDownArrow),
-            (.keyboardLeftArrow, UIKeyCommand.inputLeftArrow),
-            (.keyboardRightArrow, UIKeyCommand.inputRightArrow),
+        let special: [String] = [
+            UIKeyCommand.inputEscape,
+            "\t",
+            UIKeyCommand.inputUpArrow,
+            UIKeyCommand.inputDownArrow,
+            UIKeyCommand.inputLeftArrow,
+            UIKeyCommand.inputRightArrow,
         ]
-        for (_, input) in special {
-            cmds.append(UIKeyCommand(input: input, modifierFlags: [], action: #selector(handleSpecialKey(_:))))
-            cmds.append(UIKeyCommand(input: input, modifierFlags: [.shift], action: #selector(handleSpecialKey(_:))))
-            cmds.append(UIKeyCommand(input: input, modifierFlags: [.control], action: #selector(handleSpecialKey(_:))))
-            cmds.append(UIKeyCommand(input: input, modifierFlags: [.alternate], action: #selector(handleSpecialKey(_:))))
-            cmds.append(UIKeyCommand(input: input, modifierFlags: [.command], action: #selector(handleSpecialKey(_:))))
+        for input in special {
+            for modifiers in Self.hardwareModifierCombinations {
+                cmds.append(UIKeyCommand(input: input, modifierFlags: modifiers, action: #selector(handleSpecialKey(_:))))
+            }
         }
 
         let namedKeys: [(String, KeyCode)] = [
@@ -126,19 +124,39 @@ final class RemoteKeyboardTextField: UITextField {
             ("\u{8}", .backspace)
         ]
         for (input, _) in namedKeys {
-            cmds.append(UIKeyCommand(input: input, modifierFlags: [], action: #selector(handleNamedKey(_:))))
-            cmds.append(UIKeyCommand(input: input, modifierFlags: [.command], action: #selector(handleNamedKey(_:))))
-            cmds.append(UIKeyCommand(input: input, modifierFlags: [.control], action: #selector(handleNamedKey(_:))))
+            for modifiers in Self.hardwareModifierCombinations {
+                cmds.append(UIKeyCommand(input: input, modifierFlags: modifiers, action: #selector(handleNamedKey(_:))))
+            }
         }
 
         let shortcutLetters = ["a", "c", "d", "f", "h", "l", "m", "q", "v", "w", "x", "z"]
         for letter in shortcutLetters {
-            cmds.append(UIKeyCommand(input: letter, modifierFlags: [.command], action: #selector(handleShortcutKey(_:))))
-            cmds.append(UIKeyCommand(input: letter, modifierFlags: [.command, .shift], action: #selector(handleShortcutKey(_:))))
-            cmds.append(UIKeyCommand(input: letter, modifierFlags: [.control], action: #selector(handleShortcutKey(_:))))
-            cmds.append(UIKeyCommand(input: letter, modifierFlags: [.alternate], action: #selector(handleShortcutKey(_:))))
+            for modifiers in Self.shortcutModifierCombinations {
+                cmds.append(UIKeyCommand(input: letter, modifierFlags: modifiers, action: #selector(handleShortcutKey(_:))))
+            }
         }
         return cmds
+    }
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let handled = sendHardwareKeys(from: presses)
+        if handled.count < presses.count {
+            super.pressesBegan(presses.subtracting(handled), with: event)
+        }
+    }
+
+    private func sendHardwareKeys(from presses: Set<UIPress>) -> Set<UIPress> {
+        guard let mapper = coordinator?.inputMapper else { return [] }
+        var handled: Set<UIPress> = []
+        for press in presses {
+            guard let key = press.key,
+                  let keyCode = keyCode(for: key.keyCode) else {
+                continue
+            }
+            mapper.sendKey(keyCode, modifiers: keyModifiers(from: key.modifierFlags))
+            handled.insert(press)
+        }
+        return handled
     }
 
     @objc private func handleSpecialKey(_ cmd: UIKeyCommand) {
@@ -202,6 +220,29 @@ final class RemoteKeyboardTextField: UITextField {
         }
     }
 
+    private func keyCode(for hidUsage: UIKeyboardHIDUsage) -> KeyCode? {
+        switch hidUsage {
+        case .keyboardDeleteForward: return .delete
+        case .keyboardHome: return .home
+        case .keyboardEnd: return .end
+        case .keyboardPageUp: return .pageUp
+        case .keyboardPageDown: return .pageDown
+        case .keyboardF1: return .f1
+        case .keyboardF2: return .f2
+        case .keyboardF3: return .f3
+        case .keyboardF4: return .f4
+        case .keyboardF5: return .f5
+        case .keyboardF6: return .f6
+        case .keyboardF7: return .f7
+        case .keyboardF8: return .f8
+        case .keyboardF9: return .f9
+        case .keyboardF10: return .f10
+        case .keyboardF11: return .f11
+        case .keyboardF12: return .f12
+        default: return nil
+        }
+    }
+
     private func keyModifiers(from flags: UIKeyModifierFlags) -> KeyModifiers {
         var modifiers: KeyModifiers = []
         if flags.contains(.shift) { modifiers.insert(.shift) }
@@ -210,6 +251,27 @@ final class RemoteKeyboardTextField: UITextField {
         if flags.contains(.command) { modifiers.insert(.command) }
         return modifiers
     }
+
+    private static let hardwareModifierCombinations: [UIKeyModifierFlags] = [
+        [],
+        [.shift],
+        [.control],
+        [.alternate],
+        [.command],
+        [.shift, .control],
+        [.shift, .alternate],
+        [.shift, .command],
+        [.control, .alternate],
+        [.control, .command],
+        [.alternate, .command],
+        [.shift, .control, .alternate],
+        [.shift, .control, .command],
+        [.shift, .alternate, .command],
+        [.control, .alternate, .command],
+        [.shift, .control, .alternate, .command]
+    ]
+
+    private static let shortcutModifierCombinations: [UIKeyModifierFlags] = hardwareModifierCombinations.filter { !$0.isEmpty }
 
     @objc private func textDidChange() {
         guard let mapper = coordinator?.inputMapper else { return }

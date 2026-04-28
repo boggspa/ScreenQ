@@ -24,6 +24,8 @@ actor BonjourAdvertiser {
         port: UInt16 = ScreenQProtocol.defaultPort,
         deviceName: String,
         capabilities: Capabilities,
+        deviceID: UUID? = nil,
+        metadata: [String: String] = [:],
         onAccept: @escaping @Sendable (NWConnection) -> Void
     ) async throws {
         try? stop()
@@ -37,7 +39,7 @@ actor BonjourAdvertiser {
         let endpointPort = NWEndpoint.Port(rawValue: port) ?? .any
         let listener = try NWListener(using: parameters, on: endpointPort)
 
-        let txt = makeTXTRecord(deviceName: deviceName, capabilities: capabilities)
+        let txt = makeTXTRecord(deviceName: deviceName, capabilities: capabilities, deviceID: deviceID, metadata: metadata)
         listener.service = NWListener.Service(
             name: deviceName,
             type: ScreenQProtocol.bonjourServiceType,
@@ -66,8 +68,8 @@ actor BonjourAdvertiser {
         Logger.shared.info("Bonjour advertiser stopped")
     }
 
-    func updateCapabilities(deviceName: String, capabilities: Capabilities) {
-        let txt = makeTXTRecord(deviceName: deviceName, capabilities: capabilities)
+    func updateCapabilities(deviceName: String, capabilities: Capabilities, deviceID: UUID? = nil, metadata: [String: String] = [:]) {
+        let txt = makeTXTRecord(deviceName: deviceName, capabilities: capabilities, deviceID: deviceID, metadata: metadata)
         listener?.service = NWListener.Service(
             name: deviceName,
             type: ScreenQProtocol.bonjourServiceType,
@@ -105,7 +107,7 @@ actor BonjourAdvertiser {
         onAccept?(connection)
     }
 
-    private func makeTXTRecord(deviceName: String, capabilities: Capabilities) -> NWTXTRecord {
+    private func makeTXTRecord(deviceName: String, capabilities: Capabilities, deviceID: UUID?, metadata: [String: String]) -> NWTXTRecord {
         var txt = NWTXTRecord()
         txt[ScreenQProtocol.TXT.app] = "ScreenQ"
         txt[ScreenQProtocol.TXT.version] = "1"
@@ -113,6 +115,12 @@ actor BonjourAdvertiser {
         txt[ScreenQProtocol.TXT.supportsControl] = capabilities.supportsControl ? "true" : "false"
         txt[ScreenQProtocol.TXT.supportsVideo] = capabilities.supportsVideo ? "true" : "false"
         txt[ScreenQProtocol.TXT.deviceName] = String(deviceName.prefix(60))
+        if let deviceID {
+            txt[ScreenQProtocol.TXT.deviceID] = deviceID.uuidString
+        }
+        for (key, value) in metadata {
+            txt[key] = String(value.prefix(120))
+        }
         return txt
     }
 

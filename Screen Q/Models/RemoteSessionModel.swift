@@ -196,7 +196,9 @@ nonisolated struct RemoteSecurityStatus: Codable, Hashable, Sendable {
             detail: "RDP normally negotiates TLS plus Network Level Authentication before the Windows session starts. Screen Q has not linked the RDP engine yet, so no RDP security handshake has run. \(scope.connectionHint)",
             isTransportEncrypted: false,
             isAuthenticated: false,
-            recommendedAction: scope.publicNetworkWarning
+            recommendedAction: scope.publicNetworkWarning,
+            protocolName: "RDP",
+            credentialStorage: "Keychain"
         )
     }
 
@@ -207,7 +209,9 @@ nonisolated struct RemoteSecurityStatus: Codable, Hashable, Sendable {
             detail: "The TCP endpoint is reachable, but Screen Q still needs the RDP engine bridge before it can negotiate TLS, NLA, graphics, and input channels.",
             isTransportEncrypted: false,
             isAuthenticated: false,
-            recommendedAction: scope.publicNetworkWarning
+            recommendedAction: scope.publicNetworkWarning,
+            protocolName: "RDP",
+            credentialStorage: "Keychain"
         )
     }
 
@@ -218,7 +222,9 @@ nonisolated struct RemoteSecurityStatus: Codable, Hashable, Sendable {
             detail: "Screen Q is starting the RDP security handshake. The connection should report TLS and Network Level Authentication before credentials are accepted. \(scope.connectionHint)",
             isTransportEncrypted: false,
             isAuthenticated: false,
-            recommendedAction: scope.publicNetworkWarning
+            recommendedAction: scope.publicNetworkWarning,
+            protocolName: "RDP",
+            credentialStorage: "Keychain"
         )
     }
 
@@ -229,7 +235,11 @@ nonisolated struct RemoteSecurityStatus: Codable, Hashable, Sendable {
             detail: "The Windows host presented a certificate for \(certificate.host). Review the fingerprint before trusting this server.",
             isTransportEncrypted: false,
             isAuthenticated: false,
-            recommendedAction: scope.publicNetworkWarning ?? "Only continue if this fingerprint matches the Windows PC you expect."
+            recommendedAction: scope.publicNetworkWarning ?? "Only continue if this fingerprint matches the Windows PC you expect.",
+            protocolName: "RDP",
+            credentialStorage: "Keychain",
+            identityVerification: "Certificate fingerprint pending",
+            warnings: ["Credentials are not sent until this certificate decision is made."]
         )
     }
 
@@ -247,13 +257,29 @@ nonisolated struct RemoteSecurityStatus: Codable, Hashable, Sendable {
             level = .unknown
         }
 
+        var warnings: [String] = []
+        if !report.nlaSucceeded {
+            warnings.append("Network Level Authentication was not confirmed.")
+        }
+        if !report.serverIdentityVerified {
+            warnings.append("RDP certificate identity was not fully verified.")
+        }
+        if let warning = scope.publicNetworkWarning {
+            warnings.append(warning)
+        }
+
         return RemoteSecurityStatus(
             level: level,
             title: report.isTransportEncrypted ? "RDP secured" : "RDP security incomplete",
             detail: "\(protocolName) negotiated. \(nlaText) \(identityText)",
             isTransportEncrypted: report.isTransportEncrypted,
             isAuthenticated: report.isAuthenticated,
-            recommendedAction: level == .encrypted ? nil : (scope.publicNetworkWarning ?? "Do not continue unless you understand this RDP server's security posture.")
+            recommendedAction: level == .encrypted ? nil : (scope.publicNetworkWarning ?? "Do not continue unless you understand this RDP server's security posture."),
+            protocolName: "RDP",
+            authMethod: report.nlaSucceeded ? "Windows credentials via NLA" : "Windows credentials",
+            credentialStorage: "Keychain",
+            identityVerification: report.serverIdentityVerified ? "Pinned or verified RDP certificate" : "Certificate identity not fully verified",
+            warnings: warnings
         )
     }
 }
@@ -348,7 +374,7 @@ nonisolated enum NetworkTrustScope: Codable, Hashable, Sendable {
     var publicNetworkWarning: String? {
         switch self {
         case .publicInternet:
-            return "Do not expose VNC directly to the internet. Use Tailscale, VPN, or a private LAN."
+            return "Do not expose remote desktop services directly to the internet. Use Tailscale, VPN, or a private LAN."
         case .hostname, .unknown:
             return "Verify this host resolves inside Tailscale, VPN, or a private LAN before sending credentials."
         case .tailscale, .privateLAN, .localOnly:

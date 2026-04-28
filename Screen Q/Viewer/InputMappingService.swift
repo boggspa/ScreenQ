@@ -161,6 +161,22 @@ nonisolated struct CanvasGeometry: Sendable {
         return viewport.apply(to: basePoint, in: canvasSize)
     }
 
+    func normalisedDelta(localDelta: CGSize) -> (dx: Double, dy: Double)? {
+        guard remotePixelSize.width > 0,
+              remotePixelSize.height > 0,
+              canvasSize.width > 0,
+              canvasSize.height > 0 else {
+            return nil
+        }
+        let drawRect = remoteDrawRect()
+        let visibleWidth = max(1, drawRect.width * viewport.scale)
+        let visibleHeight = max(1, drawRect.height * viewport.scale)
+        return (
+            dx: Double(localDelta.width / visibleWidth),
+            dy: Double(localDelta.height / visibleHeight)
+        )
+    }
+
     func remoteDrawRect() -> CGRect {
         // Compute the rect inside `canvasSize` where the remote frame is drawn.
         let canvasRatio = canvasSize.width / max(1, canvasSize.height)
@@ -193,29 +209,80 @@ final class InputMappingService: ObservableObject {
 
     var isControlEnabled: Bool = false
     var canvas: CanvasGeometry = CanvasGeometry(canvasSize: .zero, remotePixelSize: .zero, fit: true)
+    var keepsPredictedPointerVisible: Bool = false
+    @Published private(set) var predictedPointer: NormalisedPoint?
 
     /// Sink set by the viewer screen so events flow to the connection.
     var sendEvent: ((RemoteInputEvent) -> Void)?
     var activeModifiers: (() -> KeyModifiers)?
     var consumeMomentaryModifiers: (() -> Void)?
+    private var currentPointer: NormalisedPoint?
+    private var lastLocalPointerUpdate = Date.distantPast
+    private var predictionClearTask: Task<Void, Never>?
+    private let pointerPredictionHoldInterval: TimeInterval = 0.28
 
     func send(_ event: RemoteInputEvent) {
         guard isControlEnabled else { return }
         sendEvent?(event)
     }
 
-    func sendPointerMove(localPoint: CGPoint) {
-        guard let p = canvas.normalised(localPoint: localPoint) else { return }
-        send(.pointerMove(p, modifiers: currentModifiers()))
+    func updateRemotePointer(_ point: NormalisedPoint) {
+        if Date().timeIntervalSince(lastLocalPointerUpdate) < pointerPredictionHoldInterval,
+           let predictedPointer,
+           predictedPointer.distance(to: point) > 0.012 {
+            return
+        }
+        currentPointer = point
+        predictedPointer = nil
     }
 
-    func sendPointerDown(localPoint: CGPoint, button: PointerButton = .left) {
-        guard let p = canvas.normalised(localPoint: localPoint) else { return }
+    func ensurePredictedPointerVisible() {
+        guard keepsPredictedPointerVisible, predictedPointer == nil else { return }
+        rememberLocalPointer(currentPointerOrDefault())
+    }
+
+    @discardableResult
+    func sendPointerMove(localPoint: CGPoint) -> NormalisedPoint? {
+        guard let p = canvas.normalised(localPoint: localPoint) else { return nil }
+        rememberLocalPointer(p)
+        send(.pointerMove(p, modifiers: currentModifiers()))
+        return p
+    }
+
+    @discardableResult
+    func sendPointerDown(localPoint: CGPoint, button: PointerButton = .left) -> NormalisedPoint? {
+        guard let p = canvas.normalised(localPoint: localPoint) else { return nil }
+        rememberLocalPointer(p)
+        send(.pointerDown(p, button: button, modifiers: currentModifiers()))
+        return p
+    }
+
+    @discardableResult
+    func sendPointerUp(localPoint: CGPoint, button: PointerButton = .left) -> NormalisedPoint? {
+        guard let p = canvas.normalised(localPoint: localPoint) else { return nil }
+        rememberLocalPointer(p)
+        send(.pointerUp(p, button: button, modifiers: currentModifiers()))
+        consumeMomentaryModifiers?()
+        return p
+    }
+
+    @discardableResult
+    func sendPointerMove(relativeLocalDelta delta: CGSize, sensitivity: CGFloat = 1.0) -> NormalisedPoint? {
+        guard let p = pointer(afterRelativeLocalDelta: delta, sensitivity: sensitivity) else { return nil }
+        rememberLocalPointer(p)
+        send(.pointerMove(p, modifiers: currentModifiers()))
+        return p
+    }
+
+    func sendPointerDownAtCurrent(button: PointerButton = .left) {
+        let p = currentPointerOrDefault()
+        rememberLocalPointer(p)
         send(.pointerDown(p, button: button, modifiers: currentModifiers()))
     }
 
-    func sendPointerUp(localPoint: CGPoint, button: PointerButton = .left) {
-        guard let p = canvas.normalised(localPoint: localPoint) else { return }
+    func sendPointerUpAtCurrent(button: PointerButton = .left) {
+        let p = currentPointerOrDefault()
+        rememberLocalPointer(p)
         send(.pointerUp(p, button: button, modifiers: currentModifiers()))
         consumeMomentaryModifiers?()
     }
@@ -230,8 +297,24 @@ final class InputMappingService: ObservableObject {
         sendTap(localPoint: localPoint)
     }
 
+    func sendTapAtCurrent(button: PointerButton = .left) {
+        sendPointerDownAtCurrent(button: button)
+        sendPointerUpAtCurrent(button: button)
+    }
+
+    func sendDoubleTapAtCurrent() {
+        sendTapAtCurrent()
+        sendTapAtCurrent()
+    }
+
     func sendScroll(deltaX: Double, deltaY: Double, localPoint: CGPoint) {
         guard let p = canvas.normalised(localPoint: localPoint) else { return }
+        send(.scroll(deltaX: deltaX, deltaY: deltaY, at: p, modifiers: currentModifiers()))
+        consumeMomentaryModifiers?()
+    }
+
+    func sendScrollAtCurrent(deltaX: Double, deltaY: Double) {
+        let p = currentPointerOrDefault()
         send(.scroll(deltaX: deltaX, deltaY: deltaY, at: p, modifiers: currentModifiers()))
         consumeMomentaryModifiers?()
     }
@@ -251,5 +334,58 @@ final class InputMappingService: ObservableObject {
 
     private func currentModifiers() -> KeyModifiers {
         activeModifiers?() ?? []
+    }
+
+    private func pointer(afterRelativeLocalDelta delta: CGSize, sensitivity: CGFloat) -> NormalisedPoint? {
+        guard let normalisedDelta = canvas.normalisedDelta(localDelta: CGSize(
+            width: delta.width * sensitivity,
+            height: delta.height * sensitivity
+        )) else {
+            return nil
+        }
+        let base = currentPointerOrDefault()
+        return NormalisedPoint(
+            x: base.x + normalisedDelta.dx,
+            y: base.y + normalisedDelta.dy
+        )
+    }
+
+    private func rememberLocalPointer(_ point: NormalisedPoint) {
+        currentPointer = point
+        predictedPointer = point
+        lastLocalPointerUpdate = Date()
+        schedulePredictionClear()
+    }
+
+    private func schedulePredictionClear() {
+        predictionClearTask?.cancel()
+        predictionClearTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(0.35 * 1_000_000_000))
+            self?.clearPredictionIfExpired()
+        }
+    }
+
+    private func clearPredictionIfExpired() {
+        guard !keepsPredictedPointerVisible else { return }
+        guard Date().timeIntervalSince(lastLocalPointerUpdate) >= pointerPredictionHoldInterval else { return }
+        predictedPointer = nil
+    }
+
+    private func currentPointerOrDefault() -> NormalisedPoint {
+        if let currentPointer {
+            return currentPointer
+        }
+        return canvas.normalised(localPoint: CGPoint(
+            x: canvas.canvasSize.width / 2,
+            y: canvas.canvasSize.height / 2
+        )) ?? NormalisedPoint(x: 0.5, y: 0.5)
+    }
+}
+
+private extension NormalisedPoint {
+    func distance(to other: NormalisedPoint) -> Double {
+        let dx = x - other.x
+        let dy = y - other.y
+        return (dx * dx + dy * dy).squareRoot()
     }
 }

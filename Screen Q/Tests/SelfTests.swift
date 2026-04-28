@@ -32,20 +32,29 @@ enum SelfTests {
         results.append(testCoordinateMappingFill())
         results.append(testCoordinateMappingOutsideRect())
         results.append(testCoordinateMappingWithViewportZoom())
+        results.append(testCoordinateMappingRelativeDelta())
         results.append(testViewportZoomKeepsAnchorStable())
         results.append(testNormalisedClamping())
         results.append(testRemoteInputEventCodableRoundTrip())
         results.append(testRemoteConnectionProtocolDefaults())
+        results.append(testTailnetDeviceProtocolRecommendation())
+        results.append(testTailscaleOAuthTokenRequestBody())
         results.append(testRDPProfileParser())
         results.append(testRDPFrameConversion())
         results.append(testRDPSecurityStatus())
         results.append(testRDPCredentialNormalisation())
         results.append(testRDPAuthFailureClassifier())
         results.append(testSavedConnectionProtocolResolution())
+        results.append(testViewerControlPreferenceScope())
         results.append(testSessionStateRoutingFlags())
         results.append(testNetworkTrustScopeClassification())
         results.append(testVNCRemoteSecurityStatus())
         results.append(testRFBSecurityNegotiationPolicy())
+        results.append(testRFBClientEncodingPreference())
+        results.append(testVNCDisplayRegionOptions())
+        results.append(testRFBDecoderRejectsOversizedRect())
+        results.append(testRFBFrameBufferClipsViewportRects())
+        results.append(testRFBFrameBufferScaledImageAvoidsFullSizePublish())
         results.append(testZRLEDecoderRawTile())
         results.append(testZRLEDecoderSolidTile())
         results.append(testZRLEDecoderPackedPaletteTile())
@@ -226,6 +235,22 @@ enum SelfTests {
         return ok("Coord mapping includes viewport zoom")
     }
 
+    private static func testCoordinateMappingRelativeDelta() -> Result {
+        let g = CanvasGeometry(
+            canvasSize: CGSize(width: 1000, height: 1000),
+            remotePixelSize: CGSize(width: 1000, height: 1000),
+            fit: true,
+            viewport: ViewportTransform(scale: 2, offset: .zero)
+        )
+        guard let delta = g.normalisedDelta(localDelta: CGSize(width: 100, height: 50)) else {
+            return fail("Coord mapping relative delta", "delta should map")
+        }
+        guard abs(delta.dx - 0.05) < 0.001, abs(delta.dy - 0.025) < 0.001 else {
+            return fail("Coord mapping relative delta", "unexpected delta \(delta)")
+        }
+        return ok("Coord mapping relative delta includes viewport zoom")
+    }
+
     private static func testViewportZoomKeepsAnchorStable() -> Result {
         let geometry = CanvasGeometry(
             canvasSize: CGSize(width: 1000, height: 1000),
@@ -318,6 +343,65 @@ enum SelfTests {
             return fail("Protocol defaults", "protocol did not map to expected connection kind")
         }
         return ok("Protocol defaults route supported modes")
+    }
+
+    private static func testTailnetDeviceProtocolRecommendation() -> Result {
+        let windows = TailnetDevice(
+            id: "win",
+            displayName: "Windows",
+            hostname: "win",
+            os: "windows",
+            addresses: ["100.76.201.41"],
+            isOnline: true,
+            lastSeen: nil,
+            tags: [],
+            isExternal: false
+        )
+        guard windows.recommendedProtocol == .rdp, windows.recommendedPort == 3389 else {
+            return fail("Tailnet protocol recommendation", "Windows tailnet devices should default to RDP")
+        }
+
+        let mac = TailnetDevice(
+            id: "mac",
+            displayName: "Mac",
+            hostname: "mac",
+            os: "macOS",
+            addresses: ["100.99.131.73"],
+            isOnline: true,
+            lastSeen: nil,
+            tags: [],
+            isExternal: false
+        )
+        guard mac.recommendedProtocol == .macScreenSharing, mac.recommendedPort == 5900 else {
+            return fail("Tailnet protocol recommendation", "Mac tailnet devices should default to Mac Screen Sharing")
+        }
+
+        return ok("Tailnet protocol recommendation maps platform to protocol")
+    }
+
+    private static func testTailscaleOAuthTokenRequestBody() -> Result {
+        guard let body = TailnetDeviceProvider.oauthTokenRequestBody(
+            clientID: "client-id",
+            clientSecret: "secret +&"
+        ),
+        let text = String(data: body, encoding: .utf8) else {
+            return fail("Tailscale OAuth token request", "request body was not UTF-8")
+        }
+
+        guard text.contains("grant_type=client_credentials") else {
+            return fail("Tailscale OAuth token request", "missing client credentials grant type: \(text)")
+        }
+        guard text.contains("client_id=client-id") else {
+            return fail("Tailscale OAuth token request", "missing client ID: \(text)")
+        }
+        guard text.contains("client_secret=secret%20%2B%26") else {
+            return fail("Tailscale OAuth token request", "client secret was not form encoded: \(text)")
+        }
+        guard text.contains("scope=devices%3Acore%3Aread") else {
+            return fail("Tailscale OAuth token request", "missing devices:core:read scope: \(text)")
+        }
+
+        return ok("Tailscale OAuth token requests use devices:core:read scope")
     }
 
     private static func testRDPProfileParser() -> Result {
@@ -506,6 +590,28 @@ enum SelfTests {
         return ok("Saved connections resolve protocol routes")
     }
 
+    private static func testViewerControlPreferenceScope() -> Result {
+        let rdp = ViewerControlPreferenceScope(
+            connectionProtocol: .rdp,
+            host: " Windows-PC.tailnet.ts.net ",
+            port: 3389
+        )
+        guard rdp.storageIdentifier == "rdp.windows-pc.tailnet.ts.net.3389" else {
+            return fail("Viewer preference scope", "unexpected RDP key: \(rdp.storageIdentifier)")
+        }
+
+        let screenQ = ViewerControlPreferenceScope(
+            connectionProtocol: .screenQ,
+            host: "mac mini.local",
+            port: ScreenQProtocol.defaultPort
+        )
+        guard screenQ.storageIdentifier == "screenQ.mac-mini.local.\(ScreenQProtocol.defaultPort)" else {
+            return fail("Viewer preference scope", "unexpected Screen Q key: \(screenQ.storageIdentifier)")
+        }
+
+        return ok("Viewer controls scope by protocol and host")
+    }
+
     private static func testSessionStateRoutingFlags() -> Result {
         let inactive: [SessionState] = [
             .idle,
@@ -615,6 +721,109 @@ enum SelfTests {
         }
 
         return ok("RFB security negotiation prefers Apple DH when appropriate")
+    }
+
+    private static func testRFBClientEncodingPreference() -> Result {
+        let encodings = RFBConnection.preferredClientEncodings
+        guard !encodings.contains(.zrle) else {
+            return fail("RFB encoding preference", "ZRLE should stay disabled until it uses a persistent inflater")
+        }
+        guard encodings.first == .tight else {
+            return fail("RFB encoding preference", "Tight should be preferred for Mac Screen Sharing compatibility")
+        }
+        guard encodings.contains(.raw), encodings.contains(.desktopSize) else {
+            return fail("RFB encoding preference", "raw and desktop-size fallback encodings are required")
+        }
+        return ok("RFB encoding preference avoids unsafe ZRLE")
+    }
+
+    private static func testVNCDisplayRegionOptions() -> Result {
+        let regions = VNCDisplayRegion.options(serverWidth: 7680, serverHeight: 3240)
+        guard let all = regions.first, all.id == "all", all.width == 7680, all.height == 3240 else {
+            return fail("VNC display regions", "all-displays region should preserve the server framebuffer")
+        }
+        guard regions.contains(where: { $0.id == "left" && $0.width == 3840 }) else {
+            return fail("VNC display regions", "wide framebuffers should expose left/right regions")
+        }
+        guard regions.contains(where: { $0.id == "top-left" && $0.pixelCount < all.pixelCount }) else {
+            return fail("VNC display regions", "large framebuffers should expose smaller memory-safe regions")
+        }
+        return ok("VNC display regions expose all and cropped large-desktop views")
+    }
+
+    private static func testRFBDecoderRejectsOversizedRect() -> Result {
+        do {
+            _ = try RFBEncodingDecoder.decodedByteCount(width: UInt16.max, height: UInt16.max)
+            return fail("RFB decoded rect limit", "decoder accepted an oversized rectangle")
+        } catch RFBError.protocolError {
+            return ok("RFB decoder rejects oversized rectangles")
+        } catch {
+            return fail("RFB decoded rect limit", "wrong error: \(error)")
+        }
+    }
+
+    private static func testRFBFrameBufferClipsViewportRects() -> Result {
+        let framebuffer = RFBFrameBuffer(width: 2, height: 2, originX: 10, originY: 20)
+        let pixels = Data([
+            0, 0, 255, 0,
+            0, 255, 0, 0,
+            255, 0, 0, 0,
+            255, 255, 255, 0
+        ])
+        framebuffer.apply([
+            RFBRect(x: 9, y: 19, width: 2, height: 2, encoding: RFBEncoding.raw.rawValue, data: pixels)
+        ])
+
+        guard let image = framebuffer.makeCGImage(),
+              let rendered = xrgbBytes(from: image) else {
+            return fail("RFB framebuffer viewport clipping", "unable to render framebuffer")
+        }
+
+        let expected = Data([
+            255, 255, 255, 0,
+            0, 0, 0, 0,
+            0, 0, 0, 0,
+            0, 0, 0, 0
+        ])
+        guard rendered == expected else {
+            return fail("RFB framebuffer viewport clipping", "clipped rect did not land at viewport origin")
+        }
+        return ok("RFB framebuffer clips updates to viewport origin")
+    }
+
+    private static func testRFBFrameBufferScaledImageAvoidsFullSizePublish() -> Result {
+        let framebuffer = RFBFrameBuffer(width: 4, height: 2)
+        let pixels = Data([
+            0, 0, 255, 0,
+            0, 255, 0, 0,
+            255, 0, 0, 0,
+            255, 255, 255, 0,
+            10, 20, 30, 0,
+            40, 50, 60, 0,
+            70, 80, 90, 0,
+            100, 110, 120, 0
+        ])
+        framebuffer.apply([
+            RFBRect(x: 0, y: 0, width: 4, height: 2, encoding: RFBEncoding.raw.rawValue, data: pixels)
+        ])
+
+        guard let image = framebuffer.makeCGImage(maxDimension: 2) else {
+            return fail("RFB framebuffer scaled image", "scaled image was nil")
+        }
+        guard image.width == 2, image.height == 1 else {
+            return fail("RFB framebuffer scaled image", "unexpected size \(image.width)x\(image.height)")
+        }
+        guard let rendered = xrgbBytes(from: image) else {
+            return fail("RFB framebuffer scaled image", "unable to read scaled image")
+        }
+        let expected = Data([
+            0, 0, 255, 0,
+            255, 0, 0, 0
+        ])
+        guard rendered == expected else {
+            return fail("RFB framebuffer scaled image", "nearest downsample did not preserve expected pixels")
+        }
+        return ok("RFB framebuffer publishes bounded scaled images")
     }
 
     // MARK: - RFB encoding decoders
@@ -962,6 +1171,28 @@ enum SelfTests {
             UInt8(((value >> 7) & 0x7F) | 0x80),
             UInt8((value >> 14) & 0xFF)
         ])
+    }
+
+    private static func xrgbBytes(from image: CGImage) -> Data? {
+        var output = Data(count: image.width * image.height * 4)
+        let didDraw = output.withUnsafeMutableBytes { rawBuffer -> Bool in
+            guard let baseAddress = rawBuffer.baseAddress,
+                  let context = CGContext(
+                    data: baseAddress,
+                    width: image.width,
+                    height: image.height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: image.width * 4,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+                  ) else {
+                return false
+            }
+            context.interpolationQuality = .none
+            context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+            return true
+        }
+        return didDraw ? output : nil
     }
 
     private static func pngFixture(width: Int, height: Int, xrgb: Data) throws -> Data {

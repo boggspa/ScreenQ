@@ -65,6 +65,19 @@ nonisolated struct DiscoveredHost: Identifiable, Hashable, Sendable {
     var advertisedPlatform: String?   { txtRecord["platform"] }
     var advertisesControl: Bool       { txtRecord["supportsControl"] == "true" }
     var advertisesVideo: Bool         { txtRecord["supportsVideo"] == "true" }
+    var advertisedDeviceID: String?   { txtRecord[ScreenQProtocol.TXT.deviceID] }
+    var advertisedPresence: String?   { txtRecord[ScreenQProtocol.TXT.presence] }
+    var advertisedStatus: String?     { txtRecord[ScreenQProtocol.TXT.status] }
+    var supportsReplayKit: Bool       { txtRecord[ScreenQProtocol.TXT.supportsReplayKit] == "true" }
+    var acceptsScreenQConnection: Bool {
+        txtRecord[ScreenQProtocol.TXT.acceptsScreenQ] != "false"
+    }
+    var isAppleMobilePlatform: Bool {
+        advertisedPlatform == "iOS" || advertisedPlatform == "iPadOS"
+    }
+    var isIOSShareOnlyPresence: Bool {
+        source == .screenQ && isAppleMobilePlatform && supportsReplayKit && !acceptsScreenQConnection
+    }
     var isRFB: Bool { source == .rfb }
 }
 

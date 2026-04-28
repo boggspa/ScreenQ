@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		7FC3969250CFE8F393763878 /* (null) in Embed App Extensions */ = {isa = PBXBuildFile; platformFilter = ios; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		7FC3969250CFE8F393763878 /* ScreenQBroadcastExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 3E6A59D32C39B34C8B41D0A1 /* ScreenQBroadcastExtension.appex */; platformFilter = ios; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		88FE2490DE049381C98CF85F /* BroadcastSetupViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADC410E6D59C3BC81F0B2BEA /* BroadcastSetupViewController.swift */; };
 		8B10995F447C605DCE358D03 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BD2D6CE306DB63FA527F2D51 /* UIKit.framework */; };
 		C78FD42CCB663C6A863FDB5C /* SampleHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 712843F835CA4E96312A6ADA /* SampleHandler.swift */; };
@@ -32,7 +32,7 @@
 			dstPath = "";
 			dstSubfolderSpec = 13;
 			files = (
-				7FC3969250CFE8F393763878 /* (null) in Embed App Extensions */,
+				7FC3969250CFE8F393763878 /* ScreenQBroadcastExtension.appex in Embed App Extensions */,
 			);
 			name = "Embed App Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -41,6 +41,7 @@
 
 /* Begin PBXFileReference section */
 		712843F835CA4E96312A6ADA /* SampleHandler.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SampleHandler.swift; sourceTree = "<group>"; };
+		3E6A59D32C39B34C8B41D0A1 /* ScreenQBroadcastExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ScreenQBroadcastExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		A4D54D312F9F2D49005C5E5A /* Screen Q.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Screen Q.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		ADC410E6D59C3BC81F0B2BEA /* BroadcastSetupViewController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BroadcastSetupViewController.swift; sourceTree = "<group>"; };
 		B03AAB192C472D9EEF840377 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -49,9 +50,22 @@
 		D4B78E0C54D3D7B2BA1056D8 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = System/Library/Frameworks/Foundation.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		B03AAB1A2C472D9EEF840377 /* Exceptions for "Screen Q" folder in "Screen Q" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = A4D54D302F9F2D49005C5E5A /* Screen Q */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		A4D54D332F9F2D49005C5E5A /* Screen Q */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				B03AAB1A2C472D9EEF840377 /* Exceptions for "Screen Q" folder in "Screen Q" target */,
+			);
 			path = "Screen Q";
 			sourceTree = "<group>";
 		};
@@ -112,6 +126,7 @@
 			isa = PBXGroup;
 			children = (
 				A4D54D312F9F2D49005C5E5A /* Screen Q.app */,
+				3E6A59D32C39B34C8B41D0A1 /* ScreenQBroadcastExtension.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -133,6 +148,7 @@
 			);
 			name = ScreenQBroadcastExtension;
 			productName = ScreenQBroadcastExtension;
+			productReference = 3E6A59D32C39B34C8B41D0A1 /* ScreenQBroadcastExtension.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
 		A4D54D302F9F2D49005C5E5A /* Screen Q */ = {
@@ -404,8 +420,8 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSBonjourServices = "_screenq._tcp. _rfb._tcp.";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Screen Q/Info.plist";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Screen Q uses the local network to discover and connect to nearby Screen Q hosts via Bonjour and to relay screen sharing data over LAN, VPN, or Tailscale.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
@@ -452,8 +468,8 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSBonjourServices = "_screenq._tcp. _rfb._tcp.";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Screen Q/Info.plist";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Screen Q uses the local network to discover and connect to nearby Screen Q hosts via Bonjour and to relay screen sharing data over LAN, VPN, or Tailscale.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;

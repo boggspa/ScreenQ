@@ -65,6 +65,13 @@ nonisolated enum VNCKeychainCredentialStore {
             addQuery[key] = value
         }
         SecItemAdd(addQuery as CFDictionary, nil)
+        CredentialInventoryStore.upsert(
+            kind: credential.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .vnc : .macScreenSharing,
+            host: host,
+            port: port,
+            username: credential.username,
+            requiresLocalAuthentication: requireLocalAuthentication
+        )
     }
 
     static func delete(host: String, port: UInt16) {
@@ -74,6 +81,24 @@ nonisolated enum VNCKeychainCredentialStore {
             kSecAttrAccount as String: account(host: host, port: port)
         ]
         SecItemDelete(query as CFDictionary)
+        CredentialInventoryStore.remove(kind: .macScreenSharing, host: host, port: port)
+        CredentialInventoryStore.remove(kind: .vnc, host: host, port: port)
+    }
+
+    static func knownCredentialMetadata() -> [StoredCredentialMetadata] {
+        CredentialKeychainAccess.genericPasswordAccounts(service: service).compactMap { account in
+            guard let endpoint = CredentialKeychainAccess.endpoint(fromNormalizedAccount: account) else {
+                return nil
+            }
+            return StoredCredentialMetadata(
+                kind: .vnc,
+                host: endpoint.host,
+                port: endpoint.port,
+                username: nil,
+                requiresLocalAuthentication: false,
+                lastUpdated: .distantPast
+            )
+        }
     }
 
     private static func account(host: String, port: UInt16) -> String {

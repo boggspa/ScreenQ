@@ -13,6 +13,8 @@ import UniformTypeIdentifiers
 struct FileTransferOverlay: View {
 
     @ObservedObject var service: FileTransferService
+    var isTransferEnabled: Bool = true
+    var disabledReason: String?
     @State private var isDropTargeted = false
 
     var body: some View {
@@ -20,10 +22,13 @@ struct FileTransferOverlay: View {
             Spacer()
             if !service.incomingTransfers.isEmpty || !service.outgoingTransfers.isEmpty {
                 transferList
+            } else if !isTransferEnabled, let disabledReason {
+                disabledStatus(reason: disabledReason)
             }
         }
         .overlay(dropTargetIndicator)
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+            guard isTransferEnabled else { return false }
             handleDrop(providers)
             return true
         }
@@ -33,7 +38,7 @@ struct FileTransferOverlay: View {
 
     @ViewBuilder
     private var dropTargetIndicator: some View {
-        if isDropTargeted {
+        if isDropTargeted && isTransferEnabled {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 3, dash: [12, 6]))
                 .background(
@@ -61,10 +66,10 @@ struct FileTransferOverlay: View {
     private var transferList: some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(service.incomingTransfers) { transfer in
-                transferRow(transfer, direction: "Receiving")
+                transferRow(transfer, direction: "Incoming", isIncoming: true)
             }
             ForEach(service.outgoingTransfers) { transfer in
-                transferRow(transfer, direction: "Sending")
+                transferRow(transfer, direction: "Outgoing", isIncoming: false)
             }
         }
         .padding(12)
@@ -75,7 +80,7 @@ struct FileTransferOverlay: View {
     }
 
     @ViewBuilder
-    private func transferRow(_ transfer: FileTransferService.FileTransfer, direction: String) -> some View {
+    private func transferRow(_ transfer: FileTransferService.FileTransfer, direction: String, isIncoming: Bool) -> some View {
         HStack(spacing: 8) {
             Image(systemName: fileIcon(for: transfer.mimeType))
                 .foregroundColor(.secondary)
@@ -91,9 +96,24 @@ struct FileTransferOverlay: View {
                         .font(.caption2)
                         .foregroundColor(stateColor(transfer.state))
                 }
+                Text(ByteFormatting.human(Int(min(transfer.fileSize, Int64(Int.max)))))
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
             }
             Spacer()
-            if transfer.state == .receiving || transfer.state == .accepted || transfer.state == .offered {
+            if isIncoming && transfer.state == .offered {
+                HStack(spacing: 6) {
+                    Button("Decline") {
+                        service.rejectTransfer(transfer.id)
+                    }
+                    .buttonStyle(.bordered)
+                    Button("Accept") {
+                        service.acceptTransfer(transfer.id)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .controlSize(.mini)
+            } else if transfer.state == .receiving || transfer.state == .accepted || (!isIncoming && transfer.state == .offered) {
                 ProgressView(value: transfer.progress)
                     .frame(width: 60)
             } else if case .completed = transfer.state {
@@ -107,6 +127,16 @@ struct FileTransferOverlay: View {
                     .foregroundColor(.orange)
             }
         }
+    }
+
+    private func disabledStatus(reason: String) -> some View {
+        Label(reason, systemImage: "doc.badge.arrow.up")
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .padding(10)
+            .background(Color.black.opacity(0.62))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .padding(12)
     }
 
     // MARK: - Drop handling
@@ -137,7 +167,7 @@ struct FileTransferOverlay: View {
 
     private func stateLabel(_ state: FileTransferService.TransferState) -> String {
         switch state {
-        case .offered:        return "Waiting…"
+        case .offered:        return "Needs approval"
         case .accepted:       return "Sending…"
         case .receiving:      return "Receiving…"
         case .completed:      return "Done"

@@ -19,7 +19,6 @@ final class FileTransferService: ObservableObject {
 
     @Published private(set) var outgoingTransfers: [FileTransfer] = []
     @Published private(set) var incomingTransfers: [FileTransfer] = []
-    @Published var autoAcceptIncoming: Bool = false
 
     struct FileTransfer: Identifiable {
         let id: UUID
@@ -113,25 +112,25 @@ final class FileTransferService: ObservableObject {
         )
         incomingTransfers.append(transfer)
         receiveBuffers[offer.transferID] = Data()
-
-        if autoAcceptIncoming {
-            acceptTransfer(offer.transferID)
-        }
+        Logger.shared.info("FileTransfer: incoming offer \(offer.fileName) (\(offer.fileSize) bytes) awaiting user approval")
     }
 
     /// Accept an incoming file offer.
     func acceptTransfer(_ transferID: UUID) {
-        acceptedIncomingTransfers.insert(transferID)
         if let idx = incomingTransfers.firstIndex(where: { $0.id == transferID }) {
+            guard incomingTransfers[idx].state == .offered else { return }
             incomingTransfers[idx].state = .receiving
         }
+        acceptedIncomingTransfers.insert(transferID)
         sendMessage?(.fileAccept, FileAcceptMessage(transferID: transferID))
     }
 
     /// Reject an incoming file offer.
     func rejectTransfer(_ transferID: UUID, reason: String = "User declined") {
         sendMessage?(.fileReject, FileRejectMessage(transferID: transferID, reason: reason))
-        incomingTransfers.removeAll { $0.id == transferID }
+        if let idx = incomingTransfers.firstIndex(where: { $0.id == transferID }) {
+            incomingTransfers[idx].state = .rejected(reason)
+        }
         receiveBuffers.removeValue(forKey: transferID)
         acceptedIncomingTransfers.remove(transferID)
     }

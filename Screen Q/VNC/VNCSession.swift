@@ -15,6 +15,124 @@ import CoreGraphics
 import AppKit
 #endif
 
+nonisolated struct VNCDisplayRegion: Identifiable, Hashable, Sendable {
+    let id: String
+    let name: String
+    let detail: String
+    let x: Int
+    let y: Int
+    let width: Int
+    let height: Int
+
+    var isFullDesktop: Bool { x == 0 && y == 0 && id == "all" }
+    var pixelCount: Int { width * height }
+
+    static func options(serverWidth: Int, serverHeight: Int) -> [VNCDisplayRegion] {
+        guard serverWidth > 0, serverHeight > 0 else { return [] }
+
+        var regions: [VNCDisplayRegion] = [
+            VNCDisplayRegion(
+                id: "all",
+                name: "All Displays",
+                detail: "\(serverWidth)x\(serverHeight)",
+                x: 0,
+                y: 0,
+                width: serverWidth,
+                height: serverHeight
+            )
+        ]
+
+        let aspect = CGFloat(serverWidth) / CGFloat(serverHeight)
+        if serverWidth >= 3_000, aspect >= 1.6 {
+            let leftWidth = serverWidth / 2
+            regions.append(VNCDisplayRegion(
+                id: "left",
+                name: "Left Region",
+                detail: "\(leftWidth)x\(serverHeight)",
+                x: 0,
+                y: 0,
+                width: leftWidth,
+                height: serverHeight
+            ))
+            regions.append(VNCDisplayRegion(
+                id: "right",
+                name: "Right Region",
+                detail: "\(serverWidth - leftWidth)x\(serverHeight)",
+                x: leftWidth,
+                y: 0,
+                width: serverWidth - leftWidth,
+                height: serverHeight
+            ))
+        }
+
+        let verticalAspect = CGFloat(serverHeight) / CGFloat(serverWidth)
+        if serverHeight >= 2_200, verticalAspect >= 1.2 {
+            let topHeight = serverHeight / 2
+            regions.append(VNCDisplayRegion(
+                id: "top",
+                name: "Top Region",
+                detail: "\(serverWidth)x\(topHeight)",
+                x: 0,
+                y: 0,
+                width: serverWidth,
+                height: topHeight
+            ))
+            regions.append(VNCDisplayRegion(
+                id: "bottom",
+                name: "Bottom Region",
+                detail: "\(serverWidth)x\(serverHeight - topHeight)",
+                x: 0,
+                y: topHeight,
+                width: serverWidth,
+                height: serverHeight - topHeight
+            ))
+        }
+
+        if serverWidth >= 5_000, serverHeight >= 2_500 {
+            let halfWidth = serverWidth / 2
+            let halfHeight = serverHeight / 2
+            regions.append(VNCDisplayRegion(
+                id: "top-left",
+                name: "Top Left Region",
+                detail: "\(halfWidth)x\(halfHeight)",
+                x: 0,
+                y: 0,
+                width: halfWidth,
+                height: halfHeight
+            ))
+            regions.append(VNCDisplayRegion(
+                id: "top-right",
+                name: "Top Right Region",
+                detail: "\(serverWidth - halfWidth)x\(halfHeight)",
+                x: halfWidth,
+                y: 0,
+                width: serverWidth - halfWidth,
+                height: halfHeight
+            ))
+            regions.append(VNCDisplayRegion(
+                id: "bottom-left",
+                name: "Bottom Left Region",
+                detail: "\(halfWidth)x\(serverHeight - halfHeight)",
+                x: 0,
+                y: halfHeight,
+                width: halfWidth,
+                height: serverHeight - halfHeight
+            ))
+            regions.append(VNCDisplayRegion(
+                id: "bottom-right",
+                name: "Bottom Right Region",
+                detail: "\(serverWidth - halfWidth)x\(serverHeight - halfHeight)",
+                x: halfWidth,
+                y: halfHeight,
+                width: serverWidth - halfWidth,
+                height: serverHeight - halfHeight
+            ))
+        }
+
+        return regions
+    }
+}
+
 @MainActor
 final class VNCSession: ObservableObject {
 
@@ -31,6 +149,9 @@ final class VNCSession: ObservableObject {
     @Published private(set) var serverName: String = ""
     @Published private(set) var serverWidth: Int = 0
     @Published private(set) var serverHeight: Int = 0
+    @Published private(set) var displayRegions: [VNCDisplayRegion] = []
+    @Published private(set) var selectedDisplayRegion: VNCDisplayRegion?
+    @Published private(set) var streamRegion: VNCDisplayRegion?
     @Published var vncPassword: String = ""
     @Published var username: String = ""
     @Published var needsPassword = false       // VNC Auth (type 2)
@@ -44,12 +165,20 @@ final class VNCSession: ObservableObject {
     let profile: RFBConnectionProfile
 
     private var connection: RFBConnection?
+    private var connectTask: Task<Void, Never>?
     private var frameBuffer: RFBFrameBuffer?
     private var messageTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
+    private var streamRegionRequestTask: Task<Void, Never>?
     private let host: String
     private let port: UInt16
     private let endpoint: NWEndpoint?
+    private var isDisconnecting = false
+    private var lastImagePublish = Date.distantPast
+    private var viewportAspect: CGFloat = 4.0 / 3.0
+    private var isViewportRefreshPending = false
+    private var lastStreamRegionRequest = Date.distantPast
+    private let minimumStreamRegionRequestInterval: TimeInterval = 0.10
 
     // MARK: - Init
 
@@ -72,13 +201,26 @@ final class VNCSession: ObservableObject {
     }
 
     deinit {
+        connectTask?.cancel()
         messageTask?.cancel()
         refreshTask?.cancel()
+        streamRegionRequestTask?.cancel()
     }
 
     // MARK: - Connect
 
-    func connect() async {
+    func startConnecting() {
+        connectTask?.cancel()
+        streamRegionRequestTask?.cancel()
+        streamRegionRequestTask = nil
+        isViewportRefreshPending = false
+        isDisconnecting = false
+        connectTask = Task { [weak self] in
+            await self?.connect()
+        }
+    }
+
+    private func connect() async {
         phase = .connecting
         securityStatus = .vncConnecting(scope: networkTrustScope, profile: profile)
         loadStoredCredentialIfNeeded()
@@ -97,27 +239,41 @@ final class VNCSession: ObservableObject {
                 password: vncPassword.isEmpty ? nil : vncPassword,
                 securityPreference: profile == .macScreenSharing ? .macAccountFirst : .vncPasswordFirst
             )
+            guard shouldContinueConnecting else {
+                await conn.disconnect()
+                return
+            }
             serverName = serverInit.name
             serverWidth = Int(serverInit.width)
             serverHeight = Int(serverInit.height)
-            frameBuffer = RFBFrameBuffer(width: serverWidth, height: serverHeight)
+            displayRegions = VNCDisplayRegion.options(serverWidth: serverWidth, serverHeight: serverHeight)
+            selectedDisplayRegion = displayRegions.first
+            streamRegion = initialStreamRegion(in: selectedDisplayRegion)
+            frameBuffer = makeFrameBuffer(for: streamRegion)
             securityStatus = .vnc(report: await conn.securityReport(), scope: networkTrustScope, profile: profile)
+            guard shouldContinueConnecting else {
+                await conn.disconnect()
+                return
+            }
             phase = .connected
             Logger.shared.info("VNC connected to \(serverInit.name) (\(serverInit.width)×\(serverInit.height))")
             saveCredentialIfAllowed()
             startMessageLoop(conn)
             startRefreshLoop(conn)
         } catch RFBError.authRequired {
+            guard shouldContinueConnecting else { return }
             securityStatus = .vnc(report: await conn.securityReport(), scope: networkTrustScope, profile: profile)
             needsPassword = true
             phase = .authenticating
             await conn.disconnect()
         } catch RFBError.credentialsRequired {
+            guard shouldContinueConnecting else { return }
             securityStatus = .vnc(report: await conn.securityReport(), scope: networkTrustScope, profile: profile)
             needsCredentials = true
             phase = .authenticating
             await conn.disconnect()
         } catch RFBError.authFailed(let reason) {
+            guard shouldContinueConnecting else { return }
             let report = await conn.securityReport()
             let isMacAccountFailure = profile == .macScreenSharing && report.mode == .appleDH
             securityStatus = RemoteSecurityStatus(
@@ -137,7 +293,12 @@ final class VNCSession: ObservableObject {
             needsPassword = report.mode == .vncAuth
             phase = (needsCredentials || needsPassword) ? .authenticating : .failed(reason: reason)
             await conn.disconnect()
+        } catch is CancellationError {
+            phase = .ended(reason: "Disconnected")
+        } catch RFBError.disconnected where isDisconnecting {
+            phase = .ended(reason: "Disconnected")
         } catch {
+            guard shouldContinueConnecting else { return }
             securityStatus = RemoteSecurityStatus(
                 level: .unknown,
                 title: profile == .macScreenSharing ? "Mac Screen Sharing failed" : "VNC connection failed",
@@ -156,20 +317,177 @@ final class VNCSession: ObservableObject {
     /// Retry connection after VNC password is entered.
     func retryWithPassword() async {
         needsPassword = false
-        await connect()
+        startConnecting()
     }
 
     /// Retry connection after macOS credentials are entered.
     func retryWithCredentials() async {
         needsCredentials = false
-        await connect()
+        startConnecting()
     }
 
     func disconnect() async {
+        guard !isDisconnecting else {
+            phase = .ended(reason: "Disconnected")
+            return
+        }
+        isDisconnecting = true
+        connectTask?.cancel()
+        connectTask = nil
         messageTask?.cancel()
+        messageTask = nil
         refreshTask?.cancel()
+        refreshTask = nil
+        streamRegionRequestTask?.cancel()
+        streamRegionRequestTask = nil
         await connection?.disconnect()
+        connection = nil
+        needsPassword = false
+        needsCredentials = false
+        currentImage = nil
+        frameBuffer = nil
         phase = .ended(reason: "Disconnected")
+    }
+
+    var viewWidth: Int {
+        streamRegion?.width ?? selectedDisplayRegion?.width ?? serverWidth
+    }
+
+    var viewHeight: Int {
+        streamRegion?.height ?? selectedDisplayRegion?.height ?? serverHeight
+    }
+
+    var viewportOriginX: Int {
+        streamRegion?.x ?? selectedDisplayRegion?.x ?? 0
+    }
+
+    var viewportOriginY: Int {
+        streamRegion?.y ?? selectedDisplayRegion?.y ?? 0
+    }
+
+    var isUsingStreamViewport: Bool {
+        guard let selectedDisplayRegion, let streamRegion else { return false }
+        return selectedDisplayRegion.x != streamRegion.x ||
+            selectedDisplayRegion.y != streamRegion.y ||
+            selectedDisplayRegion.width != streamRegion.width ||
+            selectedDisplayRegion.height != streamRegion.height
+    }
+
+    var streamViewportSummary: String? {
+        guard isUsingStreamViewport, let streamRegion else { return nil }
+        return "\(streamRegion.width)x\(streamRegion.height) at \(streamRegion.x),\(streamRegion.y)"
+    }
+
+    var savedConnectionHost: String {
+        credentialHost
+    }
+
+    var savedConnectionPort: UInt16 {
+        credentialPort
+    }
+
+    var savedConnectionProtocol: RemoteConnectionProtocol {
+        profile == .macScreenSharing ? .macScreenSharing : .vnc
+    }
+
+    func updateViewportCanvasSize(_ size: CGSize) async {
+        guard size.width > 0, size.height > 0 else { return }
+        let aspect = max(0.2, min(6.0, size.width / size.height))
+        guard abs(aspect - viewportAspect) > 0.05 else { return }
+        viewportAspect = aspect
+        guard case .connected = phase, let bounds = selectedDisplayRegion, let current = streamRegion else { return }
+        let centerX = current.x + current.width / 2
+        let centerY = current.y + current.height / 2
+        await setStreamRegion(boundedStreamRegion(
+            in: bounds,
+            centerX: centerX,
+            centerY: centerY,
+            targetPixels: isUsingStreamViewport ? current.pixelCount : nil
+        ))
+    }
+
+    func selectDisplayRegion(_ region: VNCDisplayRegion) async {
+        guard case .connected = phase else { return }
+        guard selectedDisplayRegion != region else { return }
+        selectedDisplayRegion = region
+        guard let stream = initialStreamRegion(in: region) else { return }
+        await setStreamRegion(stream)
+    }
+
+    func resetStreamViewport() async {
+        guard case .connected = phase else { return }
+        guard let stream = initialStreamRegion(in: selectedDisplayRegion) else { return }
+        await setStreamRegion(stream)
+    }
+
+    func handleMemoryPressure() async {
+        #if os(iOS)
+        guard case .connected = phase,
+              let bounds = selectedDisplayRegion,
+              let current = streamRegion else {
+            return
+        }
+        let centerX = current.x + current.width / 2
+        let centerY = current.y + current.height / 2
+        await setStreamRegion(boundedStreamRegion(
+            in: bounds,
+            centerX: centerX,
+            centerY: centerY,
+            targetPixels: emergencyStreamPixels
+        ))
+        #endif
+    }
+
+    func zoomStreamViewport(magnification: CGFloat, anchorViewX: Int, anchorViewY: Int) async {
+        guard case .connected = phase,
+              let bounds = selectedDisplayRegion,
+              let current = streamRegion,
+              magnification.isFinite,
+              magnification > 0 else {
+            return
+        }
+
+        let clampedMagnification = max(0.5, min(2.0, magnification))
+        let minWidth = min(bounds.width, 640)
+        let minHeight = min(bounds.height, 360)
+        var nextWidth = Int((CGFloat(current.width) / clampedMagnification).rounded())
+        var nextHeight = Int((CGFloat(current.height) / clampedMagnification).rounded())
+        nextWidth = max(minWidth, min(bounds.width, nextWidth))
+        nextHeight = max(minHeight, min(bounds.height, nextHeight))
+
+        let anchorRemoteX = current.x + max(0, min(current.width, anchorViewX))
+        let anchorRemoteY = current.y + max(0, min(current.height, anchorViewY))
+        let anchorRatioX = CGFloat(max(0, min(current.width, anchorViewX))) / CGFloat(max(1, current.width))
+        let anchorRatioY = CGFloat(max(0, min(current.height, anchorViewY))) / CGFloat(max(1, current.height))
+        let nextX = anchorRemoteX - Int((CGFloat(nextWidth) * anchorRatioX).rounded())
+        let nextY = anchorRemoteY - Int((CGFloat(nextHeight) * anchorRatioY).rounded())
+        await setStreamRegion(clampedStreamRegion(
+            in: bounds,
+            x: nextX,
+            y: nextY,
+            width: nextWidth,
+            height: nextHeight
+        ))
+    }
+
+    func panStreamViewport(deltaViewX: Int, deltaViewY: Int) async {
+        guard case .connected = phase,
+              let bounds = selectedDisplayRegion,
+              let current = streamRegion,
+              isUsingStreamViewport else {
+            return
+        }
+        await setStreamRegion(clampedStreamRegion(
+            in: bounds,
+            x: current.x - deltaViewX,
+            y: current.y - deltaViewY,
+            width: current.width,
+            height: current.height
+        ))
+    }
+
+    private var shouldContinueConnecting: Bool {
+        !isDisconnecting && !Task.isCancelled
     }
 
     private var credentialHost: String {
@@ -213,11 +531,12 @@ final class VNCSession: ObservableObject {
 
     func sendMouseMove(x: Int, y: Int, buttons: UInt8 = 0) {
         guard case .connected = phase else { return }
+        let point = remotePoint(viewX: x, viewY: y)
         Task {
             try? await connection?.sendPointerEvent(
                 buttons: buttons,
-                x: UInt16(clamping: x),
-                y: UInt16(clamping: y)
+                x: UInt16(clamping: point.x),
+                y: UInt16(clamping: point.y)
             )
         }
     }
@@ -225,11 +544,12 @@ final class VNCSession: ObservableObject {
     func sendMouseClick(x: Int, y: Int, button: Int, isDown: Bool) {
         guard case .connected = phase else { return }
         let mask: UInt8 = UInt8(1 << button)
+        let point = remotePoint(viewX: x, viewY: y)
         Task {
             try? await connection?.sendPointerEvent(
                 buttons: isDown ? mask : 0,
-                x: UInt16(clamping: x),
-                y: UInt16(clamping: y)
+                x: UInt16(clamping: point.x),
+                y: UInt16(clamping: point.y)
             )
         }
     }
@@ -238,9 +558,10 @@ final class VNCSession: ObservableObject {
         guard case .connected = phase else { return }
         // RFB scroll: button 4 = scroll up, button 5 = scroll down
         let button: UInt8 = deltaY < 0 ? (1 << 3) : (1 << 4) // button 4 or 5
+        let point = remotePoint(viewX: x, viewY: y)
         Task {
-            try? await connection?.sendPointerEvent(buttons: button, x: UInt16(clamping: x), y: UInt16(clamping: y))
-            try? await connection?.sendPointerEvent(buttons: 0, x: UInt16(clamping: x), y: UInt16(clamping: y))
+            try? await connection?.sendPointerEvent(buttons: button, x: UInt16(clamping: point.x), y: UInt16(clamping: point.y))
+            try? await connection?.sendPointerEvent(buttons: 0, x: UInt16(clamping: point.x), y: UInt16(clamping: point.y))
         }
     }
 
@@ -280,7 +601,7 @@ final class VNCSession: ObservableObject {
             do {
                 while !Task.isCancelled {
                     guard let msg = try await conn.readServerMessage() else { break }
-                    await self?.handleServerMessage(msg)
+                    self?.handleServerMessage(msg)
                 }
             } catch {
                 await MainActor.run {
@@ -300,12 +621,25 @@ final class VNCSession: ObservableObject {
     private func handleServerMessage(_ msg: RFBConnection.ServerMessage) {
         switch msg {
         case .framebufferUpdate(let rects):
+            guard !rects.isEmpty else { return }
             frameBuffer?.apply(rects)
-            currentImage = frameBuffer?.makeCGImage()
+            if isViewportRefreshPending {
+                isViewportRefreshPending = false
+                lastImagePublish = .distantPast
+            }
+            publishCurrentImageIfNeeded()
         case .desktopResize(let w, let h):
+            streamRegionRequestTask?.cancel()
+            streamRegionRequestTask = nil
+            isViewportRefreshPending = false
             serverWidth = Int(w)
             serverHeight = Int(h)
-            frameBuffer?.resize(width: Int(w), height: Int(h))
+            displayRegions = VNCDisplayRegion.options(serverWidth: serverWidth, serverHeight: serverHeight)
+            selectedDisplayRegion = displayRegions.first
+            streamRegion = initialStreamRegion(in: selectedDisplayRegion)
+            frameBuffer = makeFrameBuffer(for: streamRegion)
+            currentImage = nil
+            lastImagePublish = .distantPast
         case .bell:
             #if os(macOS)
             NSSound.beep()
@@ -324,21 +658,251 @@ final class VNCSession: ObservableObject {
         refreshTask = Task { [weak self] in
             // Initial full request.
             try? await conn.sendFramebufferUpdateRequest(
-                incremental: false, x: 0, y: 0,
-                w: UInt16(self?.serverWidth ?? 1920),
-                h: UInt16(self?.serverHeight ?? 1080)
+                incremental: false,
+                x: UInt16(clamping: self?.viewportOriginX ?? 0),
+                y: UInt16(clamping: self?.viewportOriginY ?? 0),
+                w: UInt16(clamping: self?.viewWidth ?? 1920),
+                h: UInt16(clamping: self?.viewHeight ?? 1080)
             )
 
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 33_333_333) // ~30 fps
                 guard let s = self, case .connected = s.phase else { break }
+                guard !s.isViewportRefreshPending else { continue }
                 try? await conn.sendFramebufferUpdateRequest(
-                    incremental: true, x: 0, y: 0,
-                    w: UInt16(s.serverWidth),
-                    h: UInt16(s.serverHeight)
+                    incremental: true,
+                    x: UInt16(clamping: s.viewportOriginX),
+                    y: UInt16(clamping: s.viewportOriginY),
+                    w: UInt16(clamping: s.viewWidth),
+                    h: UInt16(clamping: s.viewHeight)
                 )
             }
         }
+    }
+
+    private func setStreamRegion(_ region: VNCDisplayRegion) async {
+        guard region.width > 0, region.height > 0 else { return }
+        guard streamRegion != region else { return }
+        streamRegion = region
+        isViewportRefreshPending = true
+        if let frameBuffer {
+            frameBuffer.resize(width: region.width, height: region.height, originX: region.x, originY: region.y)
+        } else {
+            frameBuffer = makeFrameBuffer(for: region)
+        }
+        lastImagePublish = .distantPast
+        scheduleFullStreamRegionRefresh(region)
+    }
+
+    private func scheduleFullStreamRegionRefresh(_ region: VNCDisplayRegion) {
+        streamRegionRequestTask?.cancel()
+        let elapsed = Date().timeIntervalSince(lastStreamRegionRequest)
+        let delay = max(0, minimumStreamRegionRequestInterval - elapsed)
+        streamRegionRequestTask = Task { [weak self] in
+            if delay > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+            guard !Task.isCancelled else { return }
+            await self?.requestFullStreamRegionRefresh(region)
+        }
+    }
+
+    private func requestFullStreamRegionRefresh(_ region: VNCDisplayRegion) async {
+        guard case .connected = phase,
+              !isDisconnecting,
+              streamRegion == region else {
+            return
+        }
+        lastStreamRegionRequest = Date()
+        try? await connection?.sendFramebufferUpdateRequest(
+            incremental: false,
+            x: UInt16(clamping: region.x),
+            y: UInt16(clamping: region.y),
+            w: UInt16(clamping: region.width),
+            h: UInt16(clamping: region.height)
+        )
+    }
+
+    private func initialStreamRegion(in bounds: VNCDisplayRegion?) -> VNCDisplayRegion? {
+        guard let bounds else { return nil }
+        if canStreamFullRegionByDefault(bounds) {
+            return bounds
+        }
+        return boundedStreamRegion(
+            in: bounds,
+            centerX: bounds.x + bounds.width / 2,
+            centerY: bounds.y + bounds.height / 2,
+            targetPixels: defaultStreamPixels(for: bounds)
+        )
+    }
+
+    private func boundedStreamRegion(
+        in bounds: VNCDisplayRegion,
+        centerX: Int,
+        centerY: Int,
+        targetPixels: Int? = nil
+    ) -> VNCDisplayRegion {
+        #if os(iOS)
+        let pixelBudget = min(maxStreamPixels(for: bounds), max(1, targetPixels ?? defaultStreamPixels(for: bounds)))
+        guard bounds.pixelCount > pixelBudget else { return bounds }
+
+        let targetAspect = preferredStreamAspect(for: bounds)
+        let maxArea = CGFloat(pixelBudget)
+        var width = Int((sqrt(maxArea * targetAspect)).rounded(.down))
+        var height = Int((CGFloat(width) / targetAspect).rounded(.down))
+        if width > bounds.width {
+            width = bounds.width
+            height = Int((CGFloat(width) / targetAspect).rounded(.down))
+        }
+        if height > bounds.height {
+            height = bounds.height
+            width = Int((CGFloat(height) * targetAspect).rounded(.down))
+        }
+        width = max(1, min(bounds.width, width))
+        height = max(1, min(bounds.height, height))
+        return clampedStreamRegion(
+            in: bounds,
+            x: centerX - width / 2,
+            y: centerY - height / 2,
+            width: width,
+            height: height
+        )
+        #else
+        return bounds
+        #endif
+    }
+
+    private func canStreamFullRegionByDefault(_ bounds: VNCDisplayRegion) -> Bool {
+        #if os(iOS)
+        return bounds.pixelCount <= defaultFullStreamPixelLimit
+        #else
+        return true
+        #endif
+    }
+
+    private func clampedStreamRegion(in bounds: VNCDisplayRegion, x: Int, y: Int, width: Int, height: Int) -> VNCDisplayRegion {
+        var nextWidth = max(1, min(bounds.width, width))
+        var nextHeight = max(1, min(bounds.height, height))
+
+        #if os(iOS)
+        let maxPixels = maxStreamPixels(for: bounds)
+        if nextWidth * nextHeight > maxPixels {
+            let scale = sqrt(CGFloat(maxPixels) / CGFloat(nextWidth * nextHeight))
+            nextWidth = max(1, min(bounds.width, Int((CGFloat(nextWidth) * scale).rounded(.down))))
+            nextHeight = max(1, min(bounds.height, Int((CGFloat(nextHeight) * scale).rounded(.down))))
+        }
+        #endif
+
+        let minX = bounds.x
+        let minY = bounds.y
+        let maxX = bounds.x + bounds.width - nextWidth
+        let maxY = bounds.y + bounds.height - nextHeight
+        let nextX = min(max(x, minX), max(minX, maxX))
+        let nextY = min(max(y, minY), max(minY, maxY))
+        if nextX == bounds.x, nextY == bounds.y, nextWidth == bounds.width, nextHeight == bounds.height {
+            return bounds
+        }
+        return VNCDisplayRegion(
+            id: "\(bounds.id)-viewport-\(nextX)-\(nextY)-\(nextWidth)-\(nextHeight)",
+            name: "\(bounds.name) View",
+            detail: "\(nextWidth)x\(nextHeight)",
+            x: nextX,
+            y: nextY,
+            width: nextWidth,
+            height: nextHeight
+        )
+    }
+
+    private func makeFrameBuffer(for region: VNCDisplayRegion?) -> RFBFrameBuffer {
+        RFBFrameBuffer(
+            width: region?.width ?? serverWidth,
+            height: region?.height ?? serverHeight,
+            originX: region?.x ?? 0,
+            originY: region?.y ?? 0
+        )
+    }
+
+    private func remotePoint(viewX: Int, viewY: Int) -> (x: Int, y: Int) {
+        let remoteX = viewportOriginX + viewX
+        let remoteY = viewportOriginY + viewY
+        return (
+            max(0, min(serverWidth - 1, remoteX)),
+            max(0, min(serverHeight - 1, remoteY))
+        )
+    }
+
+    private func publishCurrentImageIfNeeded() {
+        let now = Date()
+        guard currentImage == nil || now.timeIntervalSince(lastImagePublish) >= imagePublishInterval else {
+            return
+        }
+        lastImagePublish = now
+        currentImage = autoreleasepool {
+            frameBuffer?.makeCGImage(maxDimension: renderMaxDimension)
+        }
+    }
+
+    private var imagePublishInterval: TimeInterval {
+        #if os(iOS)
+        return 1.0 / 10.0
+        #else
+        return 1.0 / 24.0
+        #endif
+    }
+
+    private var renderMaxDimension: Int? {
+        #if os(iOS)
+        return 1_536
+        #else
+        return nil
+        #endif
+    }
+
+    private func preferredStreamAspect(for bounds: VNCDisplayRegion) -> CGFloat {
+        #if os(iOS)
+        if bounds.isFullDesktop, bounds.width > bounds.height {
+            return max(0.2, min(6.0, CGFloat(bounds.width) / CGFloat(bounds.height)))
+        }
+        #endif
+        return max(0.2, min(6.0, viewportAspect))
+    }
+
+    private func maxStreamPixels(for bounds: VNCDisplayRegion) -> Int {
+        #if os(iOS)
+        if canStreamFullRegionByDefault(bounds) {
+            return defaultFullStreamPixelLimit
+        }
+        return bounds.isFullDesktop ? 4_000_000 : 1_100_000
+        #else
+        return Int.max / 4
+        #endif
+    }
+
+    private func defaultStreamPixels(for bounds: VNCDisplayRegion) -> Int {
+        #if os(iOS)
+        if canStreamFullRegionByDefault(bounds) {
+            return bounds.pixelCount
+        }
+        return bounds.isFullDesktop ? 2_400_000 : 720_000
+        #else
+        return Int.max / 4
+        #endif
+    }
+
+    private var defaultFullStreamPixelLimit: Int {
+        #if os(iOS)
+        return 30_000_000
+        #else
+        return Int.max / 4
+        #endif
+    }
+
+    private var emergencyStreamPixels: Int {
+        #if os(iOS)
+        return 360_000
+        #else
+        return Int.max / 4
+        #endif
     }
 }
 

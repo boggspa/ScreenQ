@@ -96,7 +96,7 @@ struct HostMacView: View {
                     get: { app.displaySelection.selectedDisplayID ?? app.displaySelection.displays.first?.id ?? 0 },
                     set: { app.displaySelection.selectedDisplayID = $0 }
                 )) {
-                    ForEach(app.displaySelection.displays) { d in
+                    ForEach(app.displaySelection.displayOptions()) { d in
                         Text("\(d.name) — \(d.pixelWidth)×\(d.pixelHeight)")
                             .tag(d.id)
                     }
@@ -319,7 +319,12 @@ struct HostMacView: View {
         do {
             try await app.bonjourAdvertiser.start(
                 deviceName: app.localDeviceName,
-                capabilities: hostCapabilities()
+                capabilities: hostCapabilities(),
+                deviceID: app.localDeviceID,
+                metadata: [
+                    ScreenQProtocol.TXT.presence: "nativeHost",
+                    ScreenQProtocol.TXT.acceptsScreenQ: "true"
+                ]
             ) { connection in
                 Task { await acceptIncoming(connection) }
             }
@@ -366,7 +371,7 @@ struct HostMacView: View {
 
     private func sendDisplayList(to box: HostSessionBox) async {
         let firstID = app.displaySelection.displays.first?.id
-        let infos: [Screen_Q.DisplayInfo] = app.displaySelection.displays.map { d in
+        let infos: [Screen_Q.DisplayInfo] = app.displaySelection.displayOptions().map { d in
             Screen_Q.DisplayInfo(
                 id: d.id,
                 name: d.name,
@@ -575,6 +580,10 @@ struct HostMacView: View {
                         Task { try? await box.connection.sendVideoFrame(meta: meta, payload: payload) }
                     }
                 )
+                app.cursorTracker.start(displayID: switchMsg.displayID, subscriberID: box.id) { [weak box] msg in
+                    guard let box else { return }
+                    Task { try? await box.connection.sendJSON(.cursorUpdate, msg) }
+                }
             } catch {
                 app.lastError = error.localizedDescription
             }
@@ -722,8 +731,9 @@ struct HostMacView: View {
         }
 
         // Start cursor tracking.
-        if let displayID = app.displaySelection.selectedDisplayID {
-            app.cursorTracker.start(displayID: displayID, subscriberID: box.id) { [weak box] msg in
+        let cursorDisplayID = app.displaySelection.selectedDisplayID ?? app.displaySelection.displays.first?.id
+        if let cursorDisplayID {
+            app.cursorTracker.start(displayID: cursorDisplayID, subscriberID: box.id) { [weak box] msg in
                 guard let box else { return }
                 Task { try? await box.connection.sendJSON(.cursorUpdate, msg) }
             }

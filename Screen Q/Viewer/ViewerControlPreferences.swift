@@ -23,54 +23,258 @@ enum ViewerKeyboardInputMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+enum ViewerToolbarItem: String, CaseIterable, Identifiable {
+    case touchMode
+    case fitMode
+    case resetZoom
+    case displays
+    case keyboard
+    case modifiers
+    case arrows
+    case specialKeys
+    case functionKeys
+    case shortcuts
+    case moreActions
+    case disconnect
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .touchMode: return "Touch Mode"
+        case .fitMode: return "Fit or Fill"
+        case .resetZoom: return "Reset Zoom"
+        case .displays: return "Displays"
+        case .keyboard: return "Keyboard"
+        case .modifiers: return "Modifiers"
+        case .arrows: return "Arrow Keys"
+        case .specialKeys: return "Special Keys"
+        case .functionKeys: return "Function Keys"
+        case .shortcuts: return "Shortcuts"
+        case .moreActions: return "More Actions"
+        case .disconnect: return "Disconnect"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .touchMode: return "hand.tap"
+        case .fitMode: return "rectangle.arrowtriangle.2.inward"
+        case .resetZoom: return "minus.magnifyingglass"
+        case .displays: return "display.2"
+        case .keyboard: return "keyboard"
+        case .modifiers: return "command"
+        case .arrows: return "arrow.up.and.down.and.arrow.left.and.right"
+        case .specialKeys: return "command.square"
+        case .functionKeys: return "f.square"
+        case .shortcuts: return "sparkles.rectangle.stack"
+        case .moreActions: return "ellipsis.circle"
+        case .disconnect: return "xmark.circle"
+        }
+    }
+
+    var isRequired: Bool {
+        switch self {
+        case .moreActions:
+            return true
+        default:
+            return false
+        }
+    }
+
+    static let defaultOrder: [ViewerToolbarItem] = [
+        .touchMode,
+        .fitMode,
+        .resetZoom,
+        .displays,
+        .keyboard,
+        .modifiers,
+        .arrows,
+        .specialKeys,
+        .functionKeys,
+        .shortcuts,
+        .moreActions,
+        .disconnect
+    ]
+}
+
 @MainActor
 final class ViewerControlPreferences: ObservableObject {
 
     @Published var touchMode: TouchMode {
-        didSet { defaults.set(touchMode.rawValue, forKey: Keys.touchMode) }
+        didSet { defaults.set(touchMode.rawValue, forKey: keys.touchMode) }
     }
     @Published var toolbarStyle: ViewerToolbarStyle {
-        didSet { defaults.set(toolbarStyle.rawValue, forKey: Keys.toolbarStyle) }
+        didSet { defaults.set(toolbarStyle.rawValue, forKey: keys.toolbarStyle) }
     }
     @Published var fitMode: Bool {
-        didSet { defaults.set(fitMode, forKey: Keys.fitMode) }
+        didSet { defaults.set(fitMode, forKey: keys.fitMode) }
     }
     @Published var showStats: Bool {
-        didSet { defaults.set(showStats, forKey: Keys.showStats) }
+        didSet { defaults.set(showStats, forKey: keys.showStats) }
     }
     @Published var toolbarOffset: CGSize {
         didSet {
-            defaults.set(Double(toolbarOffset.width), forKey: Keys.toolbarOffsetX)
-            defaults.set(Double(toolbarOffset.height), forKey: Keys.toolbarOffsetY)
+            defaults.set(Double(toolbarOffset.width), forKey: keys.toolbarOffsetX)
+            defaults.set(Double(toolbarOffset.height), forKey: keys.toolbarOffsetY)
         }
     }
     @Published var preferredKeyboardMode: ViewerKeyboardInputMode {
-        didSet { defaults.set(preferredKeyboardMode.rawValue, forKey: Keys.keyboardMode) }
+        didSet { defaults.set(preferredKeyboardMode.rawValue, forKey: keys.keyboardMode) }
+    }
+    @Published var toolbarItems: [ViewerToolbarItem] {
+        didSet { defaults.set(toolbarItems.map(\.rawValue), forKey: keys.toolbarItems) }
+    }
+    @Published var hiddenToolbarItems: Set<ViewerToolbarItem> {
+        didSet { defaults.set(hiddenToolbarItems.map(\.rawValue), forKey: keys.hiddenToolbarItems) }
     }
 
     private let defaults: UserDefaults
+    private let keys: PreferenceKeys
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, scope: ViewerControlPreferenceScope? = nil) {
         self.defaults = defaults
-        touchMode = TouchMode(rawValue: defaults.string(forKey: Keys.touchMode) ?? "") ?? .directTouch
-        toolbarStyle = ViewerToolbarStyle(rawValue: defaults.string(forKey: Keys.toolbarStyle) ?? "") ?? .dockedFloating
-        fitMode = defaults.object(forKey: Keys.fitMode) as? Bool ?? true
-        showStats = defaults.object(forKey: Keys.showStats) as? Bool ?? true
+        self.keys = PreferenceKeys(scope: scope)
+        touchMode = TouchMode(rawValue: defaults.string(forKey: keys.touchMode, fallbackKey: PreferenceKeys.global.touchMode) ?? "") ?? .directTouch
+        toolbarStyle = ViewerToolbarStyle(rawValue: defaults.string(forKey: keys.toolbarStyle, fallbackKey: PreferenceKeys.global.toolbarStyle) ?? "") ?? .dockedFloating
+        fitMode = defaults.bool(forKey: keys.fitMode, fallbackKey: PreferenceKeys.global.fitMode) ?? true
+        showStats = defaults.bool(forKey: keys.showStats, fallbackKey: PreferenceKeys.global.showStats) ?? true
         toolbarOffset = CGSize(
-            width: defaults.double(forKey: Keys.toolbarOffsetX),
-            height: defaults.double(forKey: Keys.toolbarOffsetY)
+            width: defaults.double(forKey: keys.toolbarOffsetX, fallbackKey: PreferenceKeys.global.toolbarOffsetX) ?? 0,
+            height: defaults.double(forKey: keys.toolbarOffsetY, fallbackKey: PreferenceKeys.global.toolbarOffsetY) ?? 0
         )
-        preferredKeyboardMode = ViewerKeyboardInputMode(rawValue: defaults.string(forKey: Keys.keyboardMode) ?? "") ?? .unicode
+        preferredKeyboardMode = ViewerKeyboardInputMode(rawValue: defaults.string(forKey: keys.keyboardMode, fallbackKey: PreferenceKeys.global.keyboardMode) ?? "") ?? .unicode
+        toolbarItems = Self.sanitizedToolbarItems(defaults.stringArray(forKey: keys.toolbarItems) ?? defaults.stringArray(forKey: PreferenceKeys.global.toolbarItems))
+        hiddenToolbarItems = Self.sanitizedHiddenToolbarItems(defaults.stringArray(forKey: keys.hiddenToolbarItems) ?? defaults.stringArray(forKey: PreferenceKeys.global.hiddenToolbarItems))
     }
 
-    private enum Keys {
-        static let touchMode = "viewer.controls.touchMode"
-        static let toolbarStyle = "viewer.controls.toolbarStyle"
-        static let fitMode = "viewer.controls.fitMode"
-        static let showStats = "viewer.controls.showStats"
-        static let toolbarOffsetX = "viewer.controls.toolbarOffsetX"
-        static let toolbarOffsetY = "viewer.controls.toolbarOffsetY"
-        static let keyboardMode = "viewer.controls.keyboardMode"
+    func isToolbarItemVisible(_ item: ViewerToolbarItem) -> Bool {
+        item.isRequired || !hiddenToolbarItems.contains(item)
+    }
+
+    func setToolbarItem(_ item: ViewerToolbarItem, visible: Bool) {
+        guard !item.isRequired else { return }
+        if visible {
+            hiddenToolbarItems.remove(item)
+        } else {
+            hiddenToolbarItems.insert(item)
+        }
+    }
+
+    func moveToolbarItems(from source: IndexSet, to destination: Int) {
+        let movingItems = source.map { toolbarItems[$0] }
+        var remainingItems = toolbarItems
+        for index in source.sorted(by: >) {
+            remainingItems.remove(at: index)
+        }
+        let adjustedDestination = destination - source.filter { $0 < destination }.count
+        let insertionIndex = min(max(adjustedDestination, 0), remainingItems.count)
+        remainingItems.insert(contentsOf: movingItems, at: insertionIndex)
+        toolbarItems = remainingItems
+    }
+
+    func resetToolbarItems() {
+        toolbarItems = ViewerToolbarItem.defaultOrder
+        hiddenToolbarItems = []
+    }
+
+    private static func sanitizedToolbarItems(_ rawItems: [String]?) -> [ViewerToolbarItem] {
+        var seen = Set<ViewerToolbarItem>()
+        var items = (rawItems ?? []).compactMap(ViewerToolbarItem.init(rawValue:)).filter { item in
+            seen.insert(item).inserted
+        }
+        for item in ViewerToolbarItem.defaultOrder where !seen.contains(item) {
+            items.append(item)
+        }
+        return items
+    }
+
+    private static func sanitizedHiddenToolbarItems(_ rawItems: [String]?) -> Set<ViewerToolbarItem> {
+        Set((rawItems ?? [])
+            .compactMap(ViewerToolbarItem.init(rawValue:))
+            .filter { !$0.isRequired })
+    }
+
+    private struct PreferenceKeys {
+        static let global = PreferenceKeys(prefix: "viewer.controls")
+
+        let touchMode: String
+        let toolbarStyle: String
+        let fitMode: String
+        let showStats: String
+        let toolbarOffsetX: String
+        let toolbarOffsetY: String
+        let keyboardMode: String
+        let toolbarItems: String
+        let hiddenToolbarItems: String
+
+        init(scope: ViewerControlPreferenceScope?) {
+            if let scope {
+                self.init(prefix: "viewer.controls.connection.\(scope.storageIdentifier)")
+            } else {
+                self.init(prefix: "viewer.controls")
+            }
+        }
+
+        private init(prefix: String) {
+            touchMode = "\(prefix).touchMode"
+            toolbarStyle = "\(prefix).toolbarStyle"
+            fitMode = "\(prefix).fitMode"
+            showStats = "\(prefix).showStats"
+            toolbarOffsetX = "\(prefix).toolbarOffsetX"
+            toolbarOffsetY = "\(prefix).toolbarOffsetY"
+            keyboardMode = "\(prefix).keyboardMode"
+            toolbarItems = "\(prefix).toolbarItems"
+            hiddenToolbarItems = "\(prefix).hiddenToolbarItems"
+        }
+    }
+}
+
+nonisolated struct ViewerControlPreferenceScope: Hashable, Sendable {
+    var connectionProtocol: RemoteConnectionProtocol
+    var host: String
+    var port: UInt16
+
+    var storageIdentifier: String {
+        [
+            connectionProtocol.rawValue,
+            Self.storageComponent(host),
+            String(port)
+        ].joined(separator: ".")
+    }
+
+    private static func storageComponent(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty else { return "unknown" }
+        return String(trimmed.map { character in
+            character.isLetter || character.isNumber || character == "." || character == "-" || character == "_" ? character : "-"
+        })
+    }
+}
+
+private extension UserDefaults {
+    func string(forKey key: String, fallbackKey: String) -> String? {
+        string(forKey: key) ?? string(forKey: fallbackKey)
+    }
+
+    func bool(forKey key: String, fallbackKey: String) -> Bool? {
+        if object(forKey: key) != nil {
+            return bool(forKey: key)
+        }
+        if object(forKey: fallbackKey) != nil {
+            return bool(forKey: fallbackKey)
+        }
+        return nil
+    }
+
+    func double(forKey key: String, fallbackKey: String) -> Double? {
+        if object(forKey: key) != nil {
+            return double(forKey: key)
+        }
+        if object(forKey: fallbackKey) != nil {
+            return double(forKey: fallbackKey)
+        }
+        return nil
     }
 }
 

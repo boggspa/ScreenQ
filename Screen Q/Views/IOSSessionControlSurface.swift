@@ -29,6 +29,7 @@ struct IOSSessionControlSurface: View {
     @State private var dragStartOffset: CGSize?
     @State private var isCollapsed = false
     @State private var showGestureHelp = false
+    @State private var showToolbarCustomization = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -57,6 +58,9 @@ struct IOSSessionControlSurface: View {
         .allowsHitTesting(true)
         .sheet(isPresented: $showGestureHelp) {
             gestureHelp
+        }
+        .sheet(isPresented: $showToolbarCustomization) {
+            toolbarCustomization
         }
     }
 
@@ -111,71 +115,54 @@ struct IOSSessionControlSurface: View {
             Group {
                 if isCollapsed && isPad {
                     stack(vertical: vertical) {
-                        statusPill
-                        iconButton(systemName: "chevron.up.chevron.down", label: "Expand controls") {
-                            isCollapsed = false
+                        toolbarSection(vertical: vertical) {
+                            statusPill
+                            iconButton(systemName: "chevron.up.chevron.down", label: "Expand controls") {
+                                isCollapsed = false
+                            }
                         }
-                        iconButton(
-                            systemName: isKeyboardActive ? "keyboard.chevron.compact.down" : "keyboard",
-                            label: isKeyboardActive ? "Hide keyboard" : "Show keyboard",
-                            disabled: !canControl
-                        ) {
-                            isKeyboardActive.toggle()
+                        toolbarSection(vertical: vertical) {
+                            if preferences.isToolbarItemVisible(.keyboard) {
+                                keyboardButton
+                            }
+                            if preferences.isToolbarItemVisible(.touchMode) {
+                                touchModeMenu
+                            }
                         }
-                        touchModeMenu
-                        actionMenu
+                        toolbarSection(vertical: vertical) {
+                            actionMenu
+                        }
                     }
                 } else {
                     stack(vertical: vertical) {
-                        statusPill
-                        iconButton(systemName: "minus", label: isPad ? "Collapse controls" : "Hide controls") {
-                            if isPad {
-                                isCollapsed = true
-                            } else {
-                                controlsVisible = false
+                        toolbarSection(vertical: vertical) {
+                            statusPill
+                            iconButton(systemName: "minus", label: isPad ? "Collapse controls" : "Hide controls") {
+                                if isPad {
+                                    isCollapsed = true
+                                } else {
+                                    controlsVisible = false
+                                }
                             }
                         }
-                        iconButton(
-                            systemName: isKeyboardActive ? "keyboard.chevron.compact.down" : "keyboard",
-                            label: isKeyboardActive ? "Hide keyboard" : "Show keyboard",
-                            disabled: !canControl
-                        ) {
-                            isKeyboardActive.toggle()
-                        }
-                        touchModeMenu
-                        iconButton(
-                            systemName: fitMode ? "rectangle.arrowtriangle.2.outward" : "rectangle.arrowtriangle.2.inward",
-                            label: fitMode ? "Fill screen" : "Fit to screen"
-                        ) {
-                            fitMode.toggle()
-                            preferences.fitMode = fitMode
-                        }
-                        if !viewport.isIdentity {
-                            iconButton(systemName: "minus.magnifyingglass", label: "Reset zoom") {
-                                resetViewport()
+                        ForEach(toolbarItemSections, id: \.self) { section in
+                            toolbarSection(vertical: vertical, prominent: section.contains(.disconnect)) {
+                                ForEach(section) { item in
+                                    toolbarItem(item, vertical: vertical)
+                                }
                             }
-                        }
-                        displayMenu
-                        modifierButtons(vertical: vertical)
-                        arrowsMenu
-                        specialKeysMenu
-                        functionKeysMenu
-                        shortcutsMenu
-                        actionMenu
-                        iconButton(systemName: "xmark.circle", label: "Disconnect", tint: .red) {
-                            onDisconnect()
                         }
                     }
                 }
             }
-            .padding(8)
+            .padding(7)
         }
         .frame(
-            maxWidth: vertical ? 58 : min(UIScreen.main.bounds.width - 20, 760),
-            maxHeight: vertical ? min(UIScreen.main.bounds.height - 20, 620) : 58
+            maxWidth: vertical ? 68 : min(UIScreen.main.bounds.width - 20, isPad ? 940 : 760),
+            maxHeight: vertical ? min(UIScreen.main.bounds.height - 20, 660) : 66
         )
         .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .shadow(color: .black.opacity(0.25), radius: 14, x: 0, y: 6)
         .accessibilityElement(children: .contain)
     }
@@ -188,6 +175,38 @@ struct IOSSessionControlSurface: View {
             .background(Color.primary.opacity(0.08))
             .clipShape(Circle())
             .accessibilityLabel(canControl ? "Control enabled" : "Observe only")
+    }
+
+    private var keyboardButton: some View {
+        iconButton(
+            systemName: isKeyboardActive ? "keyboard.chevron.compact.down" : "keyboard",
+            label: isKeyboardActive ? "Hide keyboard" : "Show keyboard",
+            disabled: !canControl
+        ) {
+            isKeyboardActive.toggle()
+        }
+    }
+
+    private var fitModeButton: some View {
+        iconButton(
+            systemName: fitMode ? "rectangle.arrowtriangle.2.outward" : "rectangle.arrowtriangle.2.inward",
+            label: fitMode ? "Fill screen" : "Fit to screen"
+        ) {
+            fitMode.toggle()
+            preferences.fitMode = fitMode
+        }
+    }
+
+    private var resetZoomButton: some View {
+        iconButton(systemName: "minus.magnifyingglass", label: "Reset zoom") {
+            resetViewport()
+        }
+    }
+
+    private var disconnectButton: some View {
+        iconButton(systemName: "xmark.circle", label: "Disconnect", tint: .red) {
+            onDisconnect()
+        }
     }
 
     private var touchModeMenu: some View {
@@ -343,6 +362,9 @@ struct IOSSessionControlSurface: View {
             Button("Gesture Help") {
                 showGestureHelp = true
             }
+            Button("Customize Toolbar") {
+                showToolbarCustomization = true
+            }
             Button("Hide Controls") {
                 controlsVisible = false
             }
@@ -374,13 +396,112 @@ struct IOSSessionControlSurface: View {
         .accessibilityLabel(label)
     }
 
+    private var toolbarItemSections: [[ViewerToolbarItem]] {
+        let items = preferences.toolbarItems.filter(toolbarItemIsAvailable)
+        var sections: [[ViewerToolbarItem]] = []
+        var current: [ViewerToolbarItem] = []
+        var currentSection: ToolbarItemSection?
+
+        for item in items {
+            let section = toolbarSection(for: item)
+            if currentSection == nil || currentSection == section {
+                current.append(item)
+                currentSection = section
+            } else {
+                sections.append(current)
+                current = [item]
+                currentSection = section
+            }
+        }
+
+        if !current.isEmpty {
+            sections.append(current)
+        }
+        return sections
+    }
+
+    private func toolbarItemIsAvailable(_ item: ViewerToolbarItem) -> Bool {
+        guard preferences.isToolbarItemVisible(item) else { return false }
+        switch item {
+        case .resetZoom:
+            return !viewport.isIdentity
+        case .displays:
+            return session.remoteDisplays.count > 1
+        default:
+            return true
+        }
+    }
+
+    private func toolbarSection(for item: ViewerToolbarItem) -> ToolbarItemSection {
+        switch item {
+        case .touchMode:
+            return .touch
+        case .fitMode, .resetZoom, .displays:
+            return .viewport
+        case .disconnect:
+            return .disconnect
+        case .keyboard, .modifiers, .arrows, .specialKeys, .functionKeys, .shortcuts, .moreActions:
+            return .input
+        }
+    }
+
+    @ViewBuilder
+    private func toolbarItem(_ item: ViewerToolbarItem, vertical: Bool) -> some View {
+        switch item {
+        case .touchMode:
+            touchModeMenu
+        case .fitMode:
+            fitModeButton
+        case .resetZoom:
+            resetZoomButton
+        case .displays:
+            displayMenu
+        case .keyboard:
+            keyboardButton
+        case .modifiers:
+            modifierButtons(vertical: vertical)
+        case .arrows:
+            arrowsMenu
+        case .specialKeys:
+            specialKeysMenu
+        case .functionKeys:
+            functionKeysMenu
+        case .shortcuts:
+            shortcutsMenu
+        case .moreActions:
+            actionMenu
+        case .disconnect:
+            disconnectButton
+        }
+    }
+
+    private enum ToolbarItemSection {
+        case touch
+        case viewport
+        case input
+        case disconnect
+    }
+
     @ViewBuilder
     private func stack<Content: View>(vertical: Bool, @ViewBuilder content: () -> Content) -> some View {
         if vertical {
-            VStack(spacing: 8, content: content)
+            VStack(spacing: 7, content: content)
         } else {
-            HStack(spacing: 8, content: content)
+            HStack(spacing: 7, content: content)
         }
+    }
+
+    private func toolbarSection<Content: View>(
+        vertical: Bool,
+        prominent: Bool = false,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        stack(vertical: vertical, content: content)
+            .padding(3)
+            .background(
+                prominent ? Color.red.opacity(0.14) : Color.primary.opacity(0.08),
+                in: RoundedRectangle(cornerRadius: vertical ? 22 : 24, style: .continuous)
+            )
     }
 
     private var canControl: Bool {
@@ -399,6 +520,52 @@ struct IOSSessionControlSurface: View {
             width: min(max(offset.width, -maxX), maxX),
             height: min(max(offset.height, -maxY), maxY)
         )
+    }
+
+    private var toolbarCustomization: some View {
+        NavigationStack {
+            List {
+                Section("Toolbar Items") {
+                    ForEach(preferences.toolbarItems) { item in
+                        HStack(spacing: 12) {
+                            Label(item.label, systemImage: item.icon)
+                            Spacer()
+                            if item.isRequired {
+                                Text("Required")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Toggle(
+                                    item.label,
+                                    isOn: Binding(
+                                        get: { preferences.isToolbarItemVisible(item) },
+                                        set: { preferences.setToolbarItem(item, visible: $0) }
+                                    )
+                                )
+                                .labelsHidden()
+                            }
+                        }
+                    }
+                    .onMove { source, destination in
+                        preferences.moveToolbarItems(from: source, to: destination)
+                    }
+                }
+                Section {
+                    Button("Reset Default Toolbar") {
+                        preferences.resetToolbarItems()
+                    }
+                }
+            }
+            .navigationTitle("Customize Toolbar")
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    EditButton()
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { showToolbarCustomization = false }
+                }
+            }
+        }
     }
 
     private var gestureHelp: some View {
