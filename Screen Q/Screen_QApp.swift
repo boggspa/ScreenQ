@@ -2,16 +2,21 @@
 //  Screen_QApp.swift
 //  Screen Q
 //
-//  Created by Chris Izatt on 27/04/2026.
+//  App entry point. Wires AppState into the SwiftUI scene graph and
+//  presents the role-based HomeView. The default ContentView scaffold has
+//  been removed in favor of the Screen Q product surface.
 //
 
 import SwiftUI
 
 @main
 struct Screen_QApp: App {
+    @StateObject private var appState = AppState()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            HomeView()
+                .environmentObject(appState)
         }
     }
 }
