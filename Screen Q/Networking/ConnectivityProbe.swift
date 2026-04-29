@@ -50,6 +50,7 @@ nonisolated enum ProbeResult: Sendable, Equatable {
 }
 
 nonisolated enum ConnectivityProbe {
+    static let fastTimeoutSeconds: TimeInterval = 2
 
     /// Attempt a bare TCP connect to `host:port` with a timeout.
     /// Resolves to `.reachable` if the TCP handshake completes, or a

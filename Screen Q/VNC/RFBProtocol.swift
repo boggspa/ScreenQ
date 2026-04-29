@@ -35,6 +35,20 @@ nonisolated enum RFBSecurityPreference: Sendable {
     case vncPasswordFirst
 }
 
+nonisolated struct RFBConnectionTimeouts: Sendable, Equatable {
+    var tcpConnect: TimeInterval?
+    var versionHandshake: TimeInterval?
+    var securityNegotiation: TimeInterval?
+    var serverInitialization: TimeInterval?
+
+    static let `default` = RFBConnectionTimeouts(
+        tcpConnect: 2.0,
+        versionHandshake: 2.5,
+        securityNegotiation: 3.0,
+        serverInitialization: 3.0
+    )
+}
+
 nonisolated enum RFBSecurityNegotiationPolicy {
     static func chooseSecurityType(
         offered types: [UInt8],
@@ -238,6 +252,7 @@ nonisolated struct RFBRect: Sendable {
 nonisolated enum RFBError: Error, LocalizedError, Sendable {
     case connectionFailed(String)
     case protocolError(String)
+    case timeout(stage: String)
     case authFailed(String)
     case authRequired            // VNC password only (type 2)
     case credentialsRequired     // macOS username + password (Apple DH type 30)
@@ -249,6 +264,7 @@ nonisolated enum RFBError: Error, LocalizedError, Sendable {
         switch self {
         case .connectionFailed(let s): return "VNC connection failed: \(s)"
         case .protocolError(let s):    return "RFB protocol error: \(s)"
+        case .timeout(let stage):       return "Timed out during \(stage)"
         case .authFailed(let s):       return "Authentication failed: \(s)"
         case .authRequired:            return "VNC password required"
         case .credentialsRequired:     return "macOS username and password required"

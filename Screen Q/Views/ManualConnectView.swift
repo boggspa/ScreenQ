@@ -114,7 +114,7 @@ struct ManualConnectView: View {
 
                 Button(connectButtonTitle) { connect() }
                     .buttonStyle(.bordered)
-                    .disabled(trimmedHost.isEmpty || !selectedProtocol.isAvailable)
+                    .disabled(trimmedHost.isEmpty || isProbing || !selectedProtocol.isAvailable)
             }
         }
         .fileImporter(
@@ -298,14 +298,41 @@ struct ManualConnectView: View {
     }
 
     private func connect() {
+        let host = trimmedHost
+        let port = resolvedPort
+        let connectionProtocol = selectedProtocol
+
+        guard !host.isEmpty else { return }
+
+        if connectionProtocol.requiresManualConnectProbe {
+            isProbing = true
+            probeResult = nil
+            Task {
+                let result = await ConnectivityProbe.probe(
+                    host: host,
+                    port: port,
+                    timeoutSeconds: ConnectivityProbe.fastTimeoutSeconds
+                )
+                await MainActor.run {
+                    isProbing = false
+                    guard result.succeeded else {
+                        probeResult = result
+                        return
+                    }
+                    onConnect(host, port, connectionProtocol)
+                }
+            }
+            return
+        }
+
         if selectedProtocol == .rdp,
            let importedRDPProfile,
-           importedRDPProfile.host == trimmedHost,
-           importedRDPProfile.port == resolvedPort {
+           importedRDPProfile.host == host,
+           importedRDPProfile.port == port {
             onImportRDP(importedRDPProfile)
             return
         }
-        onConnect(trimmedHost, resolvedPort, selectedProtocol)
+        onConnect(host, port, connectionProtocol)
     }
 
     private func importRDP(_ result: Result<[URL], Error>) {
@@ -336,6 +363,15 @@ struct ManualConnectView: View {
 }
 
 private extension RemoteConnectionProtocol {
+    var requiresManualConnectProbe: Bool {
+        switch self {
+        case .macScreenSharing, .vnc:
+            return true
+        case .screenQ, .rdp:
+            return false
+        }
+    }
+
     var systemImage: String {
         switch self {
         case .screenQ:

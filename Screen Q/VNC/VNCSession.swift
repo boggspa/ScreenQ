@@ -133,6 +133,76 @@ nonisolated struct VNCDisplayRegion: Identifiable, Hashable, Sendable {
     }
 }
 
+private struct VNCConnectionRouteAttempt: Identifiable, Sendable {
+    let id = UUID()
+    let connection: RFBConnection
+    let logicalHost: String
+    let logicalPort: UInt16
+    let routedHost: String?
+    let routedPort: UInt16?
+    let routeLabel: VNCRouteLabel?
+    let isCached: Bool
+}
+
+private struct VNCConnectedRoute: Sendable {
+    let attempt: VNCConnectionRouteAttempt
+    let serverInit: RFBServerInit
+}
+
+private struct VNCRouteFailure: @unchecked Sendable {
+    let attempt: VNCConnectionRouteAttempt
+    let error: Error
+}
+
+private enum VNCRouteAttemptOutcome: @unchecked Sendable {
+    case connected(VNCConnectedRoute)
+    case failed(VNCRouteFailure)
+}
+
+private actor VNCConnectionRaceCoordinator {
+    private let attempts: [VNCConnectionRouteAttempt]
+    private var winnerID: UUID?
+
+    init(attempts: [VNCConnectionRouteAttempt]) {
+        self.attempts = attempts
+    }
+
+    func markVersionHandshake(for id: UUID) async throws {
+        if let winnerID {
+            if winnerID == id { return }
+            throw CancellationError()
+        }
+
+        winnerID = id
+        for attempt in attempts where attempt.id != id {
+            await attempt.connection.disconnect()
+        }
+    }
+}
+
+private func connectVNCConnectionRouteAttempt(
+    _ attempt: VNCConnectionRouteAttempt,
+    username: String?,
+    password: String?,
+    securityPreference: RFBSecurityPreference,
+    timeouts: RFBConnectionTimeouts,
+    onVersionHandshake: (@Sendable () async throws -> Void)? = nil
+) async -> VNCRouteAttemptOutcome {
+    do {
+        let serverInit = try await attempt.connection.connect(
+            username: username,
+            password: password,
+            securityPreference: securityPreference,
+            timeouts: timeouts,
+            onVersionHandshake: onVersionHandshake
+        )
+        return .connected(VNCConnectedRoute(attempt: attempt, serverInit: serverInit))
+    } catch {
+        await attempt.connection.disconnect()
+        return .failed(VNCRouteFailure(attempt: attempt, error: error))
+    }
+}
+
 @MainActor
 final class VNCSession: ObservableObject {
 
@@ -160,6 +230,7 @@ final class VNCSession: ObservableObject {
     @Published var requireLocalAuthenticationForSavedCredentials = true
     @Published private(set) var securityStatus: RemoteSecurityStatus = .unknown
     @Published private(set) var streamQualityPreference = StreamQualityPreference()
+    @Published private(set) var streamProfile = StreamQualityPreference().nativeProfile
 
     let remoteSessionID = UUID()
     let peerLabel: String
@@ -224,22 +295,18 @@ final class VNCSession: ObservableObject {
     private func connect() async {
         phase = .connecting
         securityStatus = .vncConnecting(scope: networkTrustScope, profile: profile)
-        loadStoredCredentialIfNeeded()
-
-        let conn: RFBConnection
-        if let endpoint = endpoint {
-            conn = RFBConnection(endpoint: endpoint)
-        } else {
-            conn = RFBConnection(host: host, port: port)
-        }
-        self.connection = conn
+        guard prepareCredentialPreflightForDial() else { return }
 
         do {
-            let serverInit = try await conn.connect(
+            let connectedRoute = try await connectUsingPreferredRoute(
                 username: username.isEmpty ? nil : username,
                 password: vncPassword.isEmpty ? nil : vncPassword,
-                securityPreference: profile == .macScreenSharing ? .macAccountFirst : .vncPasswordFirst
+                securityPreference: profile == .macScreenSharing ? .macAccountFirst : .vncPasswordFirst,
+                timeouts: connectionTimeouts
             )
+            let conn = connectedRoute.attempt.connection
+            self.connection = conn
+            let serverInit = connectedRoute.serverInit
             guard shouldContinueConnecting else {
                 await conn.disconnect()
                 return
@@ -258,24 +325,25 @@ final class VNCSession: ObservableObject {
             }
             phase = .connected
             Logger.shared.info("VNC connected to \(serverInit.name) (\(serverInit.width)×\(serverInit.height))")
+            recordSuccessfulRoute(connectedRoute.attempt)
             saveCredentialIfAllowed()
             startMessageLoop(conn)
             startRefreshLoop(conn)
         } catch RFBError.authRequired {
             guard shouldContinueConnecting else { return }
-            securityStatus = .vnc(report: await conn.securityReport(), scope: networkTrustScope, profile: profile)
+            securityStatus = .vnc(report: await currentSecurityReport(), scope: networkTrustScope, profile: profile)
             needsPassword = true
             phase = .authenticating
-            await conn.disconnect()
+            await disconnectCurrentConnection()
         } catch RFBError.credentialsRequired {
             guard shouldContinueConnecting else { return }
-            securityStatus = .vnc(report: await conn.securityReport(), scope: networkTrustScope, profile: profile)
+            securityStatus = .vnc(report: await currentSecurityReport(), scope: networkTrustScope, profile: profile)
             needsCredentials = true
             phase = .authenticating
-            await conn.disconnect()
+            await disconnectCurrentConnection()
         } catch RFBError.authFailed(let reason) {
             guard shouldContinueConnecting else { return }
-            let report = await conn.securityReport()
+            let report = await currentSecurityReport()
             let isMacAccountFailure = profile == .macScreenSharing && report.mode == .appleDH
             securityStatus = RemoteSecurityStatus(
                 level: .legacyAuth,
@@ -293,13 +361,14 @@ final class VNCSession: ObservableObject {
             needsCredentials = report.mode == .appleDH
             needsPassword = report.mode == .vncAuth
             phase = (needsCredentials || needsPassword) ? .authenticating : .failed(reason: reason)
-            await conn.disconnect()
+            await disconnectCurrentConnection()
         } catch is CancellationError {
             phase = .ended(reason: "Disconnected")
         } catch RFBError.disconnected where isDisconnecting {
             phase = .ended(reason: "Disconnected")
         } catch {
             guard shouldContinueConnecting else { return }
+            await disconnectCurrentConnection()
             securityStatus = RemoteSecurityStatus(
                 level: .unknown,
                 title: profile == .macScreenSharing ? "Mac Screen Sharing failed" : "VNC connection failed",
@@ -399,10 +468,12 @@ final class VNCSession: ObservableObject {
         )
     }
 
-    func updateStreamQuality(_ quality: Double) async {
+    func updateStreamQuality(_ quality: Double, profile: StreamProfile? = nil) async {
         let preference = StreamQualityPreference(quality: quality)
-        guard preference != streamQualityPreference else { return }
+        let nextProfile = profile ?? preference.nativeProfile
+        guard preference != streamQualityPreference || nextProfile != streamProfile else { return }
         streamQualityPreference = preference
+        streamProfile = nextProfile
         lastImagePublish = .distantPast
         guard case .connected = phase,
               let bounds = selectedDisplayRegion,
@@ -531,6 +602,242 @@ final class VNCSession: ObservableObject {
 
     private var networkTrustScope: NetworkTrustScope {
         NetworkTrustScope.classify(host: credentialHost)
+    }
+
+    private var connectionTimeouts: RFBConnectionTimeouts {
+        let tcpTimeout: TimeInterval
+        if endpoint != nil || networkTrustScope.isTrustedPrivateScope {
+            tcpTimeout = 2.0
+        } else {
+            tcpTimeout = 5.0
+        }
+
+        return RFBConnectionTimeouts(
+            tcpConnect: tcpTimeout,
+            versionHandshake: 2.5,
+            securityNegotiation: 3.0,
+            serverInitialization: 3.0
+        )
+    }
+
+    private func connectUsingPreferredRoute(
+        username: String?,
+        password: String?,
+        securityPreference: RFBSecurityPreference,
+        timeouts: RFBConnectionTimeouts
+    ) async throws -> VNCConnectedRoute {
+        let attempts = makeRouteAttempts()
+        guard !attempts.isEmpty else {
+            throw RFBError.connectionFailed("Missing VNC host")
+        }
+
+        if attempts.count == 1 {
+            let attempt = attempts[0]
+            self.connection = attempt.connection
+            let outcome = await connectVNCConnectionRouteAttempt(
+                attempt,
+                username: username,
+                password: password,
+                securityPreference: securityPreference,
+                timeouts: timeouts
+            )
+            switch outcome {
+            case .connected(let route):
+                return route
+            case .failed(let failure):
+                self.connection = failure.attempt.connection
+                throw failure.error
+            }
+        }
+
+        return try await raceRouteAttempts(
+            attempts,
+            username: username,
+            password: password,
+            securityPreference: securityPreference,
+            timeouts: timeouts
+        )
+    }
+
+    private func raceRouteAttempts(
+        _ attempts: [VNCConnectionRouteAttempt],
+        username: String?,
+        password: String?,
+        securityPreference: RFBSecurityPreference,
+        timeouts: RFBConnectionTimeouts
+    ) async throws -> VNCConnectedRoute {
+        let coordinator = VNCConnectionRaceCoordinator(attempts: attempts)
+        var failures: [VNCRouteFailure] = []
+
+        return try await withThrowingTaskGroup(of: VNCRouteAttemptOutcome.self, returning: VNCConnectedRoute.self) { group in
+            for attempt in attempts {
+                group.addTask {
+                    await connectVNCConnectionRouteAttempt(
+                        attempt,
+                        username: username,
+                        password: password,
+                        securityPreference: securityPreference,
+                        timeouts: timeouts,
+                        onVersionHandshake: {
+                            try await coordinator.markVersionHandshake(for: attempt.id)
+                        }
+                    )
+                }
+            }
+
+            while let outcome = try await group.next() {
+                switch outcome {
+                case .connected(let route):
+                    self.connection = route.attempt.connection
+                    for attempt in attempts where attempt.id != route.attempt.id {
+                        await attempt.connection.disconnect()
+                    }
+                    group.cancelAll()
+                    return route
+
+                case .failed(let failure):
+                    failures.append(failure)
+                    if !shouldContinueRouteSearch(after: failure.error) {
+                        self.connection = failure.attempt.connection
+                        for attempt in attempts where attempt.id != failure.attempt.id {
+                            await attempt.connection.disconnect()
+                        }
+                        group.cancelAll()
+                        throw failure.error
+                    }
+                }
+            }
+
+            if let failure = prioritizedRouteFailure(failures) {
+                self.connection = failure.attempt.connection
+                throw failure.error
+            }
+            throw RFBError.connectionFailed("No VNC route candidates were available")
+        }
+    }
+
+    private func makeRouteAttempts() -> [VNCConnectionRouteAttempt] {
+        if let endpoint {
+            return [
+                VNCConnectionRouteAttempt(
+                    connection: RFBConnection(endpoint: endpoint),
+                    logicalHost: credentialHost,
+                    logicalPort: credentialPort,
+                    routedHost: nil,
+                    routedPort: nil,
+                    routeLabel: .lan,
+                    isCached: false
+                )
+            ]
+        }
+
+        let logicalHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !logicalHost.isEmpty else { return [] }
+
+        var attempts: [VNCConnectionRouteAttempt] = []
+        var seen: Set<String> = []
+        func appendCandidate(host candidateHost: String, port candidatePort: UInt16, label: VNCRouteLabel?, isCached: Bool) {
+            let normalized = "\(VNCLastGoodRouteKey.normalizedHost(candidateHost)):\(candidatePort)"
+            guard !seen.contains(normalized) else { return }
+            seen.insert(normalized)
+            attempts.append(VNCConnectionRouteAttempt(
+                connection: RFBConnection(host: candidateHost, port: candidatePort),
+                logicalHost: logicalHost,
+                logicalPort: port,
+                routedHost: candidateHost,
+                routedPort: candidatePort,
+                routeLabel: label,
+                isCached: isCached
+            ))
+        }
+
+        if let cached = VNCLastGoodRouteStore.shared.preferredCandidate(
+            forHost: logicalHost,
+            port: port,
+            profile: profile
+        ) {
+            appendCandidate(host: cached.host, port: cached.port, label: cached.label, isCached: true)
+        }
+
+        appendCandidate(
+            host: logicalHost,
+            port: port,
+            label: VNCRouteLabel.classify(host: logicalHost),
+            isCached: false
+        )
+
+        return attempts
+    }
+
+    private func shouldContinueRouteSearch(after error: Error) -> Bool {
+        if error is CancellationError { return true }
+        guard let rfbError = error as? RFBError else { return true }
+        switch rfbError {
+        case .connectionFailed, .timeout, .disconnected:
+            return true
+        case .authFailed, .authRequired, .credentialsRequired, .protocolError, .unsupportedSecurity, .unsupportedEncoding:
+            return false
+        }
+    }
+
+    private func prioritizedRouteFailure(_ failures: [VNCRouteFailure]) -> VNCRouteFailure? {
+        failures.first { !($0.error is CancellationError) && !shouldContinueRouteSearch(after: $0.error) } ??
+            failures.first { !($0.error is CancellationError) } ??
+            failures.first
+    }
+
+    private func recordSuccessfulRoute(_ attempt: VNCConnectionRouteAttempt) {
+        guard endpoint == nil, !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        VNCLastGoodRouteStore.shared.recordSuccess(
+            logicalHost: attempt.logicalHost,
+            logicalPort: attempt.logicalPort,
+            profile: profile,
+            routedHost: attempt.routedHost ?? attempt.logicalHost,
+            routedPort: attempt.routedPort ?? attempt.logicalPort,
+            label: attempt.routeLabel
+        )
+        if attempt.isCached {
+            Logger.shared.info("VNC connected using cached \(attempt.routeLabel?.displayName ?? "last-good") route \(attempt.routedHost ?? attempt.logicalHost):\(attempt.routedPort ?? attempt.logicalPort)")
+        }
+    }
+
+    private func currentSecurityReport() async -> RFBSecurityReport {
+        guard let connection else {
+            return RFBSecurityReport(mode: .unknown, offeredModes: [])
+        }
+        return await connection.securityReport()
+    }
+
+    private func disconnectCurrentConnection() async {
+        await connection?.disconnect()
+        connection = nil
+    }
+
+    private func prepareCredentialPreflightForDial() -> Bool {
+        loadStoredCredentialIfNeeded()
+        guard shouldContinueConnecting else { return false }
+        guard profile == .macScreenSharing,
+              username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              vncPassword.isEmpty else {
+            return true
+        }
+
+        needsPassword = false
+        needsCredentials = true
+        securityStatus = RemoteSecurityStatus(
+            level: networkTrustScope.isTrustedPrivateScope ? .networkProtected : .unknown,
+            title: "Mac account credentials required",
+            detail: "Enter the macOS username and password for \(credentialHost) before Screen Q opens the Screen Sharing connection. \(networkTrustScope.connectionHint)",
+            isTransportEncrypted: false,
+            isAuthenticated: false,
+            recommendedAction: networkTrustScope.publicNetworkWarning,
+            protocolName: profile.displayName,
+            authMethod: "Apple Screen Sharing account credentials",
+            credentialStorage: "Keychain",
+            identityVerification: "macOS sharing permissions"
+        )
+        phase = .authenticating
+        return false
     }
 
     private func loadStoredCredentialIfNeeded() {
@@ -756,6 +1063,16 @@ final class VNCSession: ObservableObject {
 
     private func initialStreamRegion(in bounds: VNCDisplayRegion?) -> VNCDisplayRegion? {
         guard let bounds else { return nil }
+        #if os(iOS)
+        if isLikelyLargeCombinedDesktop(bounds) {
+            return boundedStreamRegion(
+                in: bounds,
+                centerX: bounds.x + bounds.width / 2,
+                centerY: bounds.y + bounds.height / 2,
+                targetPixels: defaultStreamPixels(for: bounds)
+            )
+        }
+        #endif
         if canStreamFullRegionByDefault(bounds) {
             return bounds
         }
@@ -805,10 +1122,19 @@ final class VNCSession: ObservableObject {
 
     private func canStreamFullRegionByDefault(_ bounds: VNCDisplayRegion) -> Bool {
         #if os(iOS)
+        if isLikelyLargeCombinedDesktop(bounds) { return false }
         return bounds.pixelCount <= defaultFullStreamPixelLimit
         #else
         return true
         #endif
+    }
+
+    private func isLikelyLargeCombinedDesktop(_ bounds: VNCDisplayRegion) -> Bool {
+        bounds.isFullDesktop && (
+            bounds.width >= 3_000 ||
+            bounds.height >= 2_200 ||
+            CGFloat(bounds.width) / CGFloat(max(1, bounds.height)) >= 1.6
+        )
     }
 
     private func clampedStreamRegion(in bounds: VNCDisplayRegion, x: Int, y: Int, width: Int, height: Int) -> VNCDisplayRegion {
@@ -874,11 +1200,25 @@ final class VNCSession: ObservableObject {
     }
 
     private var imagePublishInterval: TimeInterval {
-        streamQualityPreference.vncImagePublishInterval(isIOS: Self.isRunningOnIOS)
+        let targetFPS = streamProfile.mode == .custom ? streamProfile.targetFPS : streamQualityPreference.vncTargetFPS
+        return 1.0 / Double(max(1, min(Self.isRunningOnIOS ? 30 : 60, targetFPS)))
     }
 
     private var renderMaxDimension: Int? {
-        streamQualityPreference.vncRenderMaxDimension(isIOS: Self.isRunningOnIOS)
+        guard Self.isRunningOnIOS else { return nil }
+        guard streamProfile.mode == .custom else {
+            return streamQualityPreference.vncRenderMaxDimension(isIOS: Self.isRunningOnIOS)
+        }
+        switch streamProfile.scalePolicy {
+        case .native:
+            return Int(Double(max(serverWidth, serverHeight)) * 1.0)
+        case .viewerMatched:
+            return 2_560
+        case .balancedDownscale:
+            return 1_920
+        case .bandwidthSaver:
+            return 1_280
+        }
     }
 
     private func preferredStreamAspect(for bounds: VNCDisplayRegion) -> CGFloat {

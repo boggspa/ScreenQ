@@ -41,9 +41,10 @@ struct DiscoveryView: View {
 
             // Screen Q hosts
             if !app.discoveredHosts.isEmpty {
-                Text("Screen Q")
-                    .font(.caption.bold())
-                    .foregroundColor(.secondary)
+                discoverySectionHeader(
+                    title: hasNativeAndRFBHosts ? "Recommended: Screen Q Native" : "Screen Q Native",
+                    detail: hasNativeAndRFBHosts ? "Use this first for the fastest Screen Q connection." : nil
+                )
                 ForEach(app.discoveredHosts) { host in
                     Button {
                         onSelect(host)
@@ -56,9 +57,10 @@ struct DiscoveryView: View {
 
             // RFB / Apple Screen Sharing hosts
             if !app.discoveredRFBHosts.isEmpty {
-                Text("Apple Screen Sharing")
-                    .font(.caption.bold())
-                    .foregroundColor(.secondary)
+                discoverySectionHeader(
+                    title: hasNativeAndRFBHosts ? "Compatibility: Mac Screen Sharing" : "Mac Screen Sharing",
+                    detail: "Uses Apple Screen Sharing on port 5900."
+                )
                 ForEach(app.discoveredRFBHosts) { host in
                     Button {
                         onSelectRFB?(host)
@@ -114,10 +116,30 @@ struct DiscoveryView: View {
         let sqCount = app.discoveredHosts.count
         let rfbCount = app.discoveredRFBHosts.count
         let total = sqCount + rfbCount
+        if sqCount > 0 && rfbCount > 0 {
+            return "Found Screen Q native and port 5900 compatibility hosts"
+        }
         if total > 0 { return "Found \(total) device\(total == 1 ? "" : "s") on your network" }
         if app.browserStatus.browserError != nil { return "Bonjour error: \(app.browserStatus.browserError!)" }
         if app.browserStatus.isBrowsing { return "Searching for devices on your local network\u{2026}" }
         return "Not searching"
+    }
+
+    private var hasNativeAndRFBHosts: Bool {
+        !app.discoveredHosts.isEmpty && !app.discoveredRFBHosts.isEmpty
+    }
+
+    private func discoverySectionHeader(title: String, detail: String? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption.bold())
+                .foregroundColor(.secondary)
+            if let detail {
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
     }
 
     private var statusIcon: String {

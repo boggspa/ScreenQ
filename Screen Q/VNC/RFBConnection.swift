@@ -20,9 +20,9 @@ actor RFBConnection {
         // negotiation until the decoder owns connection-lifetime inflate state.
         .tight,
         .tightPNG,
+        .copyRect,
         .hextile,
         .raw,
-        .copyRect,
         .desktopSize
     ]
 
@@ -32,6 +32,44 @@ actor RFBConnection {
     private let tightDecodeState = RFBEncodingDecoder.TightDecodeState()
     private var offeredSecurityTypes: [UInt8] = []
     private var selectedSecurityType: UInt8?
+    private var activeReadDeadline: ReadDeadline?
+
+    private struct ReadDeadline {
+        let stage: String
+        let deadline: Date
+    }
+
+    private final class OneShotContinuation<Value>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var didResume = false
+        private let continuation: CheckedContinuation<Value, Error>
+
+        init(_ continuation: CheckedContinuation<Value, Error>) {
+            self.continuation = continuation
+        }
+
+        @discardableResult
+        func resume(returning value: Value) -> Bool {
+            complete(.success(value))
+        }
+
+        @discardableResult
+        func resume(throwing error: Error) -> Bool {
+            complete(.failure(error))
+        }
+
+        private func complete(_ result: Result<Value, Error>) -> Bool {
+            lock.lock()
+            guard !didResume else {
+                lock.unlock()
+                return false
+            }
+            didResume = true
+            lock.unlock()
+            continuation.resume(with: result)
+            return true
+        }
+    }
 
     // MARK: - Init
 
@@ -47,20 +85,45 @@ actor RFBConnection {
 
     // MARK: - Lifecycle
 
-    func connect(username: String?, password: String?, securityPreference: RFBSecurityPreference = .vncPasswordFirst) async throws -> RFBServerInit {
-        try await startTCP()
+    func connect(
+        username: String?,
+        password: String?,
+        securityPreference: RFBSecurityPreference = .vncPasswordFirst,
+        timeouts: RFBConnectionTimeouts = .default,
+        onVersionHandshake: (@Sendable () async throws -> Void)? = nil
+    ) async throws -> RFBServerInit {
+        try await startTCP(timeout: timeouts.tcpConnect)
+        isOpen = true
 
         // 1. Version handshake
-        let version = try await negotiateVersion()
+        let version = try await withReadTimeout(
+            stage: "RFB version handshake",
+            timeout: timeouts.versionHandshake
+        ) {
+            try await negotiateVersion()
+        }
+        if let onVersionHandshake {
+            try await onVersionHandshake()
+        }
 
         // 2. Security
-        try await negotiateSecurity(version: version, username: username, password: password, securityPreference: securityPreference)
+        try await withReadTimeout(
+            stage: "RFB security negotiation",
+            timeout: timeouts.securityNegotiation
+        ) {
+            try await negotiateSecurity(version: version, username: username, password: password, securityPreference: securityPreference)
+        }
 
         // 3. ClientInit (shared = true)
         try await write(Data([1]))
 
         // 4. ServerInit
-        let serverInit = try await readServerInit()
+        let serverInit = try await withReadTimeout(
+            stage: "RFB server initialization",
+            timeout: timeouts.serverInitialization
+        ) {
+            try await readServerInit()
+        }
 
         // 5. Set our preferred pixel format
         try await sendSetPixelFormat(.xrgb32)
@@ -155,22 +218,27 @@ actor RFBConnection {
 
     // MARK: - Private: TCP
 
-    private func startTCP() async throws {
+    private func startTCP(timeout: TimeInterval?) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            var didResume = false
-            connection.stateUpdateHandler = { [weak self] state in
-                guard !didResume else { return }
+            let gate = OneShotContinuation(cont)
+            let timeoutItem = timeout.map { timeout in
+                DispatchWorkItem { [connection] in
+                    if gate.resume(throwing: RFBError.timeout(stage: "TCP connect")) {
+                        connection.cancel()
+                    }
+                }
+            }
+            if let timeoutItem, let timeout {
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + timeout, execute: timeoutItem)
+            }
+            connection.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    didResume = true
-                    Task { await self?.markOpen() }
-                    cont.resume()
+                    gate.resume(returning: ())
                 case .failed(let err):
-                    didResume = true
-                    cont.resume(throwing: RFBError.connectionFailed(err.localizedDescription))
+                    gate.resume(throwing: RFBError.connectionFailed(err.localizedDescription))
                 case .cancelled:
-                    didResume = true
-                    cont.resume(throwing: RFBError.disconnected)
+                    gate.resume(throwing: RFBError.disconnected)
                 default:
                     break
                 }
@@ -178,8 +246,6 @@ actor RFBConnection {
             connection.start(queue: .global(qos: .userInitiated))
         }
     }
-
-    private func markOpen() { isOpen = true }
 
     // MARK: - Private: Version handshake
 
@@ -194,8 +260,6 @@ actor RFBConnection {
         let parts = versionStr.dropFirst(4).trimmingCharacters(in: .whitespacesAndNewlines).split(separator: ".")
         let major = Int(parts.first ?? "0") ?? 0
         let minor = Int(parts.last ?? "0") ?? 0
-        let version = major * 10 + minor // 33, 37, 38
-
         // Reply with the same version (clamped to 3.8)
         let replyMinor = min(minor, 8)
         let reply = String(format: "RFB %03d.%03d\n", major, replyMinor)
@@ -534,15 +598,39 @@ actor RFBConnection {
 
     // MARK: - Buffered binary I/O
 
+    private func withReadTimeout<T>(
+        stage: String,
+        timeout: TimeInterval?,
+        operation: () async throws -> T
+    ) async throws -> T {
+        guard let timeout else {
+            return try await operation()
+        }
+        let previousDeadline = activeReadDeadline
+        activeReadDeadline = ReadDeadline(stage: stage, deadline: Date().addingTimeInterval(timeout))
+        defer { activeReadDeadline = previousDeadline }
+        return try await operation()
+    }
+
     private func readExact(_ count: Int) async throws -> Data {
         while buffer.count < count {
-            let chunk = try await receiveChunk()
+            let chunk = try await receiveChunk(timeout: currentReadTimeout())
             if chunk.isEmpty { throw RFBError.disconnected }
             buffer.append(chunk)
         }
         let result = buffer.prefix(count)
         buffer.removeFirst(count)
         return Data(result)
+    }
+
+    private func currentReadTimeout() throws -> (stage: String, seconds: TimeInterval)? {
+        guard let activeReadDeadline else { return nil }
+        let seconds = activeReadDeadline.deadline.timeIntervalSinceNow
+        guard seconds > 0 else {
+            connection.cancel()
+            throw RFBError.timeout(stage: activeReadDeadline.stage)
+        }
+        return (activeReadDeadline.stage, seconds)
     }
 
     private func readUInt8() async throws -> UInt8 {
@@ -579,17 +667,28 @@ actor RFBConnection {
         }
     }
 
-    private func receiveChunk() async throws -> Data {
+    private func receiveChunk(timeout: (stage: String, seconds: TimeInterval)?) async throws -> Data {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
+            let gate = OneShotContinuation(cont)
+            let timeoutItem = timeout.map { timeout in
+                DispatchWorkItem { [connection] in
+                    if gate.resume(throwing: RFBError.timeout(stage: timeout.stage)) {
+                        connection.cancel()
+                    }
+                }
+            }
+            if let timeoutItem, let timeout {
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + timeout.seconds, execute: timeoutItem)
+            }
             connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 18) { data, _, isComplete, error in
                 if let error = error {
-                    cont.resume(throwing: error)
+                    gate.resume(throwing: error)
                 } else if let data = data {
-                    cont.resume(returning: data)
+                    gate.resume(returning: data)
                 } else if isComplete {
-                    cont.resume(returning: Data())
+                    gate.resume(returning: Data())
                 } else {
-                    cont.resume(returning: Data())
+                    gate.resume(returning: Data())
                 }
             }
         }
