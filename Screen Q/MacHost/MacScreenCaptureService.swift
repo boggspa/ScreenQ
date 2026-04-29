@@ -335,6 +335,18 @@ final class MacScreenCaptureService: NSObject, ObservableObject {
         }
     }
 
+    func applyStreamQuality(_ preference: StreamQualityPreference) {
+        settings.jpegQuality = CGFloat(preference.jpegQuality)
+        settings.h264Bitrate = preference.nativeTargetBitrate
+        settings.fps = preference.nativeTargetFPS
+        if let h264 = xstate.encoder as? H264FrameEncoder {
+            h264.updateBitrate(preference.nativeTargetBitrate)
+            h264.forceKeyFrame()
+        } else if let jpeg = xstate.encoder as? JPEGFrameEncoder {
+            jpeg.setQuality(settings.jpegQuality)
+        }
+    }
+
     func stop() async {
         allDisplayCompositeTimer?.cancel()
         allDisplayCompositeTimer = nil

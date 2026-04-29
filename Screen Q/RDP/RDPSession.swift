@@ -32,6 +32,7 @@ final class RDPSession: ObservableObject {
     @Published private(set) var remoteHeight: Int = 0
     @Published private(set) var hasSavedCredentials: Bool = false
     @Published private(set) var hasTrustedCertificate: Bool = false
+    @Published private(set) var streamQualityPreference = StreamQualityPreference()
     @Published var fitMode: Bool = true
 
     let remoteSessionID = UUID()
@@ -44,6 +45,7 @@ final class RDPSession: ObservableObject {
     private var activeCredentials: RDPCredentials?
     private var pendingCertificateReview: RDPCertificateInfo?
     private var lastCertificateCommonName: String?
+    private var lastFramePublish = Date.distantPast
 
     init(profile: RDPConnectionProfile) {
         self.profile = profile
@@ -67,6 +69,7 @@ final class RDPSession: ObservableObject {
         eventTask?.cancel()
         inputMapper.isControlEnabled = false
         currentImage = nil
+        lastFramePublish = .distantPast
         stats.reset()
         phase = .preflighting
         securityStatus = .rdpPreflight(scope: profile.networkScope)
@@ -136,6 +139,11 @@ final class RDPSession: ObservableObject {
             hasSavedCredentials = false
         }
         await connectEngine(credentials: credentials, trustDecision: nil)
+    }
+
+    func updateStreamQuality(_ quality: Double) {
+        streamQualityPreference = StreamQualityPreference(quality: quality)
+        lastFramePublish = .distantPast
     }
 
     func forgetSavedCredentials(message: String? = nil) {
@@ -273,6 +281,11 @@ final class RDPSession: ObservableObject {
             phase = .connected
 
         case .frame(let frame):
+            let now = Date()
+            guard currentImage == nil || now.timeIntervalSince(lastFramePublish) >= streamQualityPreference.rdpFramePublishInterval() else {
+                return
+            }
+            lastFramePublish = now
             remoteWidth = frame.width
             remoteHeight = frame.height
             if let image = frame.makeCGImage() {

@@ -159,6 +159,7 @@ final class VNCSession: ObservableObject {
     @Published var rememberCredentials = true
     @Published var requireLocalAuthenticationForSavedCredentials = true
     @Published private(set) var securityStatus: RemoteSecurityStatus = .unknown
+    @Published private(set) var streamQualityPreference = StreamQualityPreference()
 
     let remoteSessionID = UUID()
     let peerLabel: String
@@ -388,6 +389,36 @@ final class VNCSession: ObservableObject {
 
     var savedConnectionProtocol: RemoteConnectionProtocol {
         profile == .macScreenSharing ? .macScreenSharing : .vnc
+    }
+
+    var controlPreferenceScope: ViewerControlPreferenceScope {
+        ViewerControlPreferenceScope(
+            connectionProtocol: savedConnectionProtocol,
+            host: savedConnectionHost,
+            port: savedConnectionPort
+        )
+    }
+
+    func updateStreamQuality(_ quality: Double) async {
+        let preference = StreamQualityPreference(quality: quality)
+        guard preference != streamQualityPreference else { return }
+        streamQualityPreference = preference
+        lastImagePublish = .distantPast
+        guard case .connected = phase,
+              let bounds = selectedDisplayRegion,
+              let current = streamRegion else {
+            return
+        }
+        let targetPixels = preference.vncMaxStreamPixels(
+            isFullDesktop: bounds.isFullDesktop,
+            isIOS: Self.isRunningOnIOS
+        )
+        await setStreamRegion(boundedStreamRegion(
+            in: bounds,
+            centerX: current.x + current.width / 2,
+            centerY: current.y + current.height / 2,
+            targetPixels: targetPixels
+        ))
     }
 
     func updateViewportCanvasSize(_ size: CGSize) async {
@@ -666,8 +697,8 @@ final class VNCSession: ObservableObject {
             )
 
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 33_333_333) // ~30 fps
                 guard let s = self, case .connected = s.phase else { break }
+                try? await Task.sleep(nanoseconds: s.frameRequestIntervalNanoseconds)
                 guard !s.isViewportRefreshPending else { continue }
                 try? await conn.sendFramebufferUpdateRequest(
                     incremental: true,
@@ -843,19 +874,11 @@ final class VNCSession: ObservableObject {
     }
 
     private var imagePublishInterval: TimeInterval {
-        #if os(iOS)
-        return 1.0 / 10.0
-        #else
-        return 1.0 / 24.0
-        #endif
+        streamQualityPreference.vncImagePublishInterval(isIOS: Self.isRunningOnIOS)
     }
 
     private var renderMaxDimension: Int? {
-        #if os(iOS)
-        return 1_536
-        #else
-        return nil
-        #endif
+        streamQualityPreference.vncRenderMaxDimension(isIOS: Self.isRunningOnIOS)
     }
 
     private func preferredStreamAspect(for bounds: VNCDisplayRegion) -> CGFloat {
@@ -868,33 +891,27 @@ final class VNCSession: ObservableObject {
     }
 
     private func maxStreamPixels(for bounds: VNCDisplayRegion) -> Int {
-        #if os(iOS)
         if canStreamFullRegionByDefault(bounds) {
             return defaultFullStreamPixelLimit
         }
-        return bounds.isFullDesktop ? 4_000_000 : 1_100_000
-        #else
-        return Int.max / 4
-        #endif
+        return streamQualityPreference.vncMaxStreamPixels(
+            isFullDesktop: bounds.isFullDesktop,
+            isIOS: Self.isRunningOnIOS
+        )
     }
 
     private func defaultStreamPixels(for bounds: VNCDisplayRegion) -> Int {
-        #if os(iOS)
         if canStreamFullRegionByDefault(bounds) {
             return bounds.pixelCount
         }
-        return bounds.isFullDesktop ? 2_400_000 : 720_000
-        #else
-        return Int.max / 4
-        #endif
+        return streamQualityPreference.vncDefaultStreamPixels(
+            isFullDesktop: bounds.isFullDesktop,
+            isIOS: Self.isRunningOnIOS
+        )
     }
 
     private var defaultFullStreamPixelLimit: Int {
-        #if os(iOS)
-        return 30_000_000
-        #else
-        return Int.max / 4
-        #endif
+        streamQualityPreference.vncFullRegionPixelLimit(isIOS: Self.isRunningOnIOS)
     }
 
     private var emergencyStreamPixels: Int {
@@ -902,6 +919,18 @@ final class VNCSession: ObservableObject {
         return 360_000
         #else
         return Int.max / 4
+        #endif
+    }
+
+    private var frameRequestIntervalNanoseconds: UInt64 {
+        UInt64(max(0.01, imagePublishInterval) * 1_000_000_000)
+    }
+
+    private static var isRunningOnIOS: Bool {
+        #if os(iOS)
+        return true
+        #else
+        return false
         #endif
     }
 }

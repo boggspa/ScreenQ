@@ -46,6 +46,7 @@ nonisolated enum InboundMessage: Sendable {
     case systemReport(SystemReportMessage)
     case packageInstallReq(PackageInstallRequestMessage)
     case packageInstallResult(PackageInstallResultMessage)
+    case streamQuality(StreamQualityMessage)
     case ping(PingMessage)
     case pong(PongMessage)
     case stats(StatsMessage)
@@ -475,6 +476,8 @@ actor ScreenQConnection {
             return .packageInstallReq(try dec.decode(PackageInstallRequestMessage.self, from: frame.body))
         case .packageInstallResult:
             return .packageInstallResult(try dec.decode(PackageInstallResultMessage.self, from: frame.body))
+        case .streamQuality:
+            return .streamQuality(try dec.decode(StreamQualityMessage.self, from: frame.body))
         default:
             return .unknown(frame.header.type)
         }

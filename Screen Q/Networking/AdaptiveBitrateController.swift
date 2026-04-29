@@ -40,6 +40,13 @@ final class AdaptiveBitrateController: ObservableObject {
         self.currentFPS = 30
     }
 
+    func setUserCeiling(bitrate: Int, fps: Int) {
+        config.maxBitrate = max(config.minBitrate, bitrate)
+        config.maxFPS = max(config.minFPS, fps)
+        currentBitrate = min(currentBitrate, config.maxBitrate)
+        currentFPS = min(currentFPS, config.maxFPS)
+    }
+
     /// Called periodically with current transport stats. Returns true if settings changed.
     @discardableResult
     func evaluate(stats: TransportStats) -> Bool {

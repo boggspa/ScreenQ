@@ -12,11 +12,19 @@ import SwiftUI
 @main
 struct Screen_QApp: App {
     @StateObject private var appState = AppState()
+    #if os(macOS)
+    @StateObject private var statusBarController = MacStatusBarController()
+    #endif
 
     var body: some Scene {
         WindowGroup {
             HomeView()
                 .environmentObject(appState)
+                #if os(macOS)
+                .onAppear {
+                    statusBarController.configure(appState: appState)
+                }
+                #endif
         }
     }
 }

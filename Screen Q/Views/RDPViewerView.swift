@@ -30,9 +30,9 @@ struct RDPViewerView: View {
     @State private var keyboardDraft = ""
     @State private var viewport: ViewportTransform = .identity
     @State private var lastCanvasSize: CGSize = .zero
+    @StateObject private var controlPreferences: ViewerControlPreferences
 
     #if os(iOS)
-    @StateObject private var controlPreferences: ViewerControlPreferences
     @StateObject private var modifierLatch = ModifierLatchController()
     @State private var touchMode: TouchMode = .directTouch
     @State private var isKeyboardActive = false
@@ -45,13 +45,11 @@ struct RDPViewerView: View {
         self.session = session
         self._stats = ObservedObject(wrappedValue: session.stats)
         self.onDisconnect = onDisconnect
-        #if os(iOS)
         self._controlPreferences = StateObject(wrappedValue: ViewerControlPreferences(scope: ViewerControlPreferenceScope(
             connectionProtocol: .rdp,
             host: session.profile.host,
             port: session.profile.port
         )))
-        #endif
     }
 
     var body: some View {
@@ -81,6 +79,13 @@ struct RDPViewerView: View {
                 }
                 .help(session.fitMode ? "Fill viewer" : "Fit to viewer")
 
+                StreamQualityButton(
+                    quality: $controlPreferences.streamQuality,
+                    protocolName: "RDP",
+                    detail: "Controls viewer frame cadence today. FreeRDP wire-level performance flags can use this same preference next."
+                )
+                .help("Quality and compression")
+
                 Button {
                     showKeyboardEntry.toggle()
                 } label: {
@@ -96,6 +101,13 @@ struct RDPViewerView: View {
                     Image(systemName: app.viewerFocusMode ? "sidebar.left" : "rectangle.inset.filled")
                 }
                 .help(app.viewerFocusMode ? "Show sidebar" : "Focus viewer")
+
+                Button {
+                    MacWindowControls.toggleFullScreen()
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                }
+                .help("Enter fullscreen")
 
                 Button("Disconnect") {
                     disconnect()
@@ -153,6 +165,9 @@ struct RDPViewerView: View {
         .onAppear {
             configureRDPControls()
             syncCredentialFields(from: session.phase)
+        }
+        .onReceive(controlPreferences.$streamQuality.removeDuplicates()) { quality in
+            session.updateStreamQuality(quality)
         }
         .onChange(of: session.phase) { newPhase in
             syncCredentialFields(from: newPhase)
@@ -377,6 +392,7 @@ struct RDPViewerView: View {
                             controlPreferences.showStats = $0
                         }
                     ),
+                    streamQuality: $controlPreferences.streamQuality,
                     isKeyboardActive: $isKeyboardActive,
                     controlsVisible: $controlsVisible,
                     viewport: viewport,
@@ -494,6 +510,7 @@ struct RDPViewerView: View {
     }
 
     private func configureRDPControls() {
+        session.updateStreamQuality(controlPreferences.streamQuality)
         #if os(iOS)
         touchMode = controlPreferences.touchMode
         showStats = controlPreferences.showStats
@@ -808,6 +825,7 @@ private struct RDPIOSControlSurface: View {
     @Binding var touchMode: TouchMode
     @Binding var fitMode: Bool
     @Binding var showStats: Bool
+    @Binding var streamQuality: Double
     @Binding var isKeyboardActive: Bool
     @Binding var controlsVisible: Bool
 
@@ -933,6 +951,11 @@ private struct RDPIOSControlSurface: View {
                                 fitMode.toggle()
                                 preferences.fitMode = fitMode
                             }
+                            StreamQualityButton(
+                                quality: $streamQuality,
+                                protocolName: "RDP",
+                                detail: "Controls viewer frame cadence today. FreeRDP wire-level performance flags can use this same preference next."
+                            )
                             if !viewport.isIdentity {
                                 iconButton(systemName: "minus.magnifyingglass", label: "Reset zoom") {
                                     resetViewport()

@@ -35,6 +35,7 @@ final class AppState: ObservableObject {
     @Published var discoveredHosts: [DiscoveredHost] = []
     @Published var discoveredRFBHosts: [DiscoveredHost] = []
     @Published var browserStatus = BrowserStatus()
+    @Published var pendingViewerConnection: PendingViewerConnection?
     @Published var tailnetDevices: [TailnetDevice] = []
     @Published var tailnetDiscoveryStatus = TailnetDiscoveryStatus()
     @Published var tailnetAuthConfigured = false
@@ -65,6 +66,7 @@ final class AppState: ObservableObject {
     @Published var hostViewOnly: Bool = false
     @Published var hostPermissions: PermissionSet = .standard
     @Published var pendingPairingRequests: [PairingRequest] = []
+    @Published var hostStopRequestID: UUID?
 
     // Typed accessors for @available services (stored as AnyObject? for compatibility)
     @available(macOS 12.3, *)
@@ -246,6 +248,29 @@ final class AppState: ObservableObject {
     func clearRole() {
         selectedRole = nil
     }
+
+    func requestViewerConnection(_ pending: PendingViewerConnection) {
+        pendingViewerConnection = pending
+        viewerFocusMode = false
+        selectRole(.viewer)
+    }
+
+    func clearPendingViewerConnection(id: String? = nil) {
+        guard let pending = pendingViewerConnection else { return }
+        if let id, pending.id != id { return }
+        pendingViewerConnection = nil
+    }
+
+    #if os(macOS)
+    func requestHostManagement() {
+        viewerFocusMode = false
+        selectRole(.hostMac)
+    }
+
+    func requestStopHostingFromMenu() {
+        hostStopRequestID = UUID()
+    }
+    #endif
 
     // MARK: - iOS / iPadOS presence
 

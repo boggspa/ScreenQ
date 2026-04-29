@@ -125,6 +125,9 @@ struct IOSSessionControlSurface: View {
                             if preferences.isToolbarItemVisible(.keyboard) {
                                 keyboardButton
                             }
+                            if preferences.isToolbarItemVisible(.quality) {
+                                qualityButton
+                            }
                             if preferences.isToolbarItemVisible(.touchMode) {
                                 touchModeMenu
                             }
@@ -201,6 +204,14 @@ struct IOSSessionControlSurface: View {
         iconButton(systemName: "minus.magnifyingglass", label: "Reset zoom") {
             resetViewport()
         }
+    }
+
+    private var qualityButton: some View {
+        StreamQualityButton(
+            quality: $preferences.streamQuality,
+            protocolName: "Screen Q Native",
+            detail: "Controls native host bitrate, frame cadence, and JPEG fallback compression."
+        )
     }
 
     private var disconnectButton: some View {
@@ -436,7 +447,7 @@ struct IOSSessionControlSurface: View {
         switch item {
         case .touchMode:
             return .touch
-        case .fitMode, .resetZoom, .displays:
+        case .fitMode, .resetZoom, .displays, .quality:
             return .viewport
         case .disconnect:
             return .disconnect
@@ -456,6 +467,8 @@ struct IOSSessionControlSurface: View {
             resetZoomButton
         case .displays:
             displayMenu
+        case .quality:
+            qualityButton
         case .keyboard:
             keyboardButton
         case .modifiers:

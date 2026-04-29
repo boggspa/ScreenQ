@@ -142,6 +142,18 @@ final class ViewerSession: ObservableObject {
         activeDisplayID = displayID
     }
 
+    func updateStreamQuality(_ quality: Double) {
+        guard encryptionEnabled else { return }
+        switch phase {
+        case .approved, .streaming, .viewOnly:
+            break
+        default:
+            return
+        }
+        let message = StreamQualityPreference(quality: quality).nativeMessage
+        Task { try? await connection.sendJSON(.streamQuality, message) }
+    }
+
     func tearDown(reason: String) async {
         try? await connection.sendJSON(.endSession, EndSessionMessage(reason: reason))
         await connection.stop()
@@ -300,8 +312,8 @@ struct RemoteScreenView: View {
     @ObservedObject private var stats: TransportStats
     var onDisconnect: () -> Void
 
-    #if os(iOS)
     @StateObject private var controlPreferences: ViewerControlPreferences
+    #if os(iOS)
     @StateObject private var modifierLatch = ModifierLatchController()
     #endif
 
@@ -310,9 +322,7 @@ struct RemoteScreenView: View {
         self.renderer = session.renderer
         self.stats = session.stats
         self.onDisconnect = onDisconnect
-        #if os(iOS)
         self._controlPreferences = StateObject(wrappedValue: ViewerControlPreferences(scope: session.controlPreferenceScope))
-        #endif
     }
 
     @State private var showStats = true
@@ -345,6 +355,12 @@ struct RemoteScreenView: View {
         }
         .onAppear {
             configureViewerControls()
+        }
+        .onReceive(controlPreferences.$streamQuality.removeDuplicates()) { quality in
+            session.updateStreamQuality(quality)
+        }
+        .onChange(of: session.phase) { _ in
+            session.updateStreamQuality(controlPreferences.streamQuality)
         }
         .onReceive(renderer.$currentImage.compactMap { $0 }.throttle(for: .seconds(5), scheduler: RunLoop.main, latest: true)) { image in
             app.savedConnections.updateThumbnail(
@@ -460,6 +476,12 @@ struct RemoteScreenView: View {
             } label: {
                 Image(systemName: session.fitMode ? "rectangle.arrowtriangle.2.outward" : "rectangle.arrowtriangle.2.inward")
             }
+            StreamQualityButton(
+                quality: $controlPreferences.streamQuality,
+                protocolName: "Screen Q Native",
+                detail: "Controls native host bitrate, frame cadence, and JPEG fallback compression.",
+                compact: true
+            )
             #if os(iOS)
             if !viewport.isIdentity {
                 Button {
@@ -530,6 +552,14 @@ struct RemoteScreenView: View {
             } label: {
                 Image(systemName: "keyboard")
             }
+
+            #if os(macOS)
+            Button {
+                MacWindowControls.toggleFullScreen()
+            } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+            }
+            #endif
             #endif
 
             Button { onDisconnect() } label: {
@@ -820,6 +850,7 @@ struct RemoteScreenView: View {
     }
 
     private func configureViewerControls() {
+        session.updateStreamQuality(controlPreferences.streamQuality)
         #if os(iOS)
         touchMode = controlPreferences.touchMode
         showStats = controlPreferences.showStats

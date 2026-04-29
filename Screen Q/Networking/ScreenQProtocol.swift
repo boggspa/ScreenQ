@@ -93,6 +93,7 @@ nonisolated enum MessageType: UInt16, Codable, Sendable {
     case systemReport      = 56
     case packageInstallReq = 57
     case packageInstallResult = 58
+    case streamQuality    = 59
     case error             = 60
     case endSession        = 99
 }

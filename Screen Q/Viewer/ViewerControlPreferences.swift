@@ -28,6 +28,7 @@ enum ViewerToolbarItem: String, CaseIterable, Identifiable {
     case fitMode
     case resetZoom
     case displays
+    case quality
     case keyboard
     case modifiers
     case arrows
@@ -45,6 +46,7 @@ enum ViewerToolbarItem: String, CaseIterable, Identifiable {
         case .fitMode: return "Fit or Fill"
         case .resetZoom: return "Reset Zoom"
         case .displays: return "Displays"
+        case .quality: return "Quality"
         case .keyboard: return "Keyboard"
         case .modifiers: return "Modifiers"
         case .arrows: return "Arrow Keys"
@@ -62,6 +64,7 @@ enum ViewerToolbarItem: String, CaseIterable, Identifiable {
         case .fitMode: return "rectangle.arrowtriangle.2.inward"
         case .resetZoom: return "minus.magnifyingglass"
         case .displays: return "display.2"
+        case .quality: return "slider.horizontal.3"
         case .keyboard: return "keyboard"
         case .modifiers: return "command"
         case .arrows: return "arrow.up.and.down.and.arrow.left.and.right"
@@ -87,6 +90,7 @@ enum ViewerToolbarItem: String, CaseIterable, Identifiable {
         .fitMode,
         .resetZoom,
         .displays,
+        .quality,
         .keyboard,
         .modifiers,
         .arrows,
@@ -112,6 +116,9 @@ final class ViewerControlPreferences: ObservableObject {
     }
     @Published var showStats: Bool {
         didSet { defaults.set(showStats, forKey: keys.showStats) }
+    }
+    @Published var streamQuality: Double {
+        didSet { defaults.set(streamQuality, forKey: keys.streamQuality) }
     }
     @Published var toolbarOffset: CGSize {
         didSet {
@@ -139,6 +146,8 @@ final class ViewerControlPreferences: ObservableObject {
         toolbarStyle = ViewerToolbarStyle(rawValue: defaults.string(forKey: keys.toolbarStyle, fallbackKey: PreferenceKeys.global.toolbarStyle) ?? "") ?? .dockedFloating
         fitMode = defaults.bool(forKey: keys.fitMode, fallbackKey: PreferenceKeys.global.fitMode) ?? true
         showStats = defaults.bool(forKey: keys.showStats, fallbackKey: PreferenceKeys.global.showStats) ?? true
+        streamQuality = defaults.double(forKey: keys.streamQuality, fallbackKey: PreferenceKeys.global.streamQuality)
+            ?? StreamQualityPreference.defaultQuality
         toolbarOffset = CGSize(
             width: defaults.double(forKey: keys.toolbarOffsetX, fallbackKey: PreferenceKeys.global.toolbarOffsetX) ?? 0,
             height: defaults.double(forKey: keys.toolbarOffsetY, fallbackKey: PreferenceKeys.global.toolbarOffsetY) ?? 0
@@ -202,6 +211,7 @@ final class ViewerControlPreferences: ObservableObject {
         let toolbarStyle: String
         let fitMode: String
         let showStats: String
+        let streamQuality: String
         let toolbarOffsetX: String
         let toolbarOffsetY: String
         let keyboardMode: String
@@ -221,6 +231,7 @@ final class ViewerControlPreferences: ObservableObject {
             toolbarStyle = "\(prefix).toolbarStyle"
             fitMode = "\(prefix).fitMode"
             showStats = "\(prefix).showStats"
+            streamQuality = "\(prefix).streamQuality"
             toolbarOffsetX = "\(prefix).toolbarOffsetX"
             toolbarOffsetY = "\(prefix).toolbarOffsetY"
             keyboardMode = "\(prefix).keyboardMode"

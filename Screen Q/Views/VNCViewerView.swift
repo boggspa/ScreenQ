@@ -16,11 +16,18 @@ struct VNCViewerView: View {
     @EnvironmentObject private var app: AppState
     @ObservedObject var session: VNCSession
     var onDisconnect: () -> Void
+    @StateObject private var controlPreferences: ViewerControlPreferences
     #if os(iOS)
     @StateObject private var iosInputState = VNCIOSInputState()
     @State private var isKeyboardActive = false
     @State private var viewportNavigationMode = true
     #endif
+
+    init(session: VNCSession, onDisconnect: @escaping () -> Void) {
+        self.session = session
+        self.onDisconnect = onDisconnect
+        self._controlPreferences = StateObject(wrappedValue: ViewerControlPreferences(scope: session.controlPreferenceScope))
+    }
 
     var body: some View {
         ZStack {
@@ -32,6 +39,7 @@ struct VNCViewerView: View {
                     session: session,
                     inputState: iosInputState,
                     securityStatus: session.securityStatus,
+                    streamQuality: $controlPreferences.streamQuality,
                     isKeyboardActive: $isKeyboardActive,
                     viewportNavigationMode: $viewportNavigationMode,
                     onDisconnect: disconnectAndExit
@@ -59,6 +67,23 @@ struct VNCViewerView: View {
                 VNCConnectionSecurityMenu(status: session.securityStatus)
             }
             ToolbarItem(placement: .automatic) {
+                StreamQualityButton(
+                    quality: $controlPreferences.streamQuality,
+                    protocolName: session.profile.displayName,
+                    detail: "Controls VNC request cadence, viewport size, and local framebuffer rendering. Tight compression-level support can build on this."
+                )
+            }
+            #if os(macOS)
+            ToolbarItem(placement: .automatic) {
+                Button {
+                    MacWindowControls.toggleFullScreen()
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                }
+                .help("Enter fullscreen")
+            }
+            #endif
+            ToolbarItem(placement: .automatic) {
                 Button("Disconnect", action: disconnectAndExit)
                 .foregroundColor(.red)
             }
@@ -83,6 +108,12 @@ struct VNCViewerView: View {
                 onConnect: { Task { await session.retryWithCredentials() } },
                 onCancel: disconnectAndExit
             )
+        }
+        .onAppear {
+            Task { await session.updateStreamQuality(controlPreferences.streamQuality) }
+        }
+        .onReceive(controlPreferences.$streamQuality.removeDuplicates()) { quality in
+            Task { await session.updateStreamQuality(quality) }
         }
         #if os(iOS)
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
@@ -812,6 +843,7 @@ private struct VNCIOSControlStrip: View {
     @ObservedObject var session: VNCSession
     @ObservedObject var inputState: VNCIOSInputState
     let securityStatus: RemoteSecurityStatus
+    @Binding var streamQuality: Double
     @Binding var isKeyboardActive: Bool
     @Binding var viewportNavigationMode: Bool
     var onDisconnect: () -> Void
@@ -825,6 +857,11 @@ private struct VNCIOSControlStrip: View {
                 }
 
                 VNCConnectionSecurityMenu(status: securityStatus)
+                StreamQualityButton(
+                    quality: $streamQuality,
+                    protocolName: session.profile.displayName,
+                    detail: "Controls VNC request cadence, viewport size, and local framebuffer rendering. Tight compression-level support can build on this."
+                )
                 displayMenu
                 viewportModeButton
                 if session.isUsingStreamViewport {

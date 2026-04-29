@@ -50,6 +50,12 @@ struct ViewerView: View {
             if !sessionStore.hasActiveSession {
                 app.viewerFocusMode = false
             }
+            if let pending = app.pendingViewerConnection {
+                consumePendingViewerConnection(pending)
+            }
+        }
+        .onReceive(app.$pendingViewerConnection.compactMap { $0 }) { pending in
+            consumePendingViewerConnection(pending)
         }
         .onReceive(sessionStore.$activeSession.combineLatest(sessionStore.$activeVNCSession)) { _, _ in
             app.viewerHasActiveSession = sessionStore.hasActiveSession
@@ -301,6 +307,36 @@ struct ViewerView: View {
         }
     }
 
+    private func consumePendingViewerConnection(_ pending: PendingViewerConnection) {
+        guard !sessionStore.hasActiveSession else {
+            sessionStore.lastError = "Disconnect the current viewer session before opening \(pending.displayName)."
+            app.clearPendingViewerConnection(id: pending.id)
+            return
+        }
+
+        app.clearPendingViewerConnection(id: pending.id)
+        switch pending {
+        case .screenQ(let host):
+            if host.isIOSShareOnlyPresence {
+                selectedShareOnlyDevice = host
+            } else {
+                Task { await sessionStore.connect(via: app, discoveredHost: host) }
+            }
+        case .macScreenSharing(let host):
+            Task { await sessionStore.openRFBHost(via: app, host: host) }
+        case .manual(let host, let port, let displayName, let connectionProtocol):
+            Task {
+                await sessionStore.connect(
+                    via: app,
+                    hostText: host,
+                    port: port,
+                    connectionProtocol: connectionProtocol,
+                    displayName: displayName
+                )
+            }
+        }
+    }
+
     private var infoCard: some View {
         VStack(alignment: .leading, spacing: 6) {
             Label("Local network discovery uses Bonjour over your current Wi-Fi or wired LAN.", systemImage: "antenna.radiowaves.left.and.right")
@@ -384,21 +420,28 @@ final class ViewerSessionStore: ObservableObject {
         await connect(via: app, hostText: hostText, port: port, connectionProtocol: legacyProtocol)
     }
 
-    func connect(via app: AppState, hostText: String, port: UInt16, connectionProtocol: RemoteConnectionProtocol) async {
+    func connect(
+        via app: AppState,
+        hostText: String,
+        port: UInt16,
+        connectionProtocol: RemoteConnectionProtocol,
+        displayName: String? = nil
+    ) async {
+        let label = displayName ?? hostText
         switch connectionProtocol {
         case .macScreenSharing:
-            app.savedConnections.addOrUpdate(host: hostText, port: port, displayName: hostText, connectionProtocol: connectionProtocol)
-            startVNCSession(host: hostText, port: port, label: hostText, profile: .macScreenSharing)
+            app.savedConnections.addOrUpdate(host: hostText, port: port, displayName: label, connectionProtocol: connectionProtocol)
+            startVNCSession(host: hostText, port: port, label: label, profile: .macScreenSharing)
             return
 
         case .vnc:
-            app.savedConnections.addOrUpdate(host: hostText, port: port, displayName: hostText, connectionProtocol: connectionProtocol)
-            startVNCSession(host: hostText, port: port, label: hostText, profile: .genericVNC)
+            app.savedConnections.addOrUpdate(host: hostText, port: port, displayName: label, connectionProtocol: connectionProtocol)
+            startVNCSession(host: hostText, port: port, label: label, profile: .genericVNC)
             return
 
         case .rdp:
-            app.savedConnections.addOrUpdate(host: hostText, port: port, displayName: hostText, connectionProtocol: connectionProtocol)
-            startRDPSession(host: hostText, port: port, label: hostText, app: app)
+            app.savedConnections.addOrUpdate(host: hostText, port: port, displayName: label, connectionProtocol: connectionProtocol)
+            startRDPSession(host: hostText, port: port, label: label, app: app)
             return
 
         case .screenQ:
@@ -415,11 +458,11 @@ final class ViewerSessionStore: ObservableObject {
         let host = NWEndpoint.Host(hostText)
         let p = NWEndpoint.Port(rawValue: port) ?? NWEndpoint.Port(rawValue: ScreenQProtocol.defaultPort)!
         let endpoint = NWEndpoint.hostPort(host: host, port: p)
-        app.savedConnections.addOrUpdate(host: hostText, port: port, displayName: hostText, connectionProtocol: connectionProtocol)
+        app.savedConnections.addOrUpdate(host: hostText, port: port, displayName: label, connectionProtocol: connectionProtocol)
         await connect(
             via: app,
             endpoint: endpoint,
-            label: "\(hostText):\(port)",
+            label: displayName ?? "\(hostText):\(port)",
             controlPreferenceScope: ViewerControlPreferenceScope(
                 connectionProtocol: .screenQ,
                 host: hostText,

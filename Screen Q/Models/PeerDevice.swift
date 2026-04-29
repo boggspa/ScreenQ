@@ -81,6 +81,32 @@ nonisolated struct DiscoveredHost: Identifiable, Hashable, Sendable {
     var isRFB: Bool { source == .rfb }
 }
 
+nonisolated enum PendingViewerConnection: Identifiable, Equatable, Sendable {
+    case screenQ(DiscoveredHost)
+    case macScreenSharing(DiscoveredHost)
+    case manual(host: String, port: UInt16, displayName: String, connectionProtocol: RemoteConnectionProtocol)
+
+    var id: String {
+        switch self {
+        case .screenQ(let host):
+            return "screenq:\(host.id)"
+        case .macScreenSharing(let host):
+            return "rfb:\(host.id)"
+        case .manual(let host, let port, _, let connectionProtocol):
+            return "manual:\(connectionProtocol.rawValue):\(host):\(port)"
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .screenQ(let host), .macScreenSharing(let host):
+            return host.displayName
+        case .manual(_, _, let displayName, _):
+            return displayName
+        }
+    }
+}
+
 /// A peer the user has previously approved for control. Stored locally only.
 nonisolated struct TrustedPeer: Codable, Identifiable, Hashable, Sendable {
     let id: UUID

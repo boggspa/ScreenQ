@@ -13,7 +13,7 @@ struct HostMacView: View {
 
     @EnvironmentObject private var app: AppState
     @StateObject private var pairing = PairingManager()
-    @State private var quality: Double = 0.6
+    @State private var quality: Double = StreamQualityPreference.defaultQuality
     @State private var showStopConfirm = false
     @State private var hostConnections: [HostSessionBox] = []
     @State private var statsRefreshSink: AnyObject?
@@ -72,6 +72,9 @@ struct HostMacView: View {
                 stopHosting()
             }
         }
+        .onReceive(app.$hostStopRequestID.compactMap { $0 }) { _ in
+            stopHosting()
+        }
     }
 
     // MARK: - Cards
@@ -122,11 +125,22 @@ struct HostMacView: View {
                 .frame(width: 200)
                 .onChange(of: quality) { newValue in
                     if #available(macOS 12.3, *) {
-                        app.macCaptureService.settings.jpegQuality = newValue
+                        applyStreamQuality(StreamQualityPreference(quality: newValue))
                     }
                 }
             Text("\(Int(quality * 100))%")
                 .font(.system(.body, design: .monospaced))
+        }
+    }
+
+    private func applyStreamQuality(_ preference: StreamQualityPreference) {
+        quality = preference.quality
+        app.adaptiveBitrate.setUserCeiling(
+            bitrate: preference.nativeTargetBitrate,
+            fps: preference.nativeTargetFPS
+        )
+        if #available(macOS 12.3, *) {
+            app.macCaptureService.applyStreamQuality(preference)
         }
     }
 
@@ -588,6 +602,9 @@ struct HostMacView: View {
                 app.lastError = error.localizedDescription
             }
             } // end #available
+        case .streamQuality(let qualityMessage):
+            guard box.encryptionEnabled else { break }
+            applyStreamQuality(StreamQualityPreference(quality: qualityMessage.quality))
         case .fileOffer(let offer):
             guard box.grantedPermissions.contains(.fileTransfer) else { break }
             hostFileTransfer.handleOffer(offer)
