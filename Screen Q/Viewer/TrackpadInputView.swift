@@ -90,6 +90,7 @@ final class TrackpadTouchView: UIView {
     private var previousTrackpadPoint: CGPoint?
     private var previousIndirectScrollTranslation: CGPoint = .zero
     private var lastViewportFollowUpdate = Date.distantPast
+    private var localInteractionStarted = false
     private let longPressDuration: TimeInterval = 0.5
     private let tapMaxDistance: CGFloat = 10
     private let pinchActivationDistance: CGFloat = 8
@@ -118,6 +119,7 @@ final class TrackpadTouchView: UIView {
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         let allTouches = event?.allTouches ?? touches
+        beginInputInteraction()
         lastTouchCount = allTouches.count
         didMoveBeyondTap = false
         touchStartTime = Date()
@@ -125,6 +127,8 @@ final class TrackpadTouchView: UIView {
         touchStartPoint = touches.first?.location(in: self) ?? touchStartCenter
 
         if allTouches.count == 1, touchMode != .scrollOnly {
+            pendingOneFingerTapTimer?.invalidate()
+            pendingOneFingerTapTimer = nil
             isDragging = false
             previousTrackpadPoint = touchStartPoint
 
@@ -152,6 +156,8 @@ final class TrackpadTouchView: UIView {
             previousPinchCenter = center
             previousTrackpadPoint = center
             let distance = distanceBetweenTouches(allTouches)
+            pendingTwoFingerTapTimer?.invalidate()
+            pendingTwoFingerTapTimer = nil
             pinchStartDistance = distance
             previousPinchDistance = distance
             isViewportGesture = false
@@ -322,12 +328,25 @@ final class TrackpadTouchView: UIView {
         lastTouchCount = 0
         touchStartTime = nil
         didMoveBeyondTap = false
+        endInputInteraction()
     }
 
     private func clearDragState() {
         isDragging = false
         dragButton = nil
         onDragFeedbackChange?(nil)
+    }
+
+    private func beginInputInteraction() {
+        guard !localInteractionStarted else { return }
+        localInteractionStarted = true
+        inputMapper?.beginLocalInteraction()
+    }
+
+    private func endInputInteraction() {
+        guard localInteractionStarted else { return }
+        localInteractionStarted = false
+        inputMapper?.endLocalInteraction()
     }
 
     private func handleOneFingerTap(at point: CGPoint) {

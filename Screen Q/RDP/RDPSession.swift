@@ -33,6 +33,7 @@ final class RDPSession: ObservableObject {
     @Published private(set) var hasSavedCredentials: Bool = false
     @Published private(set) var hasTrustedCertificate: Bool = false
     @Published private(set) var streamQualityPreference = StreamQualityPreference()
+    @Published private(set) var streamProfile = StreamQualityPreference().nativeProfile
     @Published var fitMode: Bool = true
 
     let remoteSessionID = UUID()
@@ -141,8 +142,9 @@ final class RDPSession: ObservableObject {
         await connectEngine(credentials: credentials, trustDecision: nil)
     }
 
-    func updateStreamQuality(_ quality: Double) {
+    func updateStreamQuality(_ quality: Double, profile: StreamProfile? = nil) {
         streamQualityPreference = StreamQualityPreference(quality: quality)
+        streamProfile = profile ?? streamQualityPreference.nativeProfile
         lastFramePublish = .distantPast
     }
 
@@ -282,7 +284,7 @@ final class RDPSession: ObservableObject {
 
         case .frame(let frame):
             let now = Date()
-            guard currentImage == nil || now.timeIntervalSince(lastFramePublish) >= streamQualityPreference.rdpFramePublishInterval() else {
+            guard currentImage == nil || now.timeIntervalSince(lastFramePublish) >= rdpFramePublishInterval else {
                 return
             }
             lastFramePublish = now
@@ -305,6 +307,11 @@ final class RDPSession: ObservableObject {
             inputMapper.isControlEnabled = false
             phase = .ended(reason: reason ?? "RDP session ended")
         }
+    }
+
+    private var rdpFramePublishInterval: TimeInterval {
+        let targetFPS = streamProfile.mode == .custom ? streamProfile.targetFPS : streamQualityPreference.rdpTargetFPS
+        return 1.0 / Double(max(1, min(60, targetFPS)))
     }
 
     private func handleEngineError(_ error: Error) {

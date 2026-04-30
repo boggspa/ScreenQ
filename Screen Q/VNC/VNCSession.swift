@@ -13,6 +13,8 @@ import Combine
 import CoreGraphics
 #if os(macOS)
 import AppKit
+#else
+import UIKit
 #endif
 
 nonisolated struct VNCDisplayRegion: Identifiable, Hashable, Sendable {
@@ -210,11 +212,15 @@ final class VNCSession: ObservableObject {
         case connecting
         case authenticating
         case connected
+        case reconnecting(attempt: Int)
         case failed(reason: String)
         case ended(reason: String)
     }
 
     @Published private(set) var phase: Phase = .connecting
+    private var reconnectAttempt = 0
+    private var reconnectTask: Task<Void, Never>?
+    private let maxReconnectAttempts = 5
     @Published private(set) var currentImage: CGImage?
     @Published private(set) var serverName: String = ""
     @Published private(set) var serverWidth: Int = 0
@@ -232,6 +238,26 @@ final class VNCSession: ObservableObject {
     @Published private(set) var streamQualityPreference = StreamQualityPreference()
     @Published private(set) var streamProfile = StreamQualityPreference().nativeProfile
 
+    // Cursor tracking for iOS overlay.
+    @Published private(set) var cursorViewX: Int = 0
+    @Published private(set) var cursorViewY: Int = 0
+    @Published private(set) var cursorVisible: Bool = false
+    @Published private(set) var cursorImage: CGImage?
+    @Published private(set) var cursorHotspot: CGPoint = .zero
+    private var cursorHideTimer: Timer?
+
+    // Quality / performance metrics (sampled once per second).
+    @Published private(set) var measuredFPS: Double = 0
+    @Published private(set) var lastEncoding: String = ""
+    private var fpsAccumulator: Int = 0
+    private var fpsWindowStart: Date = Date()
+
+    // Clipboard sync (macOS pasteboard polling).
+    private var clipboardSyncTimer: Timer?
+    #if os(macOS)
+    private var lastPasteboardChangeCount: Int = 0
+    #endif
+
     let remoteSessionID = UUID()
     let peerLabel: String
     let profile: RFBConnectionProfile
@@ -242,9 +268,12 @@ final class VNCSession: ObservableObject {
     private var messageTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
     private var streamRegionRequestTask: Task<Void, Never>?
+    private(set) var metalRenderer: MetalFrameBufferRenderer?
+    private var useMetalRendering: Bool = false
     private let host: String
     private let port: UInt16
     private let endpoint: NWEndpoint?
+    private var forceLegacyVNCPasswordAuth = false
     private var isDisconnecting = false
     private var lastImagePublish = Date.distantPast
     private var viewportAspect: CGFloat = 4.0 / 3.0
@@ -301,7 +330,7 @@ final class VNCSession: ObservableObject {
             let connectedRoute = try await connectUsingPreferredRoute(
                 username: username.isEmpty ? nil : username,
                 password: vncPassword.isEmpty ? nil : vncPassword,
-                securityPreference: profile == .macScreenSharing ? .macAccountFirst : .vncPasswordFirst,
+                securityPreference: currentSecurityPreference,
                 timeouts: connectionTimeouts
             )
             let conn = connectedRoute.attempt.connection
@@ -324,11 +353,13 @@ final class VNCSession: ObservableObject {
                 return
             }
             phase = .connected
+            reconnectAttempt = 0
             Logger.shared.info("VNC connected to \(serverInit.name) (\(serverInit.width)×\(serverInit.height))")
             recordSuccessfulRoute(connectedRoute.attempt)
             saveCredentialIfAllowed()
             startMessageLoop(conn)
             startRefreshLoop(conn)
+            startClipboardSync()
         } catch RFBError.authRequired {
             guard shouldContinueConnecting else { return }
             securityStatus = .vnc(report: await currentSecurityReport(), scope: networkTrustScope, profile: profile)
@@ -341,6 +372,14 @@ final class VNCSession: ObservableObject {
             needsCredentials = true
             phase = .authenticating
             await disconnectCurrentConnection()
+        } catch RFBError.timeout(let stage) {
+            guard shouldContinueConnecting else { return }
+            let report = await currentSecurityReport()
+            if promptForLegacyVNCPasswordIfAvailable(afterTimeoutAt: stage, report: report) {
+                await disconnectCurrentConnection()
+                return
+            }
+            await failConnection(with: RFBError.timeout(stage: stage))
         } catch RFBError.authFailed(let reason) {
             guard shouldContinueConnecting else { return }
             let report = await currentSecurityReport()
@@ -368,19 +407,7 @@ final class VNCSession: ObservableObject {
             phase = .ended(reason: "Disconnected")
         } catch {
             guard shouldContinueConnecting else { return }
-            await disconnectCurrentConnection()
-            securityStatus = RemoteSecurityStatus(
-                level: .unknown,
-                title: profile == .macScreenSharing ? "Mac Screen Sharing failed" : "VNC connection failed",
-                detail: error.localizedDescription,
-                isTransportEncrypted: false,
-                isAuthenticated: false,
-                recommendedAction: networkTrustScope.publicNetworkWarning,
-                protocolName: profile.displayName,
-                credentialStorage: "Keychain"
-            )
-            phase = .failed(reason: error.localizedDescription)
-            Logger.shared.error("VNC connect failed: \(error.localizedDescription)")
+            await failConnection(with: error)
         }
     }
 
@@ -392,6 +419,7 @@ final class VNCSession: ObservableObject {
 
     /// Retry connection after macOS credentials are entered.
     func retryWithCredentials() async {
+        forceLegacyVNCPasswordAuth = false
         needsCredentials = false
         startConnecting()
     }
@@ -402,6 +430,8 @@ final class VNCSession: ObservableObject {
             return
         }
         isDisconnecting = true
+        reconnectTask?.cancel()
+        reconnectTask = nil
         connectTask?.cancel()
         connectTask = nil
         messageTask?.cancel()
@@ -410,10 +440,14 @@ final class VNCSession: ObservableObject {
         refreshTask = nil
         streamRegionRequestTask?.cancel()
         streamRegionRequestTask = nil
+        stopClipboardSync()
+        cursorHideTimer?.invalidate()
+        cursorHideTimer = nil
         await connection?.disconnect()
         connection = nil
         needsPassword = false
         needsCredentials = false
+        forceLegacyVNCPasswordAuth = false
         currentImage = nil
         frameBuffer = nil
         phase = .ended(reason: "Disconnected")
@@ -605,19 +639,27 @@ final class VNCSession: ObservableObject {
     }
 
     private var connectionTimeouts: RFBConnectionTimeouts {
+        let scope = networkTrustScope
         let tcpTimeout: TimeInterval
-        if endpoint != nil || networkTrustScope.isTrustedPrivateScope {
-            tcpTimeout = 2.0
+        if endpoint != nil || scope.isTrustedPrivateScope {
+            tcpTimeout = 3.0
         } else {
-            tcpTimeout = 5.0
+            tcpTimeout = 7.0
         }
 
         return RFBConnectionTimeouts(
             tcpConnect: tcpTimeout,
-            versionHandshake: 2.5,
-            securityNegotiation: 3.0,
-            serverInitialization: 3.0
+            versionHandshake: scope.isTrustedPrivateScope ? 6.0 : 8.0,
+            securityNegotiation: profile == .macScreenSharing ? 12.0 : 8.0,
+            serverInitialization: 8.0
         )
+    }
+
+    private var currentSecurityPreference: RFBSecurityPreference {
+        if forceLegacyVNCPasswordAuth {
+            return .vncPasswordOnly
+        }
+        return profile == .macScreenSharing ? .macAccountFirst : .vncPasswordFirst
     }
 
     private func connectUsingPreferredRoute(
@@ -646,6 +688,8 @@ final class VNCSession: ObservableObject {
                 return route
             case .failed(let failure):
                 self.connection = failure.attempt.connection
+                logRouteFailure(failure)
+                removeCachedRouteIfUnusable(failure)
                 throw failure.error
             }
         }
@@ -697,7 +741,9 @@ final class VNCSession: ObservableObject {
 
                 case .failed(let failure):
                     failures.append(failure)
-                    if !shouldContinueRouteSearch(after: failure.error) {
+                    logRouteFailure(failure)
+                    removeCachedRouteIfUnusable(failure)
+                    if !shouldContinueRouteSearch(after: failure, totalAttempts: attempts.count) {
                         self.connection = failure.attempt.connection
                         for attempt in attempts where attempt.id != failure.attempt.id {
                             await attempt.connection.disconnect()
@@ -708,7 +754,7 @@ final class VNCSession: ObservableObject {
                 }
             }
 
-            if let failure = prioritizedRouteFailure(failures) {
+            if let failure = prioritizedRouteFailure(failures, totalAttempts: attempts.count) {
                 self.connection = failure.attempt.connection
                 throw failure.error
             }
@@ -769,21 +815,49 @@ final class VNCSession: ObservableObject {
         return attempts
     }
 
-    private func shouldContinueRouteSearch(after error: Error) -> Bool {
-        if error is CancellationError { return true }
-        guard let rfbError = error as? RFBError else { return true }
+    private func shouldContinueRouteSearch(after failure: VNCRouteFailure, totalAttempts: Int) -> Bool {
+        if failure.error is CancellationError { return true }
+        guard let rfbError = failure.error as? RFBError else { return true }
         switch rfbError {
         case .connectionFailed, .timeout, .disconnected:
             return true
-        case .authFailed, .authRequired, .credentialsRequired, .protocolError, .unsupportedSecurity, .unsupportedEncoding:
+        case .protocolError, .unsupportedSecurity, .unsupportedEncoding:
+            return failure.attempt.isCached && totalAttempts > 1
+        case .authFailed, .authRequired, .credentialsRequired:
             return false
         }
     }
 
-    private func prioritizedRouteFailure(_ failures: [VNCRouteFailure]) -> VNCRouteFailure? {
-        failures.first { !($0.error is CancellationError) && !shouldContinueRouteSearch(after: $0.error) } ??
+    private func prioritizedRouteFailure(_ failures: [VNCRouteFailure], totalAttempts: Int) -> VNCRouteFailure? {
+        failures.first { !($0.error is CancellationError) && !shouldContinueRouteSearch(after: $0, totalAttempts: totalAttempts) } ??
             failures.first { !($0.error is CancellationError) } ??
             failures.first
+    }
+
+    private func logRouteFailure(_ failure: VNCRouteFailure) {
+        let routedHost = failure.attempt.routedHost ?? failure.attempt.logicalHost
+        let routedPort = failure.attempt.routedPort ?? failure.attempt.logicalPort
+        let cacheLabel = failure.attempt.isCached ? " cached" : ""
+        Logger.shared.warn("VNC\(cacheLabel) route \(routedHost):\(routedPort) failed: \(failure.error.localizedDescription)")
+    }
+
+    private func removeCachedRouteIfUnusable(_ failure: VNCRouteFailure) {
+        guard failure.attempt.isCached, shouldEvictCachedRoute(after: failure.error) else { return }
+        VNCLastGoodRouteStore.shared.remove(
+            host: failure.attempt.logicalHost,
+            port: failure.attempt.logicalPort,
+            profile: profile
+        )
+    }
+
+    private func shouldEvictCachedRoute(after error: Error) -> Bool {
+        guard let rfbError = error as? RFBError else { return false }
+        switch rfbError {
+        case .connectionFailed, .timeout, .disconnected, .protocolError, .unsupportedSecurity, .unsupportedEncoding:
+            return true
+        case .authFailed, .authRequired, .credentialsRequired:
+            return false
+        }
     }
 
     private func recordSuccessfulRoute(_ attempt: VNCConnectionRouteAttempt) {
@@ -813,9 +887,73 @@ final class VNCSession: ObservableObject {
         connection = nil
     }
 
+    private func failConnection(with error: Error) async {
+        await disconnectCurrentConnection()
+        securityStatus = RemoteSecurityStatus(
+            level: .unknown,
+            title: profile == .macScreenSharing ? "Mac Screen Sharing failed" : "VNC connection failed",
+            detail: error.localizedDescription,
+            isTransportEncrypted: false,
+            isAuthenticated: false,
+            recommendedAction: networkTrustScope.publicNetworkWarning,
+            protocolName: profile.displayName,
+            credentialStorage: "Keychain"
+        )
+        phase = .failed(reason: error.localizedDescription)
+        Logger.shared.error("VNC connect failed: \(error.localizedDescription)")
+    }
+
+    private func promptForLegacyVNCPasswordIfAvailable(afterTimeoutAt stage: String, report: RFBSecurityReport) -> Bool {
+        guard profile == .macScreenSharing,
+              !forceLegacyVNCPasswordAuth,
+              report.mode == .appleDH,
+              report.offeredModes.contains(.vncAuth) else {
+            return false
+        }
+
+        forceLegacyVNCPasswordAuth = true
+        needsCredentials = false
+        needsPassword = true
+        vncPassword = ""
+        securityStatus = RemoteSecurityStatus(
+            level: networkTrustScope.isTrustedPrivateScope ? .networkProtected : .legacyAuth,
+            title: "Legacy VNC password available",
+            detail: "The Mac advertised Apple Screen Sharing account authentication, but did not finish \(stage). Enter the separate VNC password configured for legacy VNC viewers.",
+            isTransportEncrypted: false,
+            isAuthenticated: false,
+            recommendedAction: networkTrustScope.publicNetworkWarning ?? "Only use this over a private LAN, VPN, or Tailscale.",
+            protocolName: profile.displayName,
+            authMethod: "Legacy VNC password",
+            credentialStorage: "Keychain",
+            identityVerification: "VNC password only",
+            warnings: ["This fallback is not your Mac admin/user login, and RFB traffic is not encrypted by Screen Q."]
+        )
+        phase = .authenticating
+        Logger.shared.warn("Mac Screen Sharing Apple DH timed out during \(stage); prompting for legacy VNC password fallback")
+        return true
+    }
+
     private func prepareCredentialPreflightForDial() -> Bool {
         loadStoredCredentialIfNeeded()
         guard shouldContinueConnecting else { return false }
+        if profile == .macScreenSharing, forceLegacyVNCPasswordAuth, vncPassword.isEmpty {
+            needsCredentials = false
+            needsPassword = true
+            securityStatus = RemoteSecurityStatus(
+                level: networkTrustScope.isTrustedPrivateScope ? .networkProtected : .legacyAuth,
+                title: "Legacy VNC password required",
+                detail: "Enter the separate VNC password configured in Screen Sharing settings for \(credentialHost). This is not the Mac account password.",
+                isTransportEncrypted: false,
+                isAuthenticated: false,
+                recommendedAction: networkTrustScope.publicNetworkWarning,
+                protocolName: profile.displayName,
+                authMethod: "Legacy VNC password",
+                credentialStorage: "Keychain",
+                identityVerification: "VNC password only"
+            )
+            phase = .authenticating
+            return false
+        }
         guard profile == .macScreenSharing,
               username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               vncPassword.isEmpty else {
@@ -847,6 +985,13 @@ final class VNCSession: ObservableObject {
             port: credentialPort,
             operationPrompt: CredentialKeychainAccess.operationPrompt(protocolName: profile.displayName, host: credentialHost)
         ) else { return }
+        if forceLegacyVNCPasswordAuth {
+            guard stored.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            if vncPassword.isEmpty {
+                vncPassword = stored.password
+            }
+            return
+        }
         if username.isEmpty {
             username = stored.username
         }
@@ -858,7 +1003,7 @@ final class VNCSession: ObservableObject {
     private func saveCredentialIfAllowed() {
         guard rememberCredentials, !vncPassword.isEmpty else { return }
         VNCKeychainCredentialStore.save(
-            VNCStoredCredential(username: username, password: vncPassword),
+            VNCStoredCredential(username: forceLegacyVNCPasswordAuth ? "" : username, password: vncPassword),
             host: credentialHost,
             port: credentialPort,
             requireLocalAuthentication: requireLocalAuthenticationForSavedCredentials
@@ -870,6 +1015,7 @@ final class VNCSession: ObservableObject {
     func sendMouseMove(x: Int, y: Int, buttons: UInt8 = 0) {
         guard case .connected = phase else { return }
         let point = remotePoint(viewX: x, viewY: y)
+        updateCursorPosition(viewX: x, viewY: y)
         Task {
             try? await connection?.sendPointerEvent(
                 buttons: buttons,
@@ -883,12 +1029,25 @@ final class VNCSession: ObservableObject {
         guard case .connected = phase else { return }
         let mask: UInt8 = UInt8(1 << button)
         let point = remotePoint(viewX: x, viewY: y)
+        updateCursorPosition(viewX: x, viewY: y)
         Task {
             try? await connection?.sendPointerEvent(
                 buttons: isDown ? mask : 0,
                 x: UInt16(clamping: point.x),
                 y: UInt16(clamping: point.y)
             )
+        }
+    }
+
+    private func updateCursorPosition(viewX: Int, viewY: Int) {
+        cursorViewX = viewX
+        cursorViewY = viewY
+        cursorVisible = true
+        cursorHideTimer?.invalidate()
+        cursorHideTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.cursorVisible = false
+            }
         }
     }
 
@@ -906,9 +1065,92 @@ final class VNCSession: ObservableObject {
     func sendKey(code: UInt32, isDown: Bool) {
         guard case .connected = phase else { return }
         Task {
-            try? await connection?.sendKeyEvent(down: isDown, key: code)
+            guard let conn = connection else { return }
+            // Always send legacy KeyEvent for compatibility.
+            try? await conn.sendKeyEvent(down: isDown, key: code)
+            // If the server supports QEMU extended events and we know the
+            // XT scan code, also send that so games and modifier-sensitive
+            // applications get hardware-accurate keystrokes.
+            if await conn.serverSupportsQemuExtendedKey,
+               let xt = XTScanCodeMap.scanCode(forKeysym: code) {
+                try? await conn.sendQemuExtendedKeyEvent(down: isDown, keysym: code, keycode: xt)
+            }
         }
     }
+
+    /// Ask the remote host to switch to a new framebuffer size.
+    /// No-op if the server didn't advertise ExtendedDesktopSize support.
+    @discardableResult
+    func requestRemoteResize(width: Int, height: Int) -> Bool {
+        guard case .connected = phase else { return false }
+        let w = UInt16(clamping: max(320, min(width, 7680)))
+        let h = UInt16(clamping: max(240, min(height, 4320)))
+        Task {
+            guard let conn = connection else { return }
+            guard await conn.serverSupportsExtendedDesktopSize else { return }
+            try? await conn.sendSetDesktopSize(width: w, height: h)
+        }
+        return true
+    }
+
+    var canRequestRemoteResize: Bool {
+        // Best-effort UI hint; actual support is verified async in requestRemoteResize.
+        if case .connected = phase { return true }
+        return false
+    }
+
+    /// Send the local pasteboard contents to the remote host as
+    /// ClientCutText. On macOS, this is also called automatically when
+    /// the local pasteboard changes while a session is connected.
+    func sendClipboard(_ text: String) {
+        guard case .connected = phase, !text.isEmpty else { return }
+        // RFB ClientCutText is Latin-1; fall back gracefully for unicode.
+        Task {
+            try? await connection?.sendClientCutText(text)
+        }
+    }
+
+    func sendLocalPasteboardIfAvailable() {
+        #if os(macOS)
+        if let text = NSPasteboard.general.string(forType: .string) {
+            sendClipboard(text)
+        }
+        #else
+        if let text = UIPasteboard.general.string {
+            sendClipboard(text)
+        }
+        #endif
+    }
+
+    private func startClipboardSync() {
+        stopClipboardSync()
+        #if os(macOS)
+        lastPasteboardChangeCount = NSPasteboard.general.changeCount
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.checkPasteboardForChange()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        clipboardSyncTimer = timer
+        #endif
+    }
+
+    private func stopClipboardSync() {
+        clipboardSyncTimer?.invalidate()
+        clipboardSyncTimer = nil
+    }
+
+    #if os(macOS)
+    private func checkPasteboardForChange() {
+        let pb = NSPasteboard.general
+        guard pb.changeCount != lastPasteboardChangeCount else { return }
+        lastPasteboardChangeCount = pb.changeCount
+        if let text = pb.string(forType: .string), !text.isEmpty {
+            sendClipboard(text)
+        }
+    }
+    #endif
 
     func sendKeyTap(code: UInt32) {
         guard case .connected = phase else { return }
@@ -944,15 +1186,48 @@ final class VNCSession: ObservableObject {
             } catch {
                 await MainActor.run {
                     if case .connected = self?.phase {
-                        self?.phase = .failed(reason: error.localizedDescription)
+                        self?.scheduleReconnect(reason: error.localizedDescription)
                     }
                 }
+                return
             }
             await MainActor.run {
                 if case .connected = self?.phase {
-                    self?.phase = .ended(reason: "Server disconnected")
+                    self?.scheduleReconnect(reason: "Server disconnected")
                 }
             }
+        }
+    }
+
+    private func scheduleReconnect(reason: String) {
+        guard !isDisconnecting else {
+            phase = .ended(reason: reason)
+            return
+        }
+        reconnectAttempt += 1
+        guard reconnectAttempt <= maxReconnectAttempts else {
+            phase = .failed(reason: "\(reason) (reconnect failed after \(maxReconnectAttempts) attempts)")
+            return
+        }
+        phase = .reconnecting(attempt: reconnectAttempt)
+        Logger.shared.info("VNC reconnecting (attempt \(reconnectAttempt)/\(maxReconnectAttempts)): \(reason)")
+
+        stopClipboardSync()
+        messageTask?.cancel()
+        messageTask = nil
+        refreshTask?.cancel()
+        refreshTask = nil
+        streamRegionRequestTask?.cancel()
+        streamRegionRequestTask = nil
+        connection = nil
+        frameBuffer = nil
+        currentImage = nil
+
+        let delay = min(pow(2.0, Double(reconnectAttempt - 1)), 16.0) // 1, 2, 4, 8, 16s
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.startConnecting()
         }
     }
 
@@ -961,11 +1236,20 @@ final class VNCSession: ObservableObject {
         case .framebufferUpdate(let rects):
             guard !rects.isEmpty else { return }
             frameBuffer?.apply(rects)
+            recordFrameStats(rects: rects)
             if isViewportRefreshPending {
                 isViewportRefreshPending = false
                 lastImagePublish = .distantPast
             }
             publishCurrentImageIfNeeded()
+            // Check for piggy-backed cursor update.
+            Task {
+                if let cursor = await connection?.consumePendingCursorShape() {
+                    applyCursorShape(cursor)
+                }
+            }
+        case .cursorShape(let cursor):
+            applyCursorShape(cursor)
         case .desktopResize(let w, let h):
             streamRegionRequestTask?.cancel()
             streamRegionRequestTask = nil
@@ -988,6 +1272,68 @@ final class VNCSession: ObservableObject {
             NSPasteboard.general.setString(text, forType: .string)
             #endif
         }
+    }
+
+    private func recordFrameStats(rects: [RFBRect]) {
+        fpsAccumulator += 1
+        let now = Date()
+        let elapsed = now.timeIntervalSince(fpsWindowStart)
+        if elapsed >= 1.0 {
+            measuredFPS = Double(fpsAccumulator) / elapsed
+            fpsAccumulator = 0
+            fpsWindowStart = now
+        }
+    }
+
+    private func applyCursorShape(_ cursor: RFBConnection.CursorShape) {
+        let w = Int(cursor.width)
+        let h = Int(cursor.height)
+        guard w > 0, h > 0, cursor.pixels.count == w * h * 4 else {
+            cursorImage = nil
+            return
+        }
+        cursorHotspot = CGPoint(x: CGFloat(cursor.hotspotX), y: CGFloat(cursor.hotspotY))
+
+        let maskRowBytes = (w + 7) / 8
+        var rgba = [UInt8](cursor.pixels)
+
+        // Apply 1-bit mask as alpha. Server sends BGRA pixels + 1-bit MSB mask.
+        if cursor.mask.count == maskRowBytes * h {
+            let maskBytes = Array(cursor.mask)
+            for y in 0..<h {
+                for x in 0..<w {
+                    let maskBit = (maskBytes[y * maskRowBytes + x / 8] >> (7 - (x % 8))) & 1
+                    let pixelIndex = (y * w + x) * 4
+                    if maskBit == 0 {
+                        rgba[pixelIndex] = 0     // B
+                        rgba[pixelIndex + 1] = 0 // G
+                        rgba[pixelIndex + 2] = 0 // R
+                        rgba[pixelIndex + 3] = 0 // A
+                    } else {
+                        rgba[pixelIndex + 3] = 255 // fully opaque
+                    }
+                }
+            }
+        }
+
+        let data = Data(rgba)
+        guard let provider = CGDataProvider(data: data as CFData) else {
+            cursorImage = nil
+            return
+        }
+        cursorImage = CGImage(
+            width: w,
+            height: h,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: w * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: true,
+            intent: .defaultIntent
+        )
     }
 
     // MARK: - Private: Refresh loop (request framebuffer updates)
@@ -1194,8 +1540,34 @@ final class VNCSession: ObservableObject {
             return
         }
         lastImagePublish = now
+
+        // Metal path: upload dirty pixels directly to GPU texture.
+        if useMetalRendering, let renderer = metalRenderer, let fb = frameBuffer {
+            fb.uploadToMetal(renderer)
+            // Still publish a CGImage for thumbnails and fallback consumers.
+            if currentImage == nil {
+                currentImage = autoreleasepool {
+                    fb.makeCGImage(maxDimension: renderMaxDimension)
+                }
+            }
+            return
+        }
+
+        // Legacy CGImage path.
         currentImage = autoreleasepool {
             frameBuffer?.makeCGImage(maxDimension: renderMaxDimension)
+        }
+    }
+
+    /// Call once from the viewer to enable Metal-accelerated rendering.
+    func enableMetalRendering() {
+        guard metalRenderer == nil else { return }
+        if let renderer = MetalFrameBufferRenderer() {
+            metalRenderer = renderer
+            useMetalRendering = true
+            if let fb = frameBuffer {
+                renderer.ensureTextureSize(width: fb.width, height: fb.height)
+            }
         }
     }
 

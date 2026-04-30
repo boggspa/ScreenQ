@@ -45,6 +45,8 @@ final class ViewerSession: ObservableObject {
     private var localEphemeralPublicKey: String?
     private var localPeerID: UUID?
     private var localIdentityFingerprint: String?
+    private var lastViewportHint: ViewerViewportMessage?
+    private var lastViewportHintSentAt: Date = .distantPast
 
     init(
         connection: ScreenQConnection,
@@ -142,7 +144,7 @@ final class ViewerSession: ObservableObject {
         activeDisplayID = displayID
     }
 
-    func updateStreamQuality(_ quality: Double) {
+    func updateStreamQuality(_ quality: Double, profile: StreamProfile? = nil) {
         guard encryptionEnabled else { return }
         switch phase {
         case .approved, .streaming, .viewOnly:
@@ -150,14 +152,61 @@ final class ViewerSession: ObservableObject {
         default:
             return
         }
-        let message = StreamQualityPreference(quality: quality).nativeMessage
+        let baseMessage: StreamQualityMessage
+        if let profile {
+            baseMessage = StreamQualityMessage(quality: quality, profile: profile)
+        } else {
+            baseMessage = StreamQualityPreference(quality: quality).nativeMessage
+        }
+        #if os(iOS)
+        let message = baseMessage.cappedForMobileViewer()
+        #else
+        let message = baseMessage
+        #endif
         Task { try? await connection.sendJSON(.streamQuality, message) }
+    }
+
+    func updateViewerViewport(_ message: ViewerViewportMessage, force: Bool = false) {
+        guard encryptionEnabled else { return }
+        switch phase {
+        case .approved, .streaming, .viewOnly:
+            break
+        default:
+            return
+        }
+
+        let now = Date()
+        guard force || shouldSendViewportHint(message, now: now) else { return }
+        lastViewportHint = message
+        lastViewportHintSentAt = now
+        Task { try? await connection.sendJSON(.viewerViewport, message) }
     }
 
     func tearDown(reason: String) async {
         try? await connection.sendJSON(.endSession, EndSessionMessage(reason: reason))
         await connection.stop()
         phase = .ended(reason: reason)
+    }
+
+    private func shouldSendViewportHint(_ next: ViewerViewportMessage, now: Date) -> Bool {
+        guard let previous = lastViewportHint else { return true }
+        if previous.displayID != next.displayID || previous.adaptiveEnabled != next.adaptiveEnabled {
+            return true
+        }
+        if abs(previous.zoomScale - next.zoomScale) >= 0.04 {
+            return now.timeIntervalSince(lastViewportHintSentAt) >= 0.18
+        }
+        if abs(previous.visibleRect.x - next.visibleRect.x) >= 0.04 ||
+            abs(previous.visibleRect.y - next.visibleRect.y) >= 0.04 ||
+            abs(previous.visibleRect.width - next.visibleRect.width) >= 0.04 ||
+            abs(previous.visibleRect.height - next.visibleRect.height) >= 0.04 {
+            return now.timeIntervalSince(lastViewportHintSentAt) >= 0.5
+        }
+        if abs(Double(previous.canvasPixelWidth - next.canvasPixelWidth)) >= 96 ||
+            abs(Double(previous.canvasPixelHeight - next.canvasPixelHeight)) >= 96 {
+            return true
+        }
+        return false
     }
 
     private func handle(_ message: InboundMessage) async {
@@ -356,11 +405,14 @@ struct RemoteScreenView: View {
         .onAppear {
             configureViewerControls()
         }
-        .onReceive(controlPreferences.$streamQuality.removeDuplicates()) { quality in
-            session.updateStreamQuality(quality)
+        .onReceive(controlPreferences.$streamQuality.removeDuplicates()) { _ in
+            applyStreamControls()
+        }
+        .onReceive(controlPreferences.$streamProfile.removeDuplicates()) { _ in
+            applyStreamControls()
         }
         .onChange(of: session.phase) { _ in
-            session.updateStreamQuality(controlPreferences.streamQuality)
+            applyStreamControls()
         }
         .onReceive(renderer.$currentImage.compactMap { $0 }.throttle(for: .seconds(5), scheduler: RunLoop.main, latest: true)) { image in
             app.savedConnections.updateThumbnail(
@@ -478,10 +530,17 @@ struct RemoteScreenView: View {
             }
             StreamQualityButton(
                 quality: $controlPreferences.streamQuality,
+                profile: $controlPreferences.streamProfile,
                 protocolName: "Screen Q Native",
                 detail: "Controls native host bitrate, frame cadence, and JPEG fallback compression.",
                 compact: true
             )
+            Button {
+                controlPreferences.showCursorOverlay.toggle()
+            } label: {
+                Image(systemName: controlPreferences.showCursorOverlay ? "cursorarrow.rays" : "eye.slash")
+            }
+            .help(controlPreferences.showCursorOverlay ? "Hide overlay cursor" : "Show overlay cursor")
             #if os(iOS)
             if !viewport.isIdentity {
                 Button {
@@ -614,11 +673,13 @@ struct RemoteScreenView: View {
                     ProgressView("Waiting for first frame…")
                         .foregroundColor(.white)
                 }
-                CursorOverlayView(
-                    state: session.cursorState,
-                    inputMapper: session.inputMapper,
-                    canvasGeometry: canvasGeometry(size: proxy.size)
-                )
+                if controlPreferences.showCursorOverlay {
+                    CursorOverlayView(
+                        state: session.cursorState,
+                        inputMapper: session.inputMapper,
+                        canvasGeometry: canvasGeometry(size: proxy.size)
+                    )
+                }
                 FileTransferOverlay(
                     service: session.fileTransfer,
                     isTransferEnabled: session.grantedPermissions.contains(.fileTransfer),
@@ -812,6 +873,9 @@ struct RemoteScreenView: View {
     private func updateCanvas(size: CGSize, viewport: ViewportTransform) {
         lastCanvasSize = size
         session.inputMapper.canvas = canvasGeometry(size: size, viewport: viewport)
+        #if os(iOS)
+        sendViewportHint(canvasSize: size, viewport: viewport)
+        #endif
     }
 
     private var remotePixelSize: CGSize {
@@ -850,7 +914,7 @@ struct RemoteScreenView: View {
     }
 
     private func configureViewerControls() {
-        session.updateStreamQuality(controlPreferences.streamQuality)
+        applyStreamControls()
         #if os(iOS)
         touchMode = controlPreferences.touchMode
         showStats = controlPreferences.showStats
@@ -864,7 +928,38 @@ struct RemoteScreenView: View {
         #endif
     }
 
+    private func applyStreamControls() {
+        session.updateStreamQuality(
+            controlPreferences.streamQuality,
+            profile: controlPreferences.streamProfile
+        )
+        #if os(iOS)
+        sendViewportHint(canvasSize: lastCanvasSize, viewport: viewport, force: true)
+        #endif
+    }
+
     #if os(iOS)
+    private func sendViewportHint(
+        canvasSize: CGSize,
+        viewport: ViewportTransform,
+        force: Bool = false
+    ) {
+        guard canvasSize.width > 0, canvasSize.height > 0 else { return }
+        let geometry = canvasGeometry(size: canvasSize, viewport: viewport)
+        guard let visibleRect = geometry.visibleRemoteRect() else { return }
+        let screenScale = UIScreen.main.scale
+        let message = ViewerViewportMessage(
+            displayID: session.activeDisplayID == 0 ? nil : session.activeDisplayID,
+            zoomScale: Double(max(ViewportTransform.minimumScale, viewport.scale)),
+            visibleRect: visibleRect,
+            canvasPixelWidth: Int((canvasSize.width * screenScale).rounded()),
+            canvasPixelHeight: Int((canvasSize.height * screenScale).rounded()),
+            adaptiveEnabled: controlPreferences.streamProfile.adaptive,
+            timestamp: Date().timeIntervalSince1970
+        )
+        session.updateViewerViewport(message, force: force)
+    }
+
     private func zoomHUD(scale: CGFloat) -> some View {
         Text("\(Int((scale * 100).rounded()))%")
             .font(.caption.monospacedDigit().bold())

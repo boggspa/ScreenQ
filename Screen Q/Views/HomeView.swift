@@ -225,7 +225,7 @@ struct HomeView: View {
         switch role {
         case .hostMac:
             #if os(macOS)
-            return app.hostIsSharing
+            return app.macHost.isSharing
             #else
             return false
             #endif

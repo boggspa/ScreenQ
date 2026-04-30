@@ -17,6 +17,7 @@ import UIKit
 
 @MainActor
 final class AppState: ObservableObject {
+    private var cancellables: Set<AnyCancellable> = []
 
     // MARK: - Identity
 
@@ -61,12 +62,7 @@ final class AppState: ObservableObject {
     let systemActionService: SystemActionService
     let systemReportCollector: SystemReportCollector
     let packageInstallService: PackageInstallService
-    @Published var hostPairingCode: String = ""
-    @Published var hostIsSharing: Bool = false
-    @Published var hostViewOnly: Bool = false
-    @Published var hostPermissions: PermissionSet = .standard
-    @Published var pendingPairingRequests: [PairingRequest] = []
-    @Published var hostStopRequestID: UUID?
+    let macHost: MacHostRuntime
 
     // Typed accessors for @available services (stored as AnyObject? for compatibility)
     @available(macOS 12.3, *)
@@ -150,6 +146,7 @@ final class AppState: ObservableObject {
         self.systemActionService = SystemActionService()
         self.systemReportCollector = SystemReportCollector()
         self.packageInstallService = PackageInstallService()
+        self.macHost = MacHostRuntime()
         #endif
 
         #if os(iOS)
@@ -158,6 +155,13 @@ final class AppState: ObservableObject {
         #endif
 
         bindBrowser()
+
+        #if os(macOS)
+        self.macHost.configure(app: self)
+        self.macHost.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        #endif
 
         #if os(iOS)
         Task { [weak self] in
@@ -268,7 +272,7 @@ final class AppState: ObservableObject {
     }
 
     func requestStopHostingFromMenu() {
-        hostStopRequestID = UUID()
+        macHost.stopHosting()
     }
     #endif
 

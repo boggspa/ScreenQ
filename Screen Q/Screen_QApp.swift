@@ -13,6 +13,7 @@ import SwiftUI
 struct Screen_QApp: App {
     @StateObject private var appState = AppState()
     #if os(macOS)
+    @NSApplicationDelegateAdaptor(MacApplicationDelegate.self) private var appDelegate
     @StateObject private var statusBarController = MacStatusBarController()
     #endif
 
@@ -21,7 +22,9 @@ struct Screen_QApp: App {
             HomeView()
                 .environmentObject(appState)
                 #if os(macOS)
+                .background(MacMainWindowAccessor())
                 .onAppear {
+                    MacWindowRegistry.shared.configure(appState: appState)
                     statusBarController.configure(appState: appState)
                 }
                 #endif

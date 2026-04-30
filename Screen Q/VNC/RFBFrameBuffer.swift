@@ -23,6 +23,7 @@ final class RFBFrameBuffer: @unchecked Sendable {
     private(set) var originY: Int
     private var pixels: Data // 32bpp XRGB, row-major
     private let lock = NSLock()
+    private(set) var dirtyRegion = DirtyRegion()
 
     init(width: Int, height: Int, originX: Int = 0, originY: Int = 0) {
         self.width = width
@@ -45,12 +46,23 @@ final class RFBFrameBuffer: @unchecked Sendable {
             switch rect.encoding {
             case RFBEncoding.raw.rawValue:
                 applyRaw(rect)
+                trackDirty(rect)
             case RFBEncoding.copyRect.rawValue:
                 applyCopyRect(rect)
+                trackDirty(rect)
             default:
                 break
             }
         }
+    }
+
+    private func trackDirty(_ rect: RFBRect) {
+        let rx = max(0, Int(rect.x) - originX)
+        let ry = max(0, Int(rect.y) - originY)
+        let rw = min(Int(rect.width), width - rx)
+        let rh = min(Int(rect.height), height - ry)
+        guard rw > 0, rh > 0 else { return }
+        dirtyRegion.add(x: rx, y: ry, width: rw, height: rh)
     }
 
     func resize(width: Int, height: Int, originX: Int = 0, originY: Int = 0) {
@@ -60,6 +72,7 @@ final class RFBFrameBuffer: @unchecked Sendable {
         self.height = height
         self.originX = originX
         self.originY = originY
+        dirtyRegion.addFullFrame(width: width, height: height)
         guard let byteCount = Self.validatedByteCount(width: width, height: height) else {
             self.width = 0
             self.height = 0
@@ -71,6 +84,36 @@ final class RFBFrameBuffer: @unchecked Sendable {
         } else {
             self.pixels = Data(count: byteCount)
         }
+    }
+
+    // MARK: - Metal upload
+
+    /// Upload pixel data to a MetalFrameBufferRenderer, using only the
+    /// dirty region when available. Returns true if an upload was made.
+    @discardableResult
+    func uploadToMetal(_ renderer: MetalFrameBufferRenderer) -> Bool {
+        lock.lock()
+        let w = width
+        let h = height
+        guard w > 0, h > 0,
+              let byteCount = Self.validatedByteCount(width: w, height: h),
+              pixels.count == byteCount,
+              dirtyRegion.isDirty else {
+            lock.unlock()
+            return false
+        }
+        let dirty = dirtyRegion
+        dirtyRegion.reset()
+        let bytesPerRow = w * Self.bytesPerPixel
+        pixels.withUnsafeBytes { rawPtr in
+            guard let base = rawPtr.baseAddress else {
+                lock.unlock()
+                return
+            }
+            renderer.uploadPixels(base, width: w, height: h, bytesPerRow: bytesPerRow, dirtyRegion: dirty)
+        }
+        lock.unlock()
+        return true
     }
 
     // MARK: - CGImage output

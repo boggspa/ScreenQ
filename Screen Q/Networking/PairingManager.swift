@@ -64,14 +64,38 @@ final class PairingManager: ObservableObject {
         return trustedPeers.contains { $0.id == peerID && $0.fingerprint == fingerprint }
     }
 
+    func accessPolicy(peerID: UUID, fingerprint: String?) -> TrustedPeerAccessPolicy {
+        Self.accessPolicy(in: trustedPeers, peerID: peerID, fingerprint: fingerprint)
+    }
+
+    @discardableResult
+    func updateAccessPolicy(
+        peerID: UUID,
+        fingerprint: String,
+        accessPolicy: TrustedPeerAccessPolicy
+    ) -> Bool {
+        guard Self.updateAccessPolicy(
+            in: &trustedPeers,
+            peerID: peerID,
+            fingerprint: fingerprint,
+            accessPolicy: accessPolicy
+        ) else {
+            return false
+        }
+        save()
+        return true
+    }
+
     func trust(viewer peer: PeerDevice, fingerprint: String) {
+        let accessPolicy = Self.accessPolicy(in: trustedPeers, peerID: peer.id, fingerprint: fingerprint)
         let trusted = TrustedPeer(
             id: peer.id,
             displayName: peer.displayName,
             fingerprint: fingerprint,
-            lastSeen: Date()
+            lastSeen: Date(),
+            accessPolicy: accessPolicy
         )
-        if let idx = trustedPeers.firstIndex(where: { $0.id == peer.id }) {
+        if let idx = trustedPeers.firstIndex(where: { $0.id == peer.id && $0.fingerprint == fingerprint }) {
             trustedPeers[idx] = trusted
         } else {
             trustedPeers.append(trusted)
@@ -79,8 +103,9 @@ final class PairingManager: ObservableObject {
         save()
     }
 
-    func updateLastSeen(peerID: UUID) {
-        if let idx = trustedPeers.firstIndex(where: { $0.id == peerID }) {
+    func updateLastSeen(peerID: UUID, fingerprint: String?) {
+        guard let fingerprint else { return }
+        if let idx = trustedPeers.firstIndex(where: { $0.id == peerID && $0.fingerprint == fingerprint }) {
             trustedPeers[idx].lastSeen = Date()
             save()
         }
@@ -97,18 +122,49 @@ final class PairingManager: ObservableObject {
 
     private func load() {
         if let data = UserDefaults.standard.data(forKey: storeKey),
-           let peers = try? JSONDecoder().decode([TrustedPeer].self, from: data) {
+           let peers = try? Self.decodeTrustedPeers(from: data) {
             trustedPeers = peers
         }
     }
 
     private func save() {
-        if let data = try? JSONEncoder().encode(trustedPeers) {
+        if let data = try? Self.encodeTrustedPeers(trustedPeers) {
             UserDefaults.standard.set(data, forKey: storeKey)
         }
     }
 
     // MARK: - Helpers
+
+    nonisolated static func accessPolicy(
+        in peers: [TrustedPeer],
+        peerID: UUID,
+        fingerprint: String?
+    ) -> TrustedPeerAccessPolicy {
+        guard let fingerprint else { return .askEveryTime }
+        return peers.first { $0.id == peerID && $0.fingerprint == fingerprint }?.accessPolicy ?? .askEveryTime
+    }
+
+    @discardableResult
+    nonisolated static func updateAccessPolicy(
+        in peers: inout [TrustedPeer],
+        peerID: UUID,
+        fingerprint: String,
+        accessPolicy: TrustedPeerAccessPolicy
+    ) -> Bool {
+        guard let idx = peers.firstIndex(where: { $0.id == peerID && $0.fingerprint == fingerprint }) else {
+            return false
+        }
+        peers[idx].accessPolicy = accessPolicy
+        return true
+    }
+
+    nonisolated static func decodeTrustedPeers(from data: Data) throws -> [TrustedPeer] {
+        try JSONDecoder().decode([TrustedPeer].self, from: data)
+    }
+
+    nonisolated static func encodeTrustedPeers(_ peers: [TrustedPeer]) throws -> Data {
+        try JSONEncoder().encode(peers)
+    }
 
     /// Compare two short strings without leaking length-dependent timing.
     private func constantTimeEquals(_ a: String, _ b: String) -> Bool {

@@ -64,6 +64,28 @@ nonisolated final class H264FrameEncoder: FrameEncoder, @unchecked Sendable {
                              value: limit as CFArray)
     }
 
+    func updateFrameRate(_ fps: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        targetFPS = max(1, min(120, fps))
+        keyFrameIntervalFrames = max(1, targetFPS * 2)
+        guard let session else { return }
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate,
+                             value: targetFPS as CFNumber)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
+                             value: keyFrameIntervalFrames as CFNumber)
+    }
+
+    func updateKeyFrameInterval(seconds: Double) {
+        lock.lock()
+        defer { lock.unlock() }
+        let clampedSeconds = max(0.5, min(10.0, seconds))
+        keyFrameIntervalFrames = max(1, Int((Double(targetFPS) * clampedSeconds).rounded()))
+        guard let session else { return }
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
+                             value: keyFrameIntervalFrames as CFNumber)
+    }
+
     /// Request that the next frame be a keyframe.
     func forceKeyFrame() {
         lock.lock()

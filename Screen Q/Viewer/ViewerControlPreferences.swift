@@ -11,9 +11,47 @@ import Combine
 
 enum ViewerToolbarStyle: String, CaseIterable, Identifiable {
     case dockedFloating
+    case docked
+    case floating
     case native
 
     var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .dockedFloating: return "Automatic"
+        case .docked: return "Docked"
+        case .floating: return "Floating"
+        case .native: return "Native"
+        }
+    }
+}
+
+enum ViewerToolbarPlacement: String, CaseIterable, Identifiable {
+    case bottom
+    case top
+    case leading
+    case trailing
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .bottom: return "Bottom"
+        case .top: return "Top"
+        case .leading: return "Left"
+        case .trailing: return "Right"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .bottom: return "rectangle.bottomthird.inset.filled"
+        case .top: return "rectangle.topthird.inset.filled"
+        case .leading: return "rectangle.leadingthird.inset.filled"
+        case .trailing: return "rectangle.trailingthird.inset.filled"
+        }
+    }
 }
 
 enum ViewerKeyboardInputMode: String, CaseIterable, Identifiable {
@@ -111,14 +149,23 @@ final class ViewerControlPreferences: ObservableObject {
     @Published var toolbarStyle: ViewerToolbarStyle {
         didSet { defaults.set(toolbarStyle.rawValue, forKey: keys.toolbarStyle) }
     }
+    @Published var toolbarPlacement: ViewerToolbarPlacement {
+        didSet { defaults.set(toolbarPlacement.rawValue, forKey: keys.toolbarPlacement) }
+    }
     @Published var fitMode: Bool {
         didSet { defaults.set(fitMode, forKey: keys.fitMode) }
     }
     @Published var showStats: Bool {
         didSet { defaults.set(showStats, forKey: keys.showStats) }
     }
+    @Published var showCursorOverlay: Bool {
+        didSet { defaults.set(showCursorOverlay, forKey: keys.showCursorOverlay) }
+    }
     @Published var streamQuality: Double {
         didSet { defaults.set(streamQuality, forKey: keys.streamQuality) }
+    }
+    @Published var streamProfile: StreamProfile {
+        didSet { defaults.setCodable(streamProfile, forKey: keys.streamProfile) }
     }
     @Published var toolbarOffset: CGSize {
         didSet {
@@ -144,10 +191,15 @@ final class ViewerControlPreferences: ObservableObject {
         self.keys = PreferenceKeys(scope: scope)
         touchMode = TouchMode(rawValue: defaults.string(forKey: keys.touchMode, fallbackKey: PreferenceKeys.global.touchMode) ?? "") ?? .directTouch
         toolbarStyle = ViewerToolbarStyle(rawValue: defaults.string(forKey: keys.toolbarStyle, fallbackKey: PreferenceKeys.global.toolbarStyle) ?? "") ?? .dockedFloating
+        toolbarPlacement = ViewerToolbarPlacement(rawValue: defaults.string(forKey: keys.toolbarPlacement, fallbackKey: PreferenceKeys.global.toolbarPlacement) ?? "") ?? .bottom
         fitMode = defaults.bool(forKey: keys.fitMode, fallbackKey: PreferenceKeys.global.fitMode) ?? true
         showStats = defaults.bool(forKey: keys.showStats, fallbackKey: PreferenceKeys.global.showStats) ?? true
-        streamQuality = defaults.double(forKey: keys.streamQuality, fallbackKey: PreferenceKeys.global.streamQuality)
+        showCursorOverlay = defaults.bool(forKey: keys.showCursorOverlay, fallbackKey: PreferenceKeys.global.showCursorOverlay) ?? true
+        let storedStreamQuality = defaults.double(forKey: keys.streamQuality, fallbackKey: PreferenceKeys.global.streamQuality)
             ?? StreamQualityPreference.defaultQuality
+        streamQuality = storedStreamQuality
+        streamProfile = defaults.codable(StreamProfile.self, forKey: keys.streamProfile, fallbackKey: PreferenceKeys.global.streamProfile)
+            ?? StreamQualityPreference(quality: storedStreamQuality).nativeProfile
         toolbarOffset = CGSize(
             width: defaults.double(forKey: keys.toolbarOffsetX, fallbackKey: PreferenceKeys.global.toolbarOffsetX) ?? 0,
             height: defaults.double(forKey: keys.toolbarOffsetY, fallbackKey: PreferenceKeys.global.toolbarOffsetY) ?? 0
@@ -209,9 +261,12 @@ final class ViewerControlPreferences: ObservableObject {
 
         let touchMode: String
         let toolbarStyle: String
+        let toolbarPlacement: String
         let fitMode: String
         let showStats: String
+        let showCursorOverlay: String
         let streamQuality: String
+        let streamProfile: String
         let toolbarOffsetX: String
         let toolbarOffsetY: String
         let keyboardMode: String
@@ -229,9 +284,12 @@ final class ViewerControlPreferences: ObservableObject {
         private init(prefix: String) {
             touchMode = "\(prefix).touchMode"
             toolbarStyle = "\(prefix).toolbarStyle"
+            toolbarPlacement = "\(prefix).toolbarPlacement"
             fitMode = "\(prefix).fitMode"
             showStats = "\(prefix).showStats"
+            showCursorOverlay = "\(prefix).showCursorOverlay"
             streamQuality = "\(prefix).streamQuality"
+            streamProfile = "\(prefix).streamProfile"
             toolbarOffsetX = "\(prefix).toolbarOffsetX"
             toolbarOffsetY = "\(prefix).toolbarOffsetY"
             keyboardMode = "\(prefix).keyboardMode"
@@ -284,6 +342,22 @@ private extension UserDefaults {
         }
         if object(forKey: fallbackKey) != nil {
             return double(forKey: fallbackKey)
+        }
+        return nil
+    }
+
+    func setCodable<T: Encodable>(_ value: T, forKey key: String) {
+        if let data = try? JSONEncoder().encode(value) {
+            set(data, forKey: key)
+        }
+    }
+
+    func codable<T: Decodable>(_ type: T.Type, forKey key: String, fallbackKey: String) -> T? {
+        if let data = data(forKey: key), let decoded = try? JSONDecoder().decode(type, from: data) {
+            return decoded
+        }
+        if let data = data(forKey: fallbackKey), let decoded = try? JSONDecoder().decode(type, from: data) {
+            return decoded
         }
         return nil
     }

@@ -161,6 +161,39 @@ nonisolated struct CanvasGeometry: Sendable {
         return viewport.apply(to: basePoint, in: canvasSize)
     }
 
+    func visibleRemoteRect() -> NormalisedRect? {
+        guard remotePixelSize.width > 0,
+              remotePixelSize.height > 0,
+              canvasSize.width > 0,
+              canvasSize.height > 0 else {
+            return nil
+        }
+
+        let drawRect = remoteDrawRect()
+        guard drawRect.width > 0, drawRect.height > 0 else { return nil }
+
+        let topLeft = viewport.inverted(point: .zero, in: canvasSize)
+        let bottomRight = viewport.inverted(
+            point: CGPoint(x: canvasSize.width, y: canvasSize.height),
+            in: canvasSize
+        )
+        let visibleBaseRect = CGRect(
+            x: min(topLeft.x, bottomRight.x),
+            y: min(topLeft.y, bottomRight.y),
+            width: abs(bottomRight.x - topLeft.x),
+            height: abs(bottomRight.y - topLeft.y)
+        )
+        let intersection = visibleBaseRect.intersection(drawRect)
+        guard !intersection.isNull, !intersection.isEmpty else { return nil }
+
+        return NormalisedRect(
+            x: Double((intersection.minX - drawRect.minX) / drawRect.width),
+            y: Double((intersection.minY - drawRect.minY) / drawRect.height),
+            width: Double(intersection.width / drawRect.width),
+            height: Double(intersection.height / drawRect.height)
+        )
+    }
+
     func normalisedDelta(localDelta: CGSize) -> (dx: Double, dy: Double)? {
         guard remotePixelSize.width > 0,
               remotePixelSize.height > 0,
@@ -219,21 +252,43 @@ final class InputMappingService: ObservableObject {
     private var currentPointer: NormalisedPoint?
     private var lastLocalPointerUpdate = Date.distantPast
     private var predictionClearTask: Task<Void, Never>?
-    private let pointerPredictionHoldInterval: TimeInterval = 0.28
+    private var pointerFlushTask: Task<Void, Never>?
+    private var pendingPointerMove: RemoteInputEvent?
+    private var lastPointerSendTime = Date.distantPast
+    private var localInteractionDepth = 0
+    private let pointerPredictionHoldInterval: TimeInterval = 0.55
+    private let pointerEchoDistanceThreshold = 0.006
+    private let pointerOutputInterval: TimeInterval = 1.0 / 60.0
 
     func send(_ event: RemoteInputEvent) {
         guard isControlEnabled else { return }
-        sendEvent?(event)
+        switch event {
+        case .pointerMove(let point, _):
+            enqueuePointerMove(event, point: point)
+        default:
+            flushPendingPointerMove()
+            sendEvent?(event)
+        }
     }
 
     func updateRemotePointer(_ point: NormalisedPoint) {
-        if Date().timeIntervalSince(lastLocalPointerUpdate) < pointerPredictionHoldInterval,
+        if shouldSuppressRemotePointerEcho(),
            let predictedPointer,
-           predictedPointer.distance(to: point) > 0.012 {
+           predictedPointer.distance(to: point) > pointerEchoDistanceThreshold {
             return
         }
         currentPointer = point
         predictedPointer = nil
+    }
+
+    func beginLocalInteraction() {
+        localInteractionDepth += 1
+        lastLocalPointerUpdate = Date()
+    }
+
+    func endLocalInteraction() {
+        localInteractionDepth = max(0, localInteractionDepth - 1)
+        lastLocalPointerUpdate = Date()
     }
 
     func ensurePredictedPointerVisible() {
@@ -350,6 +405,41 @@ final class InputMappingService: ObservableObject {
         )
     }
 
+    private func enqueuePointerMove(_ event: RemoteInputEvent, point: NormalisedPoint) {
+        rememberLocalPointer(point)
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastPointerSendTime)
+        if elapsed >= pointerOutputInterval {
+            pointerFlushTask?.cancel()
+            pointerFlushTask = nil
+            pendingPointerMove = nil
+            lastPointerSendTime = now
+            sendEvent?(event)
+            return
+        }
+
+        pendingPointerMove = event
+        schedulePointerFlush(after: pointerOutputInterval - elapsed)
+    }
+
+    private func schedulePointerFlush(after delay: TimeInterval) {
+        pointerFlushTask?.cancel()
+        let nanoseconds = UInt64(max(0.001, delay) * 1_000_000_000)
+        pointerFlushTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            self?.flushPendingPointerMove()
+        }
+    }
+
+    private func flushPendingPointerMove() {
+        pointerFlushTask?.cancel()
+        pointerFlushTask = nil
+        guard isControlEnabled, let event = pendingPointerMove else { return }
+        pendingPointerMove = nil
+        lastPointerSendTime = Date()
+        sendEvent?(event)
+    }
+
     private func rememberLocalPointer(_ point: NormalisedPoint) {
         currentPointer = point
         predictedPointer = point
@@ -357,10 +447,16 @@ final class InputMappingService: ObservableObject {
         schedulePredictionClear()
     }
 
+    private func shouldSuppressRemotePointerEcho() -> Bool {
+        guard predictedPointer != nil else { return false }
+        if localInteractionDepth > 0 { return true }
+        return Date().timeIntervalSince(lastLocalPointerUpdate) < pointerPredictionHoldInterval
+    }
+
     private func schedulePredictionClear() {
         predictionClearTask?.cancel()
         predictionClearTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(0.35 * 1_000_000_000))
+            try? await Task.sleep(nanoseconds: UInt64(0.65 * 1_000_000_000))
             self?.clearPredictionIfExpired()
         }
     }

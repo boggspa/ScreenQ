@@ -33,6 +33,7 @@ nonisolated enum RFBConnectionProfile: String, Codable, Hashable, Sendable {
 nonisolated enum RFBSecurityPreference: Sendable {
     case macAccountFirst
     case vncPasswordFirst
+    case vncPasswordOnly
 }
 
 nonisolated struct RFBConnectionTimeouts: Sendable, Equatable {
@@ -57,15 +58,42 @@ nonisolated enum RFBSecurityNegotiationPolicy {
     ) -> UInt8 {
         switch preference {
         case .macAccountFirst:
+            if types.contains(RFBSecurityType.appleScreenSharing.rawValue) { return RFBSecurityType.appleScreenSharing.rawValue }
             if types.contains(RFBSecurityType.appleDH.rawValue) { return RFBSecurityType.appleDH.rawValue }
+            if types.contains(RFBSecurityType.vncAuth.rawValue) { return RFBSecurityType.vncAuth.rawValue }
+        case .vncPasswordFirst:
+            if hasUsername, types.contains(RFBSecurityType.appleScreenSharing.rawValue) { return RFBSecurityType.appleScreenSharing.rawValue }
+            if hasUsername, types.contains(RFBSecurityType.appleDH.rawValue) { return RFBSecurityType.appleDH.rawValue }
+            if types.contains(RFBSecurityType.vncAuth.rawValue) { return RFBSecurityType.vncAuth.rawValue }
+        case .vncPasswordOnly:
+            if types.contains(RFBSecurityType.vncAuth.rawValue) { return RFBSecurityType.vncAuth.rawValue }
+        }
+        if types.contains(RFBSecurityType.none.rawValue) { return RFBSecurityType.none.rawValue }
+        if types.contains(RFBSecurityType.appleScreenSharing.rawValue) { return RFBSecurityType.appleScreenSharing.rawValue }
+        if types.contains(RFBSecurityType.appleDH.rawValue) { return RFBSecurityType.appleDH.rawValue }
+        return types.first ?? RFBSecurityType.invalid.rawValue
+    }
+
+    static func chooseAppleWrappedSecurityType(
+        offered types: [UInt8],
+        hasUsername: Bool,
+        preference: RFBSecurityPreference
+    ) -> UInt8 {
+        switch preference {
+        case .macAccountFirst:
+            if types.contains(RFBSecurityType.appleDH.rawValue) { return RFBSecurityType.appleDH.rawValue }
+            if types.contains(RFBSecurityType.appleModern36.rawValue) { return RFBSecurityType.appleModern36.rawValue }
+            if types.contains(RFBSecurityType.appleModern35.rawValue) { return RFBSecurityType.appleModern35.rawValue }
             if types.contains(RFBSecurityType.vncAuth.rawValue) { return RFBSecurityType.vncAuth.rawValue }
         case .vncPasswordFirst:
             if hasUsername, types.contains(RFBSecurityType.appleDH.rawValue) { return RFBSecurityType.appleDH.rawValue }
             if types.contains(RFBSecurityType.vncAuth.rawValue) { return RFBSecurityType.vncAuth.rawValue }
+            if hasUsername, types.contains(RFBSecurityType.appleModern36.rawValue) { return RFBSecurityType.appleModern36.rawValue }
+            if hasUsername, types.contains(RFBSecurityType.appleModern35.rawValue) { return RFBSecurityType.appleModern35.rawValue }
+        case .vncPasswordOnly:
+            if types.contains(RFBSecurityType.vncAuth.rawValue) { return RFBSecurityType.vncAuth.rawValue }
         }
-        if types.contains(RFBSecurityType.none.rawValue) { return RFBSecurityType.none.rawValue }
-        if types.contains(RFBSecurityType.appleDH.rawValue) { return RFBSecurityType.appleDH.rawValue }
-        return types.first ?? RFBSecurityType.invalid.rawValue
+        return RFBSecurityType.invalid.rawValue
     }
 }
 
@@ -76,13 +104,19 @@ nonisolated enum RFBSecurityType: UInt8, Sendable {
     case none     = 1
     case vncAuth  = 2
     // Apple-specific (macOS Screen Sharing)
-    case appleDH  = 30
+    case appleDH            = 30
+    case appleScreenSharing = 33
+    case appleModern35      = 35
+    case appleModern36      = 36
 }
 
 nonisolated enum RFBSecurityMode: String, Codable, Hashable, Sendable {
     case none
     case vncAuth
     case appleDH
+    case appleScreenSharing
+    case appleModern35
+    case appleModern36
     case unknown
 
     init(type: UInt8?) {
@@ -93,6 +127,12 @@ nonisolated enum RFBSecurityMode: String, Codable, Hashable, Sendable {
             self = .vncAuth
         case RFBSecurityType.appleDH.rawValue:
             self = .appleDH
+        case RFBSecurityType.appleScreenSharing.rawValue:
+            self = .appleScreenSharing
+        case RFBSecurityType.appleModern35.rawValue:
+            self = .appleModern35
+        case RFBSecurityType.appleModern36.rawValue:
+            self = .appleModern36
         default:
             self = .unknown
         }
@@ -103,6 +143,9 @@ nonisolated enum RFBSecurityMode: String, Codable, Hashable, Sendable {
         case .none: return "None"
         case .vncAuth: return "VNC Auth"
         case .appleDH: return "Apple DH"
+        case .appleScreenSharing: return "Apple Screen Sharing"
+        case .appleModern35: return "Apple Screen Sharing 35"
+        case .appleModern36: return "Apple Screen Sharing 36"
         case .unknown: return "Unknown"
         }
     }
@@ -115,6 +158,10 @@ nonisolated enum RFBSecurityMode: String, Codable, Hashable, Sendable {
             return "VNC password authentication is legacy challenge-response auth; RFB traffic is not encrypted by VNC"
         case .appleDH:
             return "Apple DH protects the credential exchange, but the RFB session itself is not end-to-end encrypted by Screen Q"
+        case .appleScreenSharing:
+            return "Apple Screen Sharing authentication was negotiated; Screen Q has not verified end-to-end RFB transport encryption for this path"
+        case .appleModern35, .appleModern36:
+            return "This Mac offered a newer private Apple Screen Sharing authentication dialect that Screen Q does not yet complete"
         case .unknown:
             return "Screen Q could not determine the negotiated VNC security mode"
         }
@@ -141,9 +188,11 @@ nonisolated enum RFBEncoding: Int32, Sendable {
     case tight       = 7
     case zrle        = 16
     // Pseudo-encodings
-    case cursor      = -239
-    case tightPNG    = -260
-    case desktopSize = -223
+    case cursor              = -239
+    case tightPNG            = -260
+    case desktopSize         = -223
+    case extendedDesktopSize = -308
+    case qemuExtendedKeyEvent = -258
 }
 
 // MARK: - Client → Server Message Types
@@ -155,6 +204,12 @@ nonisolated enum RFBClientMessageType: UInt8, Sendable {
     case keyEvent                  = 4
     case pointerEvent              = 5
     case clientCutText             = 6
+    case setDesktopSize            = 251
+    case qemuClientMessage         = 255
+}
+
+nonisolated enum RFBQemuSubMessage: UInt8, Sendable {
+    case extendedKeyEvent = 0
 }
 
 // MARK: - Server → Client Message Types
@@ -268,7 +323,15 @@ nonisolated enum RFBError: Error, LocalizedError, Sendable {
         case .authFailed(let s):       return "Authentication failed: \(s)"
         case .authRequired:            return "VNC password required"
         case .credentialsRequired:     return "macOS username and password required"
-        case .unsupportedSecurity(let t): return "Unsupported security type: \(t)"
+        case .unsupportedSecurity(let t):
+            switch t {
+            case RFBSecurityType.appleModern35.rawValue, RFBSecurityType.appleModern36.rawValue:
+                return "Unsupported Apple Screen Sharing security type \(t): this server requires Apple's newer private RSA/SRP account-auth dialect"
+            case RFBSecurityType.appleScreenSharing.rawValue:
+                return "Unsupported Apple Screen Sharing security wrapper"
+            default:
+                return "Unsupported security type: \(t)"
+            }
         case .unsupportedEncoding(let e): return "Unsupported framebuffer encoding: \(e)"
         case .disconnected:            return "VNC server disconnected"
         }

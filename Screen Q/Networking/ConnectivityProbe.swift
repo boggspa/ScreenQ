@@ -51,6 +51,14 @@ nonisolated enum ProbeResult: Sendable, Equatable {
 
 nonisolated enum ConnectivityProbe {
     static let fastTimeoutSeconds: TimeInterval = 2
+    static let trustedVNCProbeTimeoutSeconds: TimeInterval = 3
+    static let routedVNCProbeTimeoutSeconds: TimeInterval = 7
+
+    static func manualVNCProbeTimeoutSeconds(for host: String) -> TimeInterval {
+        NetworkTrustScope.classify(host: host).isTrustedPrivateScope
+            ? trustedVNCProbeTimeoutSeconds
+            : routedVNCProbeTimeoutSeconds
+    }
 
     /// Attempt a bare TCP connect to `host:port` with a timeout.
     /// Resolves to `.reachable` if the TCP handshake completes, or a

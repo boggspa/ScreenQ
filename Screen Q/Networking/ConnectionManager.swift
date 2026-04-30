@@ -32,6 +32,7 @@ nonisolated enum InboundMessage: Sendable {
     case audioFrame(Data)
     case displayList(DisplayListMessage)
     case displaySwitch(DisplaySwitchMessage)
+    case viewerViewport(ViewerViewportMessage)
     case reconnectToken(ReconnectTokenMessage)
     case fileOffer(FileOfferMessage)
     case fileAccept(FileAcceptMessage)
@@ -448,6 +449,8 @@ actor ScreenQConnection {
             return .displayList(try dec.decode(DisplayListMessage.self, from: frame.body))
         case .displaySwitch:
             return .displaySwitch(try dec.decode(DisplaySwitchMessage.self, from: frame.body))
+        case .viewerViewport:
+            return .viewerViewport(try dec.decode(ViewerViewportMessage.self, from: frame.body))
         case .reconnectToken:
             return .reconnectToken(try dec.decode(ReconnectTokenMessage.self, from: frame.body))
         case .fileOffer:

@@ -203,6 +203,16 @@ struct SecurityTrustView: View {
                                 .foregroundColor(.secondary)
                         }
                         Spacer()
+                        Picker("Access", selection: Binding(
+                            get: { peer.accessPolicy },
+                            set: { updateTrustedPeer(peer, accessPolicy: $0) }
+                        )) {
+                            ForEach(TrustedPeerAccessPolicy.allCases, id: \.self) { policy in
+                                Text(policy.securityTrustLabel).tag(policy)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 150)
                         Button("Revoke") {
                             revokeTrustedPeer(peer)
                         }
@@ -384,7 +394,7 @@ struct SecurityTrustView: View {
     }
 
     private func revokeTrustedPeer(_ peer: TrustedPeer) {
-        var next = trustedPeers.filter { $0.id != peer.id }
+        var next = trustedPeers.filter { $0.id != peer.id || $0.fingerprint != peer.fingerprint }
         next.sort { $0.lastSeen > $1.lastSeen }
         if let data = try? JSONEncoder().encode(next) {
             UserDefaults.standard.set(data, forKey: "ScreenQ.TrustedPeers")
@@ -394,6 +404,23 @@ struct SecurityTrustView: View {
             peerID: peer.id,
             event: .trustChanged,
             detail: "Revoked trusted Screen Q device identity \(peer.fingerprint.prefix(16))..."
+        )
+        refreshToken = UUID()
+    }
+
+    private func updateTrustedPeer(_ peer: TrustedPeer, accessPolicy: TrustedPeerAccessPolicy) {
+        var next = trustedPeers
+        guard let index = next.firstIndex(where: { $0.id == peer.id && $0.fingerprint == peer.fingerprint }) else { return }
+        next[index].accessPolicy = accessPolicy
+        next.sort { $0.lastSeen > $1.lastSeen }
+        if let data = try? JSONEncoder().encode(next) {
+            UserDefaults.standard.set(data, forKey: "ScreenQ.TrustedPeers")
+        }
+        app.auditLog.log(
+            peerName: peer.displayName,
+            peerID: peer.id,
+            event: .trustChanged,
+            detail: "Set Screen Q device identity \(peer.fingerprint.prefix(16))... access policy to \(accessPolicy.securityTrustLabel)."
         )
         refreshToken = UUID()
     }
@@ -414,4 +441,18 @@ struct SecurityTrustView: View {
         formatter.timeStyle = .short
         return formatter
     }()
+}
+
+private extension TrustedPeerAccessPolicy {
+    static var allCases: [TrustedPeerAccessPolicy] {
+        [.askEveryTime, .alwaysAllow, .alwaysDeny]
+    }
+
+    var securityTrustLabel: String {
+        switch self {
+        case .askEveryTime: return "Ask Every Time"
+        case .alwaysAllow: return "Always Allow"
+        case .alwaysDeny: return "Always Deny"
+        }
+    }
 }

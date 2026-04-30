@@ -35,18 +35,10 @@ struct IOSSessionControlSurface: View {
         GeometryReader { proxy in
             ZStack {
                 if controlsVisible {
-                    if isPad {
+                    if usesFloatingToolbar(in: proxy.size) {
                         floatingToolbar(in: proxy.size)
-                    } else if proxy.size.width > proxy.size.height {
-                        dockedToolbar(vertical: true)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                            .padding(.leading, 8)
-                            .padding(.vertical, 10)
                     } else {
-                        dockedToolbar(vertical: false)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                            .padding(.horizontal, 10)
-                            .padding(.bottom, 10)
+                        dockedToolbar(in: proxy.size)
                     }
                 } else {
                     revealButton
@@ -83,8 +75,9 @@ struct IOSSessionControlSurface: View {
     }
 
     private func floatingToolbar(in size: CGSize) -> some View {
-        toolbarBody(vertical: isCollapsed)
-            .position(x: size.width / 2, y: size.height - 68)
+        let base = floatingBasePosition(in: size)
+        return toolbarBody(vertical: isCollapsed)
+            .position(base)
             .offset(preferences.toolbarOffset)
             .gesture(
                 DragGesture()
@@ -96,7 +89,8 @@ struct IOSSessionControlSurface: View {
                         preferences.toolbarOffset = clampedOffset(
                             CGSize(width: start.width + value.translation.width,
                                    height: start.height + value.translation.height),
-                            in: size
+                            in: size,
+                            base: base
                         )
                     }
                     .onEnded { _ in
@@ -105,8 +99,12 @@ struct IOSSessionControlSurface: View {
             )
     }
 
-    private func dockedToolbar(vertical: Bool) -> some View {
-        toolbarBody(vertical: vertical)
+    private func dockedToolbar(in size: CGSize) -> some View {
+        let placement = resolvedToolbarPlacement(in: size)
+        let vertical = placement == .leading || placement == .trailing
+        return toolbarBody(vertical: vertical)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: dockedAlignment(for: placement))
+            .padding(dockedPadding(for: placement))
     }
 
     private func toolbarBody(vertical: Bool) -> some View {
@@ -209,6 +207,7 @@ struct IOSSessionControlSurface: View {
     private var qualityButton: some View {
         StreamQualityButton(
             quality: $preferences.streamQuality,
+            profile: $preferences.streamProfile,
             protocolName: "Screen Q Native",
             detail: "Controls native host bitrate, frame cadence, and JPEG fallback compression."
         )
@@ -229,6 +228,15 @@ struct IOSSessionControlSurface: View {
                 } label: {
                     Label(mode.label, systemImage: mode.icon)
                 }
+            }
+            Divider()
+            Button {
+                preferences.showCursorOverlay.toggle()
+            } label: {
+                Label(
+                    preferences.showCursorOverlay ? "Hide Overlay Cursor" : "Show Overlay Cursor",
+                    systemImage: preferences.showCursorOverlay ? "eye.slash" : "cursorarrow.rays"
+                )
             }
         } label: {
             Image(systemName: touchMode.icon)
@@ -372,6 +380,33 @@ struct IOSSessionControlSurface: View {
             }
             Button("Gesture Help") {
                 showGestureHelp = true
+            }
+            Menu("Overlay Cursor") {
+                Button {
+                    preferences.showCursorOverlay = true
+                } label: {
+                    Label("Show Overlay Cursor", systemImage: preferences.showCursorOverlay ? "checkmark" : "cursorarrow.rays")
+                }
+                Button {
+                    preferences.showCursorOverlay = false
+                } label: {
+                    Label("Hide Overlay Cursor", systemImage: !preferences.showCursorOverlay ? "checkmark" : "eye.slash")
+                }
+            }
+            Menu("Toolbar Position") {
+                Picker("Style", selection: $preferences.toolbarStyle) {
+                    Text(ViewerToolbarStyle.dockedFloating.label).tag(ViewerToolbarStyle.dockedFloating)
+                    Text(ViewerToolbarStyle.docked.label).tag(ViewerToolbarStyle.docked)
+                    Text(ViewerToolbarStyle.floating.label).tag(ViewerToolbarStyle.floating)
+                }
+                Picker("Placement", selection: $preferences.toolbarPlacement) {
+                    ForEach(ViewerToolbarPlacement.allCases) { placement in
+                        Label(placement.label, systemImage: placement.icon).tag(placement)
+                    }
+                }
+                Button("Reset Drag Offset") {
+                    preferences.toolbarOffset = .zero
+                }
             }
             Button("Customize Toolbar") {
                 showToolbarCustomization = true
@@ -526,18 +561,94 @@ struct IOSSessionControlSurface: View {
         session.inputMapper.sendKey(key, modifiers: explicitModifiers)
     }
 
-    private func clampedOffset(_ offset: CGSize, in size: CGSize) -> CGSize {
-        let maxX = max(0, size.width / 2 - 80)
-        let maxY = max(0, size.height / 2 - 50)
+    private func clampedOffset(_ offset: CGSize, in size: CGSize, base: CGPoint) -> CGSize {
+        let margin: CGFloat = 44
+        let minX = margin - base.x
+        let maxX = max(minX, size.width - margin - base.x)
+        let minY = margin - base.y
+        let maxY = max(minY, size.height - margin - base.y)
         return CGSize(
-            width: min(max(offset.width, -maxX), maxX),
-            height: min(max(offset.height, -maxY), maxY)
+            width: min(max(offset.width, minX), maxX),
+            height: min(max(offset.height, minY), maxY)
         )
+    }
+
+    private func usesFloatingToolbar(in size: CGSize) -> Bool {
+        switch preferences.toolbarStyle {
+        case .floating:
+            return true
+        case .docked:
+            return false
+        case .native:
+            return false
+        case .dockedFloating:
+            return isPad
+        }
+    }
+
+    private func resolvedToolbarPlacement(in size: CGSize) -> ViewerToolbarPlacement {
+        if preferences.toolbarStyle == .dockedFloating, !isPad, size.width > size.height {
+            return .leading
+        }
+        return preferences.toolbarPlacement
+    }
+
+    private func floatingBasePosition(in size: CGSize) -> CGPoint {
+        switch resolvedToolbarPlacement(in: size) {
+        case .top:
+            return CGPoint(x: size.width / 2, y: 68)
+        case .bottom:
+            return CGPoint(x: size.width / 2, y: size.height - 68)
+        case .leading:
+            return CGPoint(x: 58, y: size.height / 2)
+        case .trailing:
+            return CGPoint(x: size.width - 58, y: size.height / 2)
+        }
+    }
+
+    private func dockedAlignment(for placement: ViewerToolbarPlacement) -> Alignment {
+        switch placement {
+        case .top: return .top
+        case .bottom: return .bottom
+        case .leading: return .leading
+        case .trailing: return .trailing
+        }
+    }
+
+    private func dockedPadding(for placement: ViewerToolbarPlacement) -> EdgeInsets {
+        switch placement {
+        case .top:
+            return EdgeInsets(top: 10, leading: 10, bottom: 0, trailing: 10)
+        case .bottom:
+            return EdgeInsets(top: 0, leading: 10, bottom: 10, trailing: 10)
+        case .leading:
+            return EdgeInsets(top: 10, leading: 8, bottom: 10, trailing: 0)
+        case .trailing:
+            return EdgeInsets(top: 10, leading: 0, bottom: 10, trailing: 8)
+        }
     }
 
     private var toolbarCustomization: some View {
         NavigationStack {
             List {
+                Section("Placement") {
+                    Picker("Style", selection: $preferences.toolbarStyle) {
+                        Text(ViewerToolbarStyle.dockedFloating.label).tag(ViewerToolbarStyle.dockedFloating)
+                        Text(ViewerToolbarStyle.docked.label).tag(ViewerToolbarStyle.docked)
+                        Text(ViewerToolbarStyle.floating.label).tag(ViewerToolbarStyle.floating)
+                    }
+                    Picker("Position", selection: $preferences.toolbarPlacement) {
+                        ForEach(ViewerToolbarPlacement.allCases) { placement in
+                            Label(placement.label, systemImage: placement.icon).tag(placement)
+                        }
+                    }
+                    Button("Reset Floating Position") {
+                        preferences.toolbarOffset = .zero
+                    }
+                }
+                Section("Cursor") {
+                    Toggle("Show Overlay Cursor", isOn: $preferences.showCursorOverlay)
+                }
                 Section("Toolbar Items") {
                     ForEach(preferences.toolbarItems) { item in
                         HStack(spacing: 12) {

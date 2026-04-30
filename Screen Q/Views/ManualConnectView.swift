@@ -311,7 +311,7 @@ struct ManualConnectView: View {
                 let result = await ConnectivityProbe.probe(
                     host: host,
                     port: port,
-                    timeoutSeconds: ConnectivityProbe.fastTimeoutSeconds
+                    timeoutSeconds: ConnectivityProbe.manualVNCProbeTimeoutSeconds(for: host)
                 )
                 await MainActor.run {
                     isProbing = false

@@ -34,6 +34,7 @@ enum SelfTests {
         results.append(testCoordinateMappingWithViewportZoom())
         results.append(testCoordinateMappingRelativeDelta())
         results.append(testViewportZoomKeepsAnchorStable())
+        results.append(testViewportVisibleRect())
         results.append(testNormalisedClamping())
         results.append(testRemoteInputEventCodableRoundTrip())
         results.append(testRemoteConnectionProtocolDefaults())
@@ -47,6 +48,8 @@ enum SelfTests {
         results.append(testSavedConnectionProtocolResolution())
         results.append(testViewerControlPreferenceScope())
         results.append(testSessionStateRoutingFlags())
+        results.append(testTrustedPeerLegacyPolicyDecode())
+        results.append(testTrustedPeerPolicyUpdatePersistence())
         results.append(testNetworkTrustScopeClassification())
         results.append(testVNCRemoteSecurityStatus())
         results.append(testRFBSecurityNegotiationPolicy())
@@ -276,6 +279,25 @@ enum SelfTests {
             return fail("Viewport zoom anchor", "anchor shifted from \(before) to \(after)")
         }
         return ok("Viewport zoom keeps pinch anchor stable")
+    }
+
+    private static func testViewportVisibleRect() -> Result {
+        let geometry = CanvasGeometry(
+            canvasSize: CGSize(width: 1000, height: 1000),
+            remotePixelSize: CGSize(width: 1000, height: 1000),
+            fit: true,
+            viewport: ViewportTransform(scale: 2, offset: .zero)
+        )
+        guard let rect = geometry.visibleRemoteRect() else {
+            return fail("Viewport visible rect", "missing visible rect")
+        }
+        guard abs(rect.x - 0.25) < 0.001,
+              abs(rect.y - 0.25) < 0.001,
+              abs(rect.width - 0.5) < 0.001,
+              abs(rect.height - 0.5) < 0.001 else {
+            return fail("Viewport visible rect", "unexpected rect \(rect)")
+        }
+        return ok("Viewport visible rect tracks local zoom")
     }
 
     private static func testNormalisedClamping() -> Result {
@@ -653,6 +675,87 @@ enum SelfTests {
         return ok("Session states expose active/input flags")
     }
 
+    private static func testTrustedPeerLegacyPolicyDecode() -> Result {
+        let peerID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let date = Date(timeIntervalSinceReferenceDate: 12345)
+        let legacyJSON = """
+        [
+          {
+            "id": "\(peerID.uuidString)",
+            "displayName": "Legacy Viewer",
+            "fingerprint": "abc123",
+            "lastSeen": \(date.timeIntervalSinceReferenceDate)
+          }
+        ]
+        """
+
+        do {
+            let peers = try PairingManager.decodeTrustedPeers(from: Data(legacyJSON.utf8))
+            guard peers.count == 1 else {
+                return fail("Trusted peer legacy policy", "expected one decoded peer")
+            }
+            guard peers[0].accessPolicy == .askEveryTime else {
+                return fail("Trusted peer legacy policy", "legacy JSON should default to askEveryTime")
+            }
+            return ok("Trusted peer legacy JSON defaults access policy")
+        } catch {
+            return fail("Trusted peer legacy policy", "\(error)")
+        }
+    }
+
+    private static func testTrustedPeerPolicyUpdatePersistence() -> Result {
+        let peerID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+        var peers = [
+            TrustedPeer(
+                id: peerID,
+                displayName: "Viewer",
+                fingerprint: "fingerprint-one",
+                lastSeen: Date(timeIntervalSinceReferenceDate: 1)
+            ),
+            TrustedPeer(
+                id: peerID,
+                displayName: "Viewer Re-Keyed",
+                fingerprint: "fingerprint-two",
+                lastSeen: Date(timeIntervalSinceReferenceDate: 2),
+                accessPolicy: .alwaysAllow
+            )
+        ]
+
+        guard PairingManager.accessPolicy(in: peers, peerID: peerID, fingerprint: "fingerprint-one") == .askEveryTime else {
+            return fail("Trusted peer policy update", "new peers should start as askEveryTime")
+        }
+        guard PairingManager.updateAccessPolicy(
+            in: &peers,
+            peerID: peerID,
+            fingerprint: "fingerprint-one",
+            accessPolicy: .alwaysDeny
+        ) else {
+            return fail("Trusted peer policy update", "exact peer/fingerprint update failed")
+        }
+        guard !PairingManager.updateAccessPolicy(
+            in: &peers,
+            peerID: peerID,
+            fingerprint: "missing",
+            accessPolicy: .alwaysAllow
+        ) else {
+            return fail("Trusted peer policy update", "missing fingerprint should not update")
+        }
+
+        do {
+            let data = try PairingManager.encodeTrustedPeers(peers)
+            let restored = try PairingManager.decodeTrustedPeers(from: data)
+            guard PairingManager.accessPolicy(in: restored, peerID: peerID, fingerprint: "fingerprint-one") == .alwaysDeny else {
+                return fail("Trusted peer policy update", "updated policy did not persist")
+            }
+            guard PairingManager.accessPolicy(in: restored, peerID: peerID, fingerprint: "fingerprint-two") == .alwaysAllow else {
+                return fail("Trusted peer policy update", "non-target fingerprint was changed")
+            }
+            return ok("Trusted peer policy updates persist by fingerprint")
+        } catch {
+            return fail("Trusted peer policy update", "\(error)")
+        }
+    }
+
     private static func testNetworkTrustScopeClassification() -> Result {
         guard NetworkTrustScope.classify(host: "100.99.131.73") == .tailscale else {
             return fail("Network trust scope", "100.64.0.0/10 should classify as tailscale")
@@ -689,8 +792,11 @@ enum SelfTests {
 
     private static func testRFBSecurityNegotiationPolicy() -> Result {
         let offered = [
+            RFBSecurityType.appleScreenSharing.rawValue,
             RFBSecurityType.vncAuth.rawValue,
-            RFBSecurityType.appleDH.rawValue
+            RFBSecurityType.appleDH.rawValue,
+            RFBSecurityType.appleModern36.rawValue,
+            RFBSecurityType.appleModern35.rawValue
         ]
 
         let macChoice = RFBSecurityNegotiationPolicy.chooseSecurityType(
@@ -698,8 +804,17 @@ enum SelfTests {
             hasUsername: false,
             preference: .macAccountFirst
         )
-        guard macChoice == RFBSecurityType.appleDH.rawValue else {
-            return fail("RFB security negotiation", "Mac Screen Sharing should prefer Apple DH")
+        guard macChoice == RFBSecurityType.appleScreenSharing.rawValue else {
+            return fail("RFB security negotiation", "Mac Screen Sharing should prefer Apple's type 33 wrapper")
+        }
+
+        let macInnerChoice = RFBSecurityNegotiationPolicy.chooseAppleWrappedSecurityType(
+            offered: offered,
+            hasUsername: true,
+            preference: .macAccountFirst
+        )
+        guard macInnerChoice == RFBSecurityType.appleDH.rawValue else {
+            return fail("RFB security negotiation", "Apple wrapper should prefer the supported DH account method before unsupported modern methods")
         }
 
         let genericWithUsername = RFBSecurityNegotiationPolicy.chooseSecurityType(
@@ -707,8 +822,8 @@ enum SelfTests {
             hasUsername: true,
             preference: .vncPasswordFirst
         )
-        guard genericWithUsername == RFBSecurityType.appleDH.rawValue else {
-            return fail("RFB security negotiation", "supplying a username should prefer Apple DH before VNC auth")
+        guard genericWithUsername == RFBSecurityType.appleScreenSharing.rawValue else {
+            return fail("RFB security negotiation", "supplying a username should prefer Apple's type 33 wrapper before VNC auth")
         }
 
         let genericPasswordOnly = RFBSecurityNegotiationPolicy.chooseSecurityType(
@@ -720,7 +835,29 @@ enum SelfTests {
             return fail("RFB security negotiation", "generic VNC without a username should prefer VNC auth")
         }
 
-        return ok("RFB security negotiation prefers Apple DH when appropriate")
+        let forcedVNC = RFBSecurityNegotiationPolicy.chooseSecurityType(
+            offered: offered,
+            hasUsername: true,
+            preference: .vncPasswordOnly
+        )
+        guard forcedVNC == RFBSecurityType.vncAuth.rawValue else {
+            return fail("RFB security negotiation", "forced VNC password fallback should not reselect Apple DH")
+        }
+
+        let modernOnlyInner = RFBSecurityNegotiationPolicy.chooseAppleWrappedSecurityType(
+            offered: [
+                RFBSecurityType.appleScreenSharing.rawValue,
+                RFBSecurityType.appleModern36.rawValue,
+                RFBSecurityType.appleModern35.rawValue
+            ],
+            hasUsername: true,
+            preference: .macAccountFirst
+        )
+        guard modernOnlyInner == RFBSecurityType.appleModern36.rawValue else {
+            return fail("RFB security negotiation", "modern-only Apple auth should fail fast on the advertised modern type")
+        }
+
+        return ok("RFB security negotiation prefers Apple Screen Sharing auth when appropriate")
     }
 
     private static func testRFBClientEncodingPreference() -> Result {

@@ -24,6 +24,8 @@ final class MacStatusBarController: NSObject, ObservableObject, NSMenuDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.image = NSImage(systemSymbolName: "rectangle.connected.to.line.below", accessibilityDescription: "Screen Q")
         item.button?.imagePosition = .imageOnly
+        item.button?.setAccessibilityLabel("Screen Q")
+        item.button?.setAccessibilityValue("Idle")
 
         let menu = NSMenu(title: "Screen Q")
         menu.delegate = self
@@ -45,18 +47,19 @@ final class MacStatusBarController: NSObject, ObservableObject, NSMenuDelegate {
             menu.addItem(withTitle: "Screen Q unavailable", action: nil, keyEquivalent: "")
             return
         }
+        statusItem?.button?.setAccessibilityValue(app.macHost.isSharing ? "Hosting this Mac" : "Idle")
 
         menu.addItem(makeItem("Open Screen Q", systemImage: "macwindow", action: .openApp))
         menu.addItem(NSMenuItem.separator())
 
-        if app.hostIsSharing {
+        if app.macHost.isSharing {
             menu.addItem(statusItem("Hosting this Mac", systemImage: "dot.radiowaves.left.and.right", state: .on))
             menu.addItem(makeItem("Manage Host", systemImage: "person.2.badge.gearshape", action: .openRole(.hostMac)))
-            if app.pendingPairingRequests.isEmpty {
+            if app.macHost.pendingRequests.isEmpty {
                 menu.addItem(statusItem("No pending requests", systemImage: "checkmark.circle", state: .off))
             } else {
                 menu.addItem(makeItem(
-                    "\(app.pendingPairingRequests.count) Connection Request\(app.pendingPairingRequests.count == 1 ? "" : "s")",
+                    "\(app.macHost.pendingRequests.count) Connection Request\(app.macHost.pendingRequests.count == 1 ? "" : "s")",
                     systemImage: "person.crop.circle.badge.questionmark",
                     action: .openRole(.hostMac)
                 ))
@@ -168,7 +171,6 @@ final class MacStatusBarController: NSObject, ObservableObject, NSMenuDelegate {
             MacWindowControls.activateApp()
         case .stopHosting:
             app.requestStopHostingFromMenu()
-            MacWindowControls.activateApp()
         case .refreshDevices:
             Task {
                 await app.bonjourBrowser.start()

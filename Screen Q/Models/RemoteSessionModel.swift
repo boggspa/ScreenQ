@@ -145,6 +145,10 @@ nonisolated struct RemoteSecurityStatus: Codable, Hashable, Sendable {
             baseTitle = "Mac account auth"
             authenticated = true
             authMethod = "Apple Screen Sharing account credentials"
+        case .appleScreenSharing, .appleModern35, .appleModern36:
+            baseTitle = "Mac account auth"
+            authenticated = true
+            authMethod = "Apple Screen Sharing account credentials"
         case .unknown:
             baseTitle = "VNC security unknown"
             authenticated = false

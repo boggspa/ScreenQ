@@ -95,6 +95,7 @@ nonisolated enum MessageType: UInt16, Codable, Sendable {
     case packageInstallResult = 58
     case streamQuality    = 59
     case error             = 60
+    case viewerViewport    = 61
     case endSession        = 99
 }
 
@@ -254,6 +255,19 @@ nonisolated struct DisplayListMessage: Codable, Sendable {
 
 nonisolated struct DisplaySwitchMessage: Codable, Sendable {
     var displayID: UInt32
+}
+
+/// Viewer-side local viewport hint for native Screen Q adaptive streaming.
+/// The host keeps input coordinates mapped to the full display; this is only
+/// used to choose a sharper capture scale when the viewer zooms in.
+nonisolated struct ViewerViewportMessage: Codable, Hashable, Sendable {
+    var displayID: UInt32?
+    var zoomScale: Double
+    var visibleRect: NormalisedRect
+    var canvasPixelWidth: Int
+    var canvasPixelHeight: Int
+    var adaptiveEnabled: Bool
+    var timestamp: TimeInterval
 }
 
 // MARK: - Reconnect

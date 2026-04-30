@@ -17,6 +17,8 @@ struct VNCViewerView: View {
     @ObservedObject var session: VNCSession
     var onDisconnect: () -> Void
     @StateObject private var controlPreferences: ViewerControlPreferences
+    @State private var metalRenderTimer: Timer?
+    @State private var showQualityHUD: Bool = false
     #if os(iOS)
     @StateObject private var iosInputState = VNCIOSInputState()
     @State private var isKeyboardActive = false
@@ -40,6 +42,7 @@ struct VNCViewerView: View {
                     inputState: iosInputState,
                     securityStatus: session.securityStatus,
                     streamQuality: $controlPreferences.streamQuality,
+                    streamProfile: $controlPreferences.streamProfile,
                     isKeyboardActive: $isKeyboardActive,
                     viewportNavigationMode: $viewportNavigationMode,
                     onDisconnect: disconnectAndExit
@@ -69,6 +72,7 @@ struct VNCViewerView: View {
             ToolbarItem(placement: .automatic) {
                 StreamQualityButton(
                     quality: $controlPreferences.streamQuality,
+                    profile: $controlPreferences.streamProfile,
                     protocolName: session.profile.displayName,
                     detail: "Controls VNC request cadence, viewport size, and local framebuffer rendering. Tight compression-level support can build on this."
                 )
@@ -82,7 +86,24 @@ struct VNCViewerView: View {
                 }
                 .help("Enter fullscreen")
             }
+            ToolbarItem(placement: .automatic) {
+                Button {
+                    requestRemoteResizeToWindow()
+                } label: {
+                    Image(systemName: "rectangle.expand.vertical")
+                }
+                .help("Resize remote desktop to match this window")
+                .disabled(!session.canRequestRemoteResize)
+            }
             #endif
+            ToolbarItem(placement: .automatic) {
+                Button {
+                    showQualityHUD.toggle()
+                } label: {
+                    Image(systemName: showQualityHUD ? "speedometer" : "gauge.with.dots.needle.33percent")
+                }
+                .help("Toggle performance HUD")
+            }
             ToolbarItem(placement: .automatic) {
                 Button("Disconnect", action: disconnectAndExit)
                 .foregroundColor(.red)
@@ -110,10 +131,14 @@ struct VNCViewerView: View {
             )
         }
         .onAppear {
-            Task { await session.updateStreamQuality(controlPreferences.streamQuality) }
+            session.enableMetalRendering()
+            Task { await applyStreamControls() }
         }
-        .onReceive(controlPreferences.$streamQuality.removeDuplicates()) { quality in
-            Task { await session.updateStreamQuality(quality) }
+        .onReceive(controlPreferences.$streamQuality.removeDuplicates()) { _ in
+            Task { await applyStreamControls() }
+        }
+        .onReceive(controlPreferences.$streamProfile.removeDuplicates()) { _ in
+            Task { await applyStreamControls() }
         }
         #if os(iOS)
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
@@ -160,6 +185,19 @@ struct VNCViewerView: View {
         case .connected:
             vncCanvas
 
+        case .reconnecting(let attempt):
+            VStack(spacing: 12) {
+                ProgressView()
+                Text("Reconnecting…")
+                    .font(.headline)
+                Text("Attempt \(attempt) of \(5)")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                Button("Cancel", action: disconnectAndExit)
+                    .buttonStyle(.bordered)
+                    .foregroundColor(.red)
+            }
+
         case .failed(let reason):
             VStack(spacing: 12) {
                 Image(systemName: "exclamationmark.triangle")
@@ -193,53 +231,146 @@ struct VNCViewerView: View {
 
     @ViewBuilder
     private var vncCanvas: some View {
-        #if os(macOS)
-        VNCInputView(session: session)
-        #else
-        if let image = session.currentImage {
-            GeometryReader { geo in
-                ZStack {
-                    let imgW = CGFloat(session.viewWidth)
-                    let imgH = CGFloat(session.viewHeight)
-                    let scale = min(geo.size.width / imgW, geo.size.height / imgH, 1.0)
-                    let displayW = imgW * scale
-                    let displayH = imgH * scale
-                    let offsetX = (geo.size.width - displayW) / 2
-                    let offsetY = (geo.size.height - displayH) / 2
-
-                    Image(decorative: image, scale: 1.0)
-                        .resizable()
-                        .interpolation(.high)
-                        .frame(width: displayW, height: displayH)
-                        .position(x: offsetX + displayW / 2, y: offsetY + displayH / 2)
-
-                    VNCIOSTouchInputOverlay(
-                        session: session,
-                        inputState: iosInputState,
-                        serverSize: CGSize(width: imgW, height: imgH),
-                        displayScale: scale,
-                        viewportNavigationMode: viewportNavigationMode
-                    )
-                    .frame(width: displayW, height: displayH)
-                    .position(x: offsetX + displayW / 2, y: offsetY + displayH / 2)
-                }
-                .onAppear {
-                    Task { await session.updateViewportCanvasSize(geo.size) }
-                }
-                .onChange(of: geo.size) { _, newSize in
-                    Task { await session.updateViewportCanvasSize(newSize) }
-                }
+        ZStack(alignment: .topTrailing) {
+            vncCanvasInner
+            if showQualityHUD {
+                qualityHUD
+                    .padding(8)
+                    .transition(.opacity)
             }
+        }
+    }
+
+    @ViewBuilder
+    private var vncCanvasInner: some View {
+        #if os(macOS)
+        if let renderer = session.metalRenderer {
+            VNCMetalInputView(session: session, renderer: renderer)
+        } else {
+            VNCInputView(session: session)
+        }
+        #else
+        if let renderer = session.metalRenderer {
+            vncCanvasMetaliOS(renderer: renderer)
+        } else if let image = session.currentImage {
+            vncCanvasFallbackiOS(image: image)
         } else {
             ProgressView("Waiting for framebuffer…")
         }
         #endif
     }
 
+    private var qualityHUD: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(String(format: "%.0f fps", session.measuredFPS))
+                .font(.system(.caption, design: .monospaced).weight(.bold))
+            Text("\(session.serverWidth)×\(session.serverHeight)")
+                .font(.system(.caption2, design: .monospaced))
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Color.black.opacity(0.55))
+        .foregroundColor(.white)
+        .cornerRadius(6)
+    }
+
+    #if os(iOS)
+    @ViewBuilder
+    private func vncCanvasMetaliOS(renderer: MetalFrameBufferRenderer) -> some View {
+        GeometryReader { geo in
+            let imgW = CGFloat(session.viewWidth)
+            let imgH = CGFloat(session.viewHeight)
+            let scale = min(geo.size.width / imgW, geo.size.height / imgH, 1.0)
+            let displayW = imgW * scale
+            let displayH = imgH * scale
+            let offsetX = (geo.size.width - displayW) / 2
+            let offsetY = (geo.size.height - displayH) / 2
+
+            ZStack {
+                MetalCanvasViewiOS(renderer: renderer) { view in
+                    view.renderFrame()
+                }
+                .frame(width: displayW, height: displayH)
+                .position(x: offsetX + displayW / 2, y: offsetY + displayH / 2)
+
+                VNCCursorOverlayView(
+                    session: session,
+                    serverSize: CGSize(width: imgW, height: imgH),
+                    displayScale: scale
+                )
+                .frame(width: displayW, height: displayH)
+                .position(x: offsetX + displayW / 2, y: offsetY + displayH / 2)
+
+                VNCIOSTouchInputOverlay(
+                    session: session,
+                    inputState: iosInputState,
+                    serverSize: CGSize(width: imgW, height: imgH),
+                    displayScale: scale,
+                    viewportNavigationMode: viewportNavigationMode
+                )
+                .frame(width: displayW, height: displayH)
+                .position(x: offsetX + displayW / 2, y: offsetY + displayH / 2)
+            }
+            .onAppear {
+                Task { await session.updateViewportCanvasSize(geo.size) }
+            }
+            .onChange(of: geo.size) { _, newSize in
+                Task { await session.updateViewportCanvasSize(newSize) }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func vncCanvasFallbackiOS(image: CGImage) -> some View {
+        GeometryReader { geo in
+            ZStack {
+                let imgW = CGFloat(session.viewWidth)
+                let imgH = CGFloat(session.viewHeight)
+                let scale = min(geo.size.width / imgW, geo.size.height / imgH, 1.0)
+                let displayW = imgW * scale
+                let displayH = imgH * scale
+                let offsetX = (geo.size.width - displayW) / 2
+                let offsetY = (geo.size.height - displayH) / 2
+
+                Image(decorative: image, scale: 1.0)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: displayW, height: displayH)
+                    .position(x: offsetX + displayW / 2, y: offsetY + displayH / 2)
+
+                VNCCursorOverlayView(
+                    session: session,
+                    serverSize: CGSize(width: imgW, height: imgH),
+                    displayScale: scale
+                )
+                .frame(width: displayW, height: displayH)
+                .position(x: offsetX + displayW / 2, y: offsetY + displayH / 2)
+
+                VNCIOSTouchInputOverlay(
+                    session: session,
+                    inputState: iosInputState,
+                    serverSize: CGSize(width: imgW, height: imgH),
+                    displayScale: scale,
+                    viewportNavigationMode: viewportNavigationMode
+                )
+                .frame(width: displayW, height: displayH)
+                .position(x: offsetX + displayW / 2, y: offsetY + displayH / 2)
+            }
+            .onAppear {
+                Task { await session.updateViewportCanvasSize(geo.size) }
+            }
+            .onChange(of: geo.size) { _, newSize in
+                Task { await session.updateViewportCanvasSize(newSize) }
+            }
+        }
+    }
+    #endif
+
     private var statusText: String {
         switch session.phase {
         case .connecting: return "Connecting…"
         case .authenticating: return "Authenticating…"
+        case .reconnecting(let attempt): return "Reconnecting (attempt \(attempt))…"
         case .connected:
             if let summary = session.streamViewportSummary {
                 return "Viewport \(summary) — \(session.profile.displayName)"
@@ -269,6 +400,24 @@ struct VNCViewerView: View {
             await session.disconnect()
             onDisconnect()
         }
+    }
+
+    #if os(macOS)
+    private func requestRemoteResizeToWindow() {
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
+        let contentSize = window.contentLayoutRect.size
+        let scale = window.backingScaleFactor
+        let w = Int((contentSize.width * scale).rounded())
+        let h = Int((contentSize.height * scale).rounded())
+        session.requestRemoteResize(width: w, height: h)
+    }
+    #endif
+
+    private func applyStreamControls() async {
+        await session.updateStreamQuality(
+            controlPreferences.streamQuality,
+            profile: controlPreferences.streamProfile
+        )
     }
 }
 
@@ -426,6 +575,10 @@ private struct VNCIOSTouchInputOverlay: UIViewRepresentable {
         pinch.delegate = context.coordinator
         view.addGestureRecognizer(pinch)
 
+        // Apple Pencil hover + indirect pointer (trackpad/mouse) hover.
+        let hover = UIHoverGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleHover(_:)))
+        view.addGestureRecognizer(hover)
+
         context.coordinator.dragRecognizer = drag
         context.coordinator.longPressRecognizer = longPress
         context.coordinator.scrollRecognizer = scroll
@@ -468,6 +621,9 @@ private struct VNCIOSTouchInputOverlay: UIViewRepresentable {
         private let scrollStep: CGFloat = 18
         private let viewportPanStep: CGFloat = 40
         private let viewportGestureInterval: TimeInterval = 0.08
+        private let tapHaptic = UIImpactFeedbackGenerator(style: .light)
+        private let longPressHaptic = UIImpactFeedbackGenerator(style: .medium)
+        private let rightClickHaptic = UINotificationFeedbackGenerator()
 
         init(
             session: VNCSession,
@@ -483,9 +639,21 @@ private struct VNCIOSTouchInputOverlay: UIViewRepresentable {
             self.viewportNavigationMode = viewportNavigationMode
         }
 
+        @objc func handleHover(_ recognizer: UIHoverGestureRecognizer) {
+            guard let view = recognizer.view else { return }
+            switch recognizer.state {
+            case .began, .changed:
+                let point = remotePoint(from: recognizer.location(in: view))
+                session?.sendMouseMove(x: point.x, y: point.y)
+            default:
+                break
+            }
+        }
+
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
             guard recognizer.state == .ended, let view = recognizer.view else { return }
             let point = remotePoint(from: recognizer.location(in: view))
+            tapHaptic.impactOccurred()
             sendClick(at: point, button: 0)
         }
 
@@ -499,6 +667,7 @@ private struct VNCIOSTouchInputOverlay: UIViewRepresentable {
         @objc func handleRightTap(_ recognizer: UITapGestureRecognizer) {
             guard recognizer.state == .ended, let view = recognizer.view else { return }
             let point = remotePoint(from: recognizer.location(in: view))
+            rightClickHaptic.notificationOccurred(.success)
             sendClick(at: point, button: 2)
         }
 
@@ -534,6 +703,7 @@ private struct VNCIOSTouchInputOverlay: UIViewRepresentable {
             switch recognizer.state {
             case .began:
                 isDragging = true
+                longPressHaptic.impactOccurred()
                 session?.sendMouseMove(x: point.x, y: point.y)
                 session?.sendMouseClick(x: point.x, y: point.y, button: 0, isDown: true)
             case .changed:
@@ -703,10 +873,14 @@ private enum VNCKeySym {
     static let pageDown: UInt32 = 0xFF56
     static let end: UInt32 = 0xFF57
     static let shiftLeft: UInt32 = 0xFFE1
+    static let shiftRight: UInt32 = 0xFFE2
     static let controlLeft: UInt32 = 0xFFE3
+    static let controlRight: UInt32 = 0xFFE4
     static let altLeft: UInt32 = 0xFFE9
+    static let altRight: UInt32 = 0xFFEA
     static let commandLeft: UInt32 = 0xFFE7
     static let superLeft: UInt32 = 0xFFEB
+    static let superRight: UInt32 = 0xFFEC
 
     static func function(_ index: Int) -> UInt32 {
         UInt32(0xFFBD + max(1, min(12, index)))
@@ -844,6 +1018,7 @@ private struct VNCIOSControlStrip: View {
     @ObservedObject var inputState: VNCIOSInputState
     let securityStatus: RemoteSecurityStatus
     @Binding var streamQuality: Double
+    @Binding var streamProfile: StreamProfile
     @Binding var isKeyboardActive: Bool
     @Binding var viewportNavigationMode: Bool
     var onDisconnect: () -> Void
@@ -851,33 +1026,41 @@ private struct VNCIOSControlStrip: View {
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
+                // Primary controls (always visible)
                 iconButton(systemName: isKeyboardActive ? "keyboard.chevron.compact.down" : "keyboard",
                            label: isKeyboardActive ? "Hide keyboard" : "Show keyboard") {
                     isKeyboardActive.toggle()
                 }
-
-                VNCConnectionSecurityMenu(status: securityStatus)
-                StreamQualityButton(
-                    quality: $streamQuality,
-                    protocolName: session.profile.displayName,
-                    detail: "Controls VNC request cadence, viewport size, and local framebuffer rendering. Tight compression-level support can build on this."
-                )
-                displayMenu
                 viewportModeButton
-                if session.isUsingStreamViewport {
-                    iconButton(systemName: "minus.magnifyingglass", label: "Reset viewport") {
-                        Task { await session.resetStreamViewport() }
-                    }
-                }
 
+                Divider().frame(height: 28)
+
+                // Modifier keys
                 ForEach(VNCIOSModifier.allCases) { modifier in
                     modifierButton(modifier)
                 }
 
-                specialKeysMenu
-                arrowsMenu
-                functionKeysMenu
-                platformShortcutsMenu
+                Divider().frame(height: 28)
+
+                // Combined keys menu
+                allKeysMenu
+
+                iconButton(systemName: "doc.on.clipboard", label: "Send clipboard to remote") {
+                    session.sendLocalPasteboardIfAvailable()
+                }
+
+                Divider().frame(height: 28)
+
+                VNCConnectionSecurityMenu(status: securityStatus)
+                StreamQualityButton(
+                    quality: $streamQuality,
+                    profile: $streamProfile,
+                    protocolName: session.profile.displayName,
+                    detail: "Controls VNC request cadence, viewport size, and local framebuffer rendering."
+                )
+
+                // Overflow menu for less-used items
+                overflowMenu
 
                 iconButton(systemName: "xmark.circle", label: "Disconnect", tint: .red) {
                     onDisconnect()
@@ -886,9 +1069,84 @@ private struct VNCIOSControlStrip: View {
             .padding(8)
         }
         .frame(maxHeight: 58)
-        .background(.ultraThinMaterial)
+        .background(Color.black.opacity(0.55))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .shadow(color: .black.opacity(0.25), radius: 14, x: 0, y: 6)
+    }
+
+    private var allKeysMenu: some View {
+        Menu {
+            Section("Special") {
+                Button("Escape") { inputState.sendKey(VNCKeySym.escape, session: session) }
+                Button("Tab") { inputState.sendKey(VNCKeySym.tab, session: session) }
+                Button("Return") { inputState.sendKey(VNCKeySym.returnKey, session: session) }
+                Button("Backspace") { inputState.sendKey(VNCKeySym.backspace, session: session) }
+                Button("Delete") { inputState.sendKey(VNCKeySym.delete, session: session) }
+                Button("Home") { inputState.sendKey(VNCKeySym.home, session: session) }
+                Button("End") { inputState.sendKey(VNCKeySym.end, session: session) }
+                Button("Page Up") { inputState.sendKey(VNCKeySym.pageUp, session: session) }
+                Button("Page Down") { inputState.sendKey(VNCKeySym.pageDown, session: session) }
+            }
+            Section("Arrows") {
+                Button("Up") { inputState.sendKey(VNCKeySym.up, session: session) }
+                Button("Down") { inputState.sendKey(VNCKeySym.down, session: session) }
+                Button("Left") { inputState.sendKey(VNCKeySym.left, session: session) }
+                Button("Right") { inputState.sendKey(VNCKeySym.right, session: session) }
+            }
+            Section("Function") {
+                ForEach(1...12, id: \.self) { index in
+                    Button("F\(index)") {
+                        inputState.sendKey(VNCKeySym.function(index), session: session)
+                    }
+                }
+            }
+            Section {
+                Button("Clear Modifiers") { inputState.clearAll() }
+            }
+        } label: {
+            Image(systemName: "command.square")
+                .font(.system(size: 17, weight: .semibold))
+                .frame(width: 38, height: 38)
+        }
+    }
+
+    private var overflowMenu: some View {
+        Menu {
+            Section("Display") {
+                if session.isUsingStreamViewport {
+                    Button {
+                        Task { await session.resetStreamViewport() }
+                    } label: {
+                        Label("Reset viewport", systemImage: "minus.magnifyingglass")
+                    }
+                }
+                ForEach(session.displayRegions) { region in
+                    Button {
+                        Task { await session.selectDisplayRegion(region) }
+                    } label: {
+                        Label(region.name + " " + region.detail, systemImage: session.selectedDisplayRegion?.id == region.id ? "checkmark" : "")
+                    }
+                }
+            }
+            Section("Shortcuts") {
+                Button("⌘ Tab") { session.sendKeyCombo(code: VNCKeySym.tab, modifiers: [VNCKeySym.commandLeft]) }
+                Button("⌘ Space") { session.sendKeyCombo(code: 0x0020, modifiers: [VNCKeySym.commandLeft]) }
+                Button("⌘ Q") { session.sendKeyCombo(code: 0x0071, modifiers: [VNCKeySym.commandLeft]) }
+                Button("Force Quit") {
+                    session.sendKeyCombo(code: VNCKeySym.escape, modifiers: [VNCKeySym.commandLeft, VNCKeySym.altLeft])
+                }
+                Button("Ctrl Alt Del") {
+                    session.sendKeyCombo(code: VNCKeySym.delete, modifiers: [VNCKeySym.controlLeft, VNCKeySym.altLeft])
+                }
+                Button("Alt Tab") {
+                    session.sendKeyCombo(code: VNCKeySym.tab, modifiers: [VNCKeySym.altLeft])
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.system(size: 17, weight: .semibold))
+                .frame(width: 38, height: 38)
+        }
     }
 
     private func modifierButton(_ modifier: VNCIOSModifier) -> some View {
@@ -1161,15 +1419,37 @@ private final class VNCKeyboardTextField: UITextField {
     override var canBecomeFirstResponder: Bool { true }
 
     override var keyCommands: [UIKeyCommand]? {
-        [
-            UIKeyCommand(input: UIKeyCommand.inputEscape, modifierFlags: [], action: #selector(handleSpecialKey(_:))),
-            UIKeyCommand(input: UIKeyCommand.inputEscape, modifierFlags: [.control], action: #selector(handleSpecialKey(_:))),
-            UIKeyCommand(input: "\t", modifierFlags: [], action: #selector(handleSpecialKey(_:))),
-            UIKeyCommand(input: UIKeyCommand.inputUpArrow, modifierFlags: [], action: #selector(handleSpecialKey(_:))),
-            UIKeyCommand(input: UIKeyCommand.inputDownArrow, modifierFlags: [], action: #selector(handleSpecialKey(_:))),
-            UIKeyCommand(input: UIKeyCommand.inputLeftArrow, modifierFlags: [], action: #selector(handleSpecialKey(_:))),
-            UIKeyCommand(input: UIKeyCommand.inputRightArrow, modifierFlags: [], action: #selector(handleSpecialKey(_:))),
+        let modSets: [UIKeyModifierFlags] = [[], [.shift], [.control], [.alternate], [.command],
+                                             [.shift, .control], [.control, .alternate],
+                                             [.command, .shift], [.command, .alternate]]
+        var cmds: [UIKeyCommand] = []
+        let specialInputs = [
+            UIKeyCommand.inputEscape,
+            "\t",
+            UIKeyCommand.inputUpArrow,
+            UIKeyCommand.inputDownArrow,
+            UIKeyCommand.inputLeftArrow,
+            UIKeyCommand.inputRightArrow,
+            UIKeyCommand.inputPageUp,
+            UIKeyCommand.inputPageDown,
+            UIKeyCommand.inputHome,
+            UIKeyCommand.inputEnd,
         ]
+        for input in specialInputs {
+            for mods in modSets {
+                cmds.append(UIKeyCommand(input: input, modifierFlags: mods, action: #selector(handleSpecialKey(_:))))
+            }
+        }
+        // F-keys (F1-F12) — use the system-defined input strings.
+        let fKeyInputs: [String] = [
+            UIKeyCommand.f1, UIKeyCommand.f2, UIKeyCommand.f3, UIKeyCommand.f4,
+            UIKeyCommand.f5, UIKeyCommand.f6, UIKeyCommand.f7, UIKeyCommand.f8,
+            UIKeyCommand.f9, UIKeyCommand.f10, UIKeyCommand.f11, UIKeyCommand.f12,
+        ]
+        for input in fKeyInputs {
+            cmds.append(UIKeyCommand(input: input, modifierFlags: [], action: #selector(handleSpecialKey(_:))))
+        }
+        return cmds
     }
 
     override func deleteBackward() {
@@ -1179,22 +1459,79 @@ private final class VNCKeyboardTextField: UITextField {
     @objc private func handleSpecialKey(_ command: UIKeyCommand) {
         guard let coordinator else { return }
         let modifiers = vncModifiers(from: command.modifierFlags)
+        let keysym: UInt32?
         switch command.input {
-        case UIKeyCommand.inputEscape:
-            coordinator.inputState.sendKey(VNCKeySym.escape, session: coordinator.session, explicitModifiers: modifiers)
-        case "\t":
-            coordinator.inputState.sendKey(VNCKeySym.tab, session: coordinator.session, explicitModifiers: modifiers)
-        case UIKeyCommand.inputUpArrow:
-            coordinator.inputState.sendKey(VNCKeySym.up, session: coordinator.session, explicitModifiers: modifiers)
-        case UIKeyCommand.inputDownArrow:
-            coordinator.inputState.sendKey(VNCKeySym.down, session: coordinator.session, explicitModifiers: modifiers)
-        case UIKeyCommand.inputLeftArrow:
-            coordinator.inputState.sendKey(VNCKeySym.left, session: coordinator.session, explicitModifiers: modifiers)
-        case UIKeyCommand.inputRightArrow:
-            coordinator.inputState.sendKey(VNCKeySym.right, session: coordinator.session, explicitModifiers: modifiers)
+        case UIKeyCommand.inputEscape:   keysym = VNCKeySym.escape
+        case "\t":                       keysym = VNCKeySym.tab
+        case UIKeyCommand.inputUpArrow:  keysym = VNCKeySym.up
+        case UIKeyCommand.inputDownArrow: keysym = VNCKeySym.down
+        case UIKeyCommand.inputLeftArrow: keysym = VNCKeySym.left
+        case UIKeyCommand.inputRightArrow: keysym = VNCKeySym.right
+        case UIKeyCommand.inputPageUp:   keysym = VNCKeySym.pageUp
+        case UIKeyCommand.inputPageDown: keysym = VNCKeySym.pageDown
+        case UIKeyCommand.inputHome:     keysym = VNCKeySym.home
+        case UIKeyCommand.inputEnd:      keysym = VNCKeySym.end
         default:
-            break
+            keysym = fKeyKeysym(for: command.input)
         }
+        if let keysym {
+            coordinator.inputState.sendKey(keysym, session: coordinator.session, explicitModifiers: modifiers)
+        }
+    }
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        var handled = false
+        for press in presses {
+            if let key = press.key, let keysym = uiKeyToKeysym(key) {
+                coordinator?.session?.sendKey(code: keysym, isDown: true)
+                handled = true
+            }
+        }
+        if !handled { super.pressesBegan(presses, with: event) }
+    }
+
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        var handled = false
+        for press in presses {
+            if let key = press.key, let keysym = uiKeyToKeysym(key) {
+                coordinator?.session?.sendKey(code: keysym, isDown: false)
+                handled = true
+            }
+        }
+        if !handled { super.pressesEnded(presses, with: event) }
+    }
+
+    private func uiKeyToKeysym(_ key: UIKey) -> UInt32? {
+        switch key.keyCode {
+        case .keyboardCapsLock:     return 0xFFE5
+        case .keyboardLeftShift:    return VNCKeySym.shiftLeft
+        case .keyboardRightShift:   return VNCKeySym.shiftRight
+        case .keyboardLeftControl:  return VNCKeySym.controlLeft
+        case .keyboardRightControl: return VNCKeySym.controlRight
+        case .keyboardLeftAlt:      return VNCKeySym.altLeft
+        case .keyboardRightAlt:     return VNCKeySym.altRight
+        case .keyboardLeftGUI:      return VNCKeySym.superLeft
+        case .keyboardRightGUI:     return VNCKeySym.superRight
+        default: return nil
+        }
+    }
+
+    private static let fKeyMap: [String: UInt32] = {
+        let inputs = [
+            UIKeyCommand.f1, UIKeyCommand.f2, UIKeyCommand.f3, UIKeyCommand.f4,
+            UIKeyCommand.f5, UIKeyCommand.f6, UIKeyCommand.f7, UIKeyCommand.f8,
+            UIKeyCommand.f9, UIKeyCommand.f10, UIKeyCommand.f11, UIKeyCommand.f12,
+        ]
+        var map: [String: UInt32] = [:]
+        for (i, input) in inputs.enumerated() {
+            map[input] = VNCKeySym.function(i + 1)
+        }
+        return map
+    }()
+
+    private func fKeyKeysym(for input: String?) -> UInt32? {
+        guard let input else { return nil }
+        return Self.fKeyMap[input]
     }
 
     private func vncModifiers(from flags: UIKeyModifierFlags) -> [UInt32] {

@@ -113,4 +113,42 @@ nonisolated struct TrustedPeer: Codable, Identifiable, Hashable, Sendable {
     var displayName: String
     var fingerprint: String   // hex-encoded hash of long-lived public key
     var lastSeen: Date
+    var accessPolicy: TrustedPeerAccessPolicy
+
+    init(
+        id: UUID,
+        displayName: String,
+        fingerprint: String,
+        lastSeen: Date,
+        accessPolicy: TrustedPeerAccessPolicy = .askEveryTime
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.fingerprint = fingerprint
+        self.lastSeen = lastSeen
+        self.accessPolicy = accessPolicy
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case displayName
+        case fingerprint
+        case lastSeen
+        case accessPolicy
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        displayName = try container.decode(String.self, forKey: .displayName)
+        fingerprint = try container.decode(String.self, forKey: .fingerprint)
+        lastSeen = try container.decode(Date.self, forKey: .lastSeen)
+        accessPolicy = try container.decodeIfPresent(TrustedPeerAccessPolicy.self, forKey: .accessPolicy) ?? .askEveryTime
+    }
+}
+
+nonisolated enum TrustedPeerAccessPolicy: String, Codable, Hashable, Sendable {
+    case askEveryTime
+    case alwaysAllow
+    case alwaysDeny
 }

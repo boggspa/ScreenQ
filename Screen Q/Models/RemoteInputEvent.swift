@@ -121,6 +121,25 @@ nonisolated struct NormalisedPoint: Codable, Hashable, Sendable {
     static let zero = NormalisedPoint(x: 0, y: 0)
 }
 
+/// Normalised rectangle in the displayed remote frame, 0...1.
+nonisolated struct NormalisedRect: Codable, Hashable, Sendable {
+    var x: Double
+    var y: Double
+    var width: Double
+    var height: Double
+
+    init(x: Double, y: Double, width: Double, height: Double) {
+        let clampedX = max(0, min(1, x))
+        let clampedY = max(0, min(1, y))
+        self.x = clampedX
+        self.y = clampedY
+        self.width = max(0, min(1 - clampedX, width))
+        self.height = max(0, min(1 - clampedY, height))
+    }
+
+    static let full = NormalisedRect(x: 0, y: 0, width: 1, height: 1)
+}
+
 nonisolated enum PointerButton: String, Codable, Hashable, Sendable {
     case left
     case right

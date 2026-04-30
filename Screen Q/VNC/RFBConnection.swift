@@ -16,22 +16,35 @@ import Security
 actor RFBConnection {
 
     nonisolated static let preferredClientEncodings: [RFBEncoding] = [
-        // ZRLE uses a persistent zlib stream across rectangles. Keep it out of
-        // negotiation until the decoder owns connection-lifetime inflate state.
+        .zrle,
         .tight,
         .tightPNG,
         .copyRect,
         .hextile,
         .raw,
-        .desktopSize
+        .desktopSize,
+        .extendedDesktopSize,
+        .cursor,
+        .qemuExtendedKeyEvent
     ]
+
+    private(set) var serverSupportsQemuExtendedKey = false
+    private(set) var serverSupportsExtendedDesktopSize = false
 
     private let connection: NWConnection
     private var buffer = Data()
     private(set) var isOpen = false
     private let tightDecodeState = RFBEncodingDecoder.TightDecodeState()
+    private let zrleDecodeState = RFBEncodingDecoder.ZRLEDecodeState()
+    private(set) var pendingCursorShape: CursorShape?
+
+    func consumePendingCursorShape() -> CursorShape? {
+        defer { pendingCursorShape = nil }
+        return pendingCursorShape
+    }
     private var offeredSecurityTypes: [UInt8] = []
     private var selectedSecurityType: UInt8?
+    private var selectedAppleWrappedSecurityType: UInt8?
     private var activeReadDeadline: ReadDeadline?
 
     private struct ReadDeadline {
@@ -142,7 +155,7 @@ actor RFBConnection {
 
     func securityReport() -> RFBSecurityReport {
         RFBSecurityReport(
-            mode: RFBSecurityMode(type: selectedSecurityType),
+            mode: RFBSecurityMode(type: selectedAppleWrappedSecurityType ?? selectedSecurityType),
             offeredModes: offeredSecurityTypes.map { RFBSecurityMode(type: $0) }
         )
     }
@@ -175,6 +188,37 @@ actor RFBConnection {
         d[1] = buttons
         d.replaceSubrange(2..<4, with: x.bigEndianBytes)
         d.replaceSubrange(4..<6, with: y.bigEndianBytes)
+        try await write(d)
+    }
+
+    /// QEMU Extended Key Event. `keysym` is X11 keysym; `keycode` is the XT scan code (PS/2 set 1).
+    /// The server only accepts these if it sent the qemuExtendedKeyEvent pseudo-encoding back.
+    func sendQemuExtendedKeyEvent(down: Bool, keysym: UInt32, keycode: UInt32) async throws {
+        var d = Data(count: 12)
+        d[0] = RFBClientMessageType.qemuClientMessage.rawValue
+        d[1] = RFBQemuSubMessage.extendedKeyEvent.rawValue
+        d.replaceSubrange(2..<4, with: UInt16(down ? 1 : 0).bigEndianBytes)
+        d.replaceSubrange(4..<8, with: keysym.bigEndianBytes)
+        d.replaceSubrange(8..<12, with: keycode.bigEndianBytes)
+        try await write(d)
+    }
+
+    /// SetDesktopSize: ask the server to switch the framebuffer to a new size.
+    /// Single-screen layout (most common). `screenId` is arbitrary if the server doesn't track it.
+    func sendSetDesktopSize(width: UInt16, height: UInt16, screenId: UInt32 = 1) async throws {
+        var d = Data(count: 24)
+        d[0] = RFBClientMessageType.setDesktopSize.rawValue
+        d[1] = 0 // padding
+        d.replaceSubrange(2..<4, with: width.bigEndianBytes)
+        d.replaceSubrange(4..<6, with: height.bigEndianBytes)
+        d[6] = 1 // number-of-screens
+        d[7] = 0 // padding
+        // Screen entry (16 bytes): id u32, x u16, y u16, w u16, h u16, flags u32
+        d.replaceSubrange(8..<12, with: screenId.bigEndianBytes)
+        // x, y = 0
+        d.replaceSubrange(16..<18, with: width.bigEndianBytes)
+        d.replaceSubrange(18..<20, with: height.bigEndianBytes)
+        // flags = 0
         try await write(d)
     }
 
@@ -214,6 +258,16 @@ actor RFBConnection {
         case bell
         case serverCutText(String)
         case desktopResize(width: UInt16, height: UInt16)
+        case cursorShape(CursorShape)
+    }
+
+    nonisolated struct CursorShape: Sendable {
+        let hotspotX: UInt16
+        let hotspotY: UInt16
+        let width: UInt16
+        let height: UInt16
+        let pixels: Data   // BGRA, width*height*4
+        let mask: Data     // 1-bit MSB-first, ceil(width/8)*height
     }
 
     // MARK: - Private: TCP
@@ -295,7 +349,7 @@ actor RFBConnection {
         }
         selectedSecurityType = chosenType
 
-        try await performAuth(type: chosenType, username: username, password: password)
+        try await performAuth(type: chosenType, username: username, password: password, securityPreference: securityPreference)
 
         // SecurityResult — not sent for type None pre-3.8
         if version >= 38 || chosenType != RFBSecurityType.none.rawValue {
@@ -319,26 +373,68 @@ actor RFBConnection {
         )
     }
 
-    private func performAuth(type: UInt8, username: String?, password: String?) async throws {
+    private func performAuth(type: UInt8, username: String?, password: String?, securityPreference: RFBSecurityPreference) async throws {
         switch type {
         case RFBSecurityType.none.rawValue:
             break
         case RFBSecurityType.vncAuth.rawValue:
-            guard let password = password, !password.isEmpty else {
-                throw RFBError.authRequired
-            }
-            let challenge = try await readExact(16)
-            let response = vncAuthResponse(password: password, challenge: challenge)
-            try await write(response)
+            try await performVNCAuth(password: password)
         case RFBSecurityType.appleDH.rawValue:
             guard let username = username, !username.isEmpty,
                   let password = password, !password.isEmpty else {
                 throw RFBError.credentialsRequired
             }
             try await performAppleDHAuth(username: username, password: password)
+        case RFBSecurityType.appleScreenSharing.rawValue:
+            try await performAppleWrappedAuth(username: username, password: password, securityPreference: securityPreference)
+        case RFBSecurityType.appleModern35.rawValue, RFBSecurityType.appleModern36.rawValue:
+            throw RFBError.unsupportedSecurity(type)
         default:
             throw RFBError.unsupportedSecurity(type)
         }
+    }
+
+    private func performAppleWrappedAuth(username: String?, password: String?, securityPreference: RFBSecurityPreference) async throws {
+        let hasUsername = username != nil && !username!.isEmpty
+        let innerType = RFBSecurityNegotiationPolicy.chooseAppleWrappedSecurityType(
+            offered: offeredSecurityTypes,
+            hasUsername: hasUsername,
+            preference: securityPreference
+        )
+
+        guard innerType != RFBSecurityType.invalid.rawValue else {
+            throw RFBError.unsupportedSecurity(RFBSecurityType.appleScreenSharing.rawValue)
+        }
+
+        selectedAppleWrappedSecurityType = innerType
+        Logger.shared.info("VNC chose Apple Screen Sharing inner authentication type \(innerType)")
+        try await write(Data([innerType]))
+
+        switch innerType {
+        case RFBSecurityType.none.rawValue:
+            break
+        case RFBSecurityType.vncAuth.rawValue:
+            try await performVNCAuth(password: password)
+        case RFBSecurityType.appleDH.rawValue:
+            guard let username = username, !username.isEmpty,
+                  let password = password, !password.isEmpty else {
+                throw RFBError.credentialsRequired
+            }
+            try await performAppleDHAuth(username: username, password: password)
+        case RFBSecurityType.appleModern35.rawValue, RFBSecurityType.appleModern36.rawValue:
+            throw RFBError.unsupportedSecurity(innerType)
+        default:
+            throw RFBError.unsupportedSecurity(innerType)
+        }
+    }
+
+    private func performVNCAuth(password: String?) async throws {
+        guard let password = password, !password.isEmpty else {
+            throw RFBError.authRequired
+        }
+        let challenge = try await readExact(16)
+        let response = vncAuthResponse(password: password, challenge: challenge)
+        try await write(response)
     }
 
     // MARK: - Apple DH Authentication (type 30)
@@ -518,6 +614,7 @@ actor RFBConnection {
         var resizeWidth: UInt16 = 0
         var resizeHeight: UInt16 = 0
         var didResize = false
+        var cursorUpdate: CursorShape?
 
         for _ in 0..<numRects {
             let x = try await readUInt16()
@@ -552,7 +649,7 @@ actor RFBConnection {
                     throw RFBError.protocolError("ZRLE rectangle compressed payload too large: \(compressedLength) bytes")
                 }
                 let compressed = try await readExact(Int(compressedLength))
-                let data = try RFBEncodingDecoder.decodeZRLE(width: w, height: h, compressed: compressed)
+                let data = try RFBEncodingDecoder.decodeZRLE(width: w, height: h, compressed: compressed, state: zrleDecodeState)
                 rects.append(RFBRect(x: x, y: y, width: w, height: h, encoding: RFBEncoding.raw.rawValue, data: data))
 
             case RFBEncoding.tight.rawValue, RFBEncoding.tightPNG.rawValue:
@@ -566,6 +663,32 @@ actor RFBConnection {
                 }
                 rects.append(RFBRect(x: x, y: y, width: w, height: h, encoding: RFBEncoding.raw.rawValue, data: data))
 
+            case RFBEncoding.qemuExtendedKeyEvent.rawValue:
+                serverSupportsQemuExtendedKey = true
+
+            case RFBEncoding.extendedDesktopSize.rawValue:
+                // Payload: number-of-screens (u8), 3 bytes padding, then per-screen 16 bytes.
+                serverSupportsExtendedDesktopSize = true
+                let numScreens = Int(try await readUInt8())
+                _ = try await readExact(3) // padding
+                if numScreens > 0 {
+                    _ = try await readExact(numScreens * 16)
+                }
+                resizeWidth = w
+                resizeHeight = h
+                didResize = true
+
+            case RFBEncoding.cursor.rawValue:
+                let pixelBytes = Int(w) * Int(h) * 4
+                let maskBytes = ((Int(w) + 7) / 8) * Int(h)
+                let pixels = pixelBytes > 0 ? try await readExact(pixelBytes) : Data()
+                let mask = maskBytes > 0 ? try await readExact(maskBytes) : Data()
+                cursorUpdate = CursorShape(
+                    hotspotX: x, hotspotY: y,
+                    width: w, height: h,
+                    pixels: pixels, mask: mask
+                )
+
             case RFBEncoding.desktopSize.rawValue:
                 resizeWidth = w
                 resizeHeight = h
@@ -578,6 +701,14 @@ actor RFBConnection {
 
         if didResize {
             return .desktopResize(width: resizeWidth, height: resizeHeight)
+        }
+        if let cursorUpdate, rects.isEmpty {
+            return .cursorShape(cursorUpdate)
+        }
+        // If cursor arrived alongside framebuffer rects, stash it for later.
+        // The session layer will pick it up via a dedicated property.
+        if let cursorUpdate {
+            pendingCursorShape = cursorUpdate
         }
         return .framebufferUpdate(rects)
     }

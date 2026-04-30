@@ -30,6 +30,61 @@ nonisolated enum RFBEncodingDecoder {
     private static let tightFilterPalette: UInt8 = 0x01
     private static let tightFilterGradient: UInt8 = 0x02
 
+    final class ZRLEDecodeState {
+        private var stream = compression_stream(
+            dst_ptr: UnsafeMutablePointer<UInt8>.allocate(capacity: 1),
+            dst_size: 0,
+            src_ptr: UnsafeMutablePointer<UInt8>.allocate(capacity: 1),
+            src_size: 0,
+            state: nil
+        )
+        private var isInitialized = false
+
+        deinit { reset() }
+
+        func reset() {
+            if isInitialized {
+                compression_stream_destroy(&stream)
+                isInitialized = false
+            }
+        }
+
+        func inflate(_ compressed: Data, maxOutputBytes: Int) throws -> Data {
+            if !isInitialized {
+                let status = compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB)
+                guard status != COMPRESSION_STATUS_ERROR else {
+                    throw RFBError.protocolError("Unable to initialize ZRLE zlib stream")
+                }
+                isInitialized = true
+            }
+
+            let input = Array(compressed)
+            var output = [UInt8](repeating: 0, count: maxOutputBytes)
+            var produced = 0
+
+            try input.withUnsafeBufferPointer { inputBuffer in
+                guard let inputBase = inputBuffer.baseAddress else {
+                    throw RFBError.protocolError("Empty ZRLE zlib input")
+                }
+                stream.src_ptr = inputBase
+                stream.src_size = inputBuffer.count
+
+                while stream.src_size > 0 {
+                    let remaining = maxOutputBytes - produced
+                    guard remaining > 0 else { break }
+                    output.withUnsafeMutableBufferPointer { outBuf in
+                        stream.dst_ptr = outBuf.baseAddress!.advanced(by: produced)
+                        stream.dst_size = remaining
+                        _ = compression_stream_process(&stream, 0)
+                        produced = maxOutputBytes - stream.dst_size
+                    }
+                }
+            }
+
+            return Data(output.prefix(produced))
+        }
+    }
+
     final class TightDecodeState {
         private var streams = (0..<4).map { _ in TightInflateStream() }
 
@@ -168,13 +223,20 @@ nonisolated enum RFBEncodingDecoder {
         width: UInt16,
         height: UInt16,
         compressed: Data,
+        state: ZRLEDecodeState? = nil,
         pixelFormat: RFBPixelFormat = .xrgb32
     ) throws -> Data {
         try validateZRLEPixelFormat(pixelFormat)
         let outputByteCount = try decodedByteCount(width: width, height: height)
         let rectWidth = Int(width)
         let rectHeight = Int(height)
-        let inflated = try inflateZRLE(compressed, width: width, height: height, outputByteCount: outputByteCount)
+        let inflated: Data
+        if let state {
+            // Persistent zlib stream — required by the ZRLE spec.
+            inflated = try state.inflate(compressed, maxOutputBytes: estimateZRLEInflatedSize(width: width, height: height, outputByteCount: outputByteCount))
+        } else {
+            inflated = try inflateZRLE(compressed, width: width, height: height, outputByteCount: outputByteCount)
+        }
         var cursor = ByteCursor(data: inflated)
         var output = Data(count: outputByteCount)
 
@@ -722,6 +784,15 @@ nonisolated enum RFBEncodingDecoder {
             throw RFBError.protocolError("Tight compact length too large: \(value)")
         }
         return value
+    }
+
+    private static func estimateZRLEInflatedSize(width: UInt16, height: UInt16, outputByteCount: Int) -> Int {
+        let tileColumns = (Int(width) + 63) / 64
+        let tileRows = (Int(height) + 63) / 64
+        let tileCount = tileColumns * tileRows
+        // Each tile has a 1-byte subencoding + potential palette + pixel data.
+        // CPIXEL is 3 bytes, but tile overhead can vary. Be generous.
+        return max(1024, outputByteCount + tileCount * 128)
     }
 
     private static func inflateZRLE(

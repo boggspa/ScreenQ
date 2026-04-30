@@ -81,10 +81,18 @@ struct RDPViewerView: View {
 
                 StreamQualityButton(
                     quality: $controlPreferences.streamQuality,
+                    profile: $controlPreferences.streamProfile,
                     protocolName: "RDP",
                     detail: "Controls viewer frame cadence today. FreeRDP wire-level performance flags can use this same preference next."
                 )
                 .help("Quality and compression")
+
+                Button {
+                    controlPreferences.showCursorOverlay.toggle()
+                } label: {
+                    Image(systemName: controlPreferences.showCursorOverlay ? "cursorarrow.rays" : "eye.slash")
+                }
+                .help(controlPreferences.showCursorOverlay ? "Hide overlay cursor" : "Show overlay cursor")
 
                 Button {
                     showKeyboardEntry.toggle()
@@ -166,8 +174,11 @@ struct RDPViewerView: View {
             configureRDPControls()
             syncCredentialFields(from: session.phase)
         }
-        .onReceive(controlPreferences.$streamQuality.removeDuplicates()) { quality in
-            session.updateStreamQuality(quality)
+        .onReceive(controlPreferences.$streamQuality.removeDuplicates()) { _ in
+            applyStreamControls()
+        }
+        .onReceive(controlPreferences.$streamProfile.removeDuplicates()) { _ in
+            applyStreamControls()
         }
         .onChange(of: session.phase) { newPhase in
             syncCredentialFields(from: newPhase)
@@ -344,10 +355,12 @@ struct RDPViewerView: View {
                             dragFeedback = feedback
                         }
                     )
-                    PredictedCursorOverlayView(
-                        inputMapper: session.inputMapper,
-                        canvasGeometry: canvasGeometry(size: proxy.size)
-                    )
+                    if controlPreferences.showCursorOverlay {
+                        PredictedCursorOverlayView(
+                            inputMapper: session.inputMapper,
+                            canvasGeometry: canvasGeometry(size: proxy.size)
+                        )
+                    }
                     #else
                     rdpInputOverlay(canvasSize: proxy.size)
                     #endif
@@ -393,6 +406,7 @@ struct RDPViewerView: View {
                         }
                     ),
                     streamQuality: $controlPreferences.streamQuality,
+                    streamProfile: $controlPreferences.streamProfile,
                     isKeyboardActive: $isKeyboardActive,
                     controlsVisible: $controlsVisible,
                     viewport: viewport,
@@ -510,7 +524,7 @@ struct RDPViewerView: View {
     }
 
     private func configureRDPControls() {
-        session.updateStreamQuality(controlPreferences.streamQuality)
+        applyStreamControls()
         #if os(iOS)
         touchMode = controlPreferences.touchMode
         showStats = controlPreferences.showStats
@@ -523,6 +537,13 @@ struct RDPViewerView: View {
         }
         session.inputMapper.keepsPredictedPointerVisible = true
         #endif
+    }
+
+    private func applyStreamControls() {
+        session.updateStreamQuality(
+            controlPreferences.streamQuality,
+            profile: controlPreferences.streamProfile
+        )
     }
 
     private func disconnect() {
@@ -826,6 +847,7 @@ private struct RDPIOSControlSurface: View {
     @Binding var fitMode: Bool
     @Binding var showStats: Bool
     @Binding var streamQuality: Double
+    @Binding var streamProfile: StreamProfile
     @Binding var isKeyboardActive: Bool
     @Binding var controlsVisible: Bool
 
@@ -841,18 +863,10 @@ private struct RDPIOSControlSurface: View {
         GeometryReader { proxy in
             ZStack {
                 if controlsVisible {
-                    if isPad {
+                    if usesFloatingToolbar(in: proxy.size) {
                         floatingToolbar(in: proxy.size)
-                    } else if proxy.size.width > proxy.size.height {
-                        toolbarBody(vertical: true)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                            .padding(.leading, 8)
-                            .padding(.vertical, 10)
                     } else {
-                        toolbarBody(vertical: false)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                            .padding(.horizontal, 10)
-                            .padding(.bottom, 10)
+                        dockedToolbar(in: proxy.size)
                     }
                 } else {
                     revealButton
@@ -886,8 +900,9 @@ private struct RDPIOSControlSurface: View {
     }
 
     private func floatingToolbar(in size: CGSize) -> some View {
-        toolbarBody(vertical: isCollapsed)
-            .position(x: size.width / 2, y: size.height - 68)
+        let base = floatingBasePosition(in: size)
+        return toolbarBody(vertical: isCollapsed)
+            .position(base)
             .offset(preferences.toolbarOffset)
             .gesture(
                 DragGesture()
@@ -899,13 +914,22 @@ private struct RDPIOSControlSurface: View {
                         preferences.toolbarOffset = clampedOffset(
                             CGSize(width: start.width + value.translation.width,
                                    height: start.height + value.translation.height),
-                            in: size
+                            in: size,
+                            base: base
                         )
                     }
                     .onEnded { _ in
                         dragStartOffset = nil
                     }
             )
+    }
+
+    private func dockedToolbar(in size: CGSize) -> some View {
+        let placement = resolvedToolbarPlacement(in: size)
+        let vertical = placement == .leading || placement == .trailing
+        return toolbarBody(vertical: vertical)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: dockedAlignment(for: placement))
+            .padding(dockedPadding(for: placement))
     }
 
     private func toolbarBody(vertical: Bool) -> some View {
@@ -953,6 +977,7 @@ private struct RDPIOSControlSurface: View {
                             }
                             StreamQualityButton(
                                 quality: $streamQuality,
+                                profile: $streamProfile,
                                 protocolName: "RDP",
                                 detail: "Controls viewer frame cadence today. FreeRDP wire-level performance flags can use this same preference next."
                             )
@@ -1020,6 +1045,15 @@ private struct RDPIOSControlSurface: View {
                 } label: {
                     Label(mode.label, systemImage: mode.icon)
                 }
+            }
+            Divider()
+            Button {
+                preferences.showCursorOverlay.toggle()
+            } label: {
+                Label(
+                    preferences.showCursorOverlay ? "Hide Overlay Cursor" : "Show Overlay Cursor",
+                    systemImage: preferences.showCursorOverlay ? "eye.slash" : "cursorarrow.rays"
+                )
             }
         } label: {
             Image(systemName: touchMode.icon)
@@ -1139,6 +1173,33 @@ private struct RDPIOSControlSurface: View {
             Button("Gesture Help") {
                 showGestureHelp = true
             }
+            Menu("Overlay Cursor") {
+                Button {
+                    preferences.showCursorOverlay = true
+                } label: {
+                    Label("Show Overlay Cursor", systemImage: preferences.showCursorOverlay ? "checkmark" : "cursorarrow.rays")
+                }
+                Button {
+                    preferences.showCursorOverlay = false
+                } label: {
+                    Label("Hide Overlay Cursor", systemImage: !preferences.showCursorOverlay ? "checkmark" : "eye.slash")
+                }
+            }
+            Menu("Toolbar Position") {
+                Picker("Style", selection: $preferences.toolbarStyle) {
+                    Text(ViewerToolbarStyle.dockedFloating.label).tag(ViewerToolbarStyle.dockedFloating)
+                    Text(ViewerToolbarStyle.docked.label).tag(ViewerToolbarStyle.docked)
+                    Text(ViewerToolbarStyle.floating.label).tag(ViewerToolbarStyle.floating)
+                }
+                Picker("Placement", selection: $preferences.toolbarPlacement) {
+                    ForEach(ViewerToolbarPlacement.allCases) { placement in
+                        Label(placement.label, systemImage: placement.icon).tag(placement)
+                    }
+                }
+                Button("Reset Drag Offset") {
+                    preferences.toolbarOffset = .zero
+                }
+            }
             Button("Hide Controls") {
                 controlsVisible = false
             }
@@ -1197,13 +1258,71 @@ private struct RDPIOSControlSurface: View {
         inputMapper.sendKey(key, modifiers: explicitModifiers)
     }
 
-    private func clampedOffset(_ offset: CGSize, in size: CGSize) -> CGSize {
-        let maxX = max(0, size.width / 2 - 80)
-        let maxY = max(0, size.height / 2 - 50)
+    private func clampedOffset(_ offset: CGSize, in size: CGSize, base: CGPoint) -> CGSize {
+        let margin: CGFloat = 44
+        let minX = margin - base.x
+        let maxX = max(minX, size.width - margin - base.x)
+        let minY = margin - base.y
+        let maxY = max(minY, size.height - margin - base.y)
         return CGSize(
-            width: min(max(offset.width, -maxX), maxX),
-            height: min(max(offset.height, -maxY), maxY)
+            width: min(max(offset.width, minX), maxX),
+            height: min(max(offset.height, minY), maxY)
         )
+    }
+
+    private func usesFloatingToolbar(in size: CGSize) -> Bool {
+        switch preferences.toolbarStyle {
+        case .floating:
+            return true
+        case .docked:
+            return false
+        case .native:
+            return false
+        case .dockedFloating:
+            return isPad
+        }
+    }
+
+    private func resolvedToolbarPlacement(in size: CGSize) -> ViewerToolbarPlacement {
+        if preferences.toolbarStyle == .dockedFloating, !isPad, size.width > size.height {
+            return .leading
+        }
+        return preferences.toolbarPlacement
+    }
+
+    private func floatingBasePosition(in size: CGSize) -> CGPoint {
+        switch resolvedToolbarPlacement(in: size) {
+        case .top:
+            return CGPoint(x: size.width / 2, y: 68)
+        case .bottom:
+            return CGPoint(x: size.width / 2, y: size.height - 68)
+        case .leading:
+            return CGPoint(x: 58, y: size.height / 2)
+        case .trailing:
+            return CGPoint(x: size.width - 58, y: size.height / 2)
+        }
+    }
+
+    private func dockedAlignment(for placement: ViewerToolbarPlacement) -> Alignment {
+        switch placement {
+        case .top: return .top
+        case .bottom: return .bottom
+        case .leading: return .leading
+        case .trailing: return .trailing
+        }
+    }
+
+    private func dockedPadding(for placement: ViewerToolbarPlacement) -> EdgeInsets {
+        switch placement {
+        case .top:
+            return EdgeInsets(top: 10, leading: 10, bottom: 0, trailing: 10)
+        case .bottom:
+            return EdgeInsets(top: 0, leading: 10, bottom: 10, trailing: 10)
+        case .leading:
+            return EdgeInsets(top: 10, leading: 8, bottom: 10, trailing: 0)
+        case .trailing:
+            return EdgeInsets(top: 10, leading: 0, bottom: 10, trailing: 8)
+        }
     }
 
     private static let windowsShortcuts: [(label: String, code: KeyCode, modifiers: KeyModifiers)] = [
