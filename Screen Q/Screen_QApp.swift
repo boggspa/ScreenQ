@@ -21,6 +21,7 @@ struct Screen_QApp: App {
         WindowGroup {
             HomeView()
                 .environmentObject(appState)
+                .environmentObject(appState.viewerSessions)
                 #if os(macOS)
                 .background(MacMainWindowAccessor())
                 .onAppear {

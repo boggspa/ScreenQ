@@ -9,13 +9,11 @@
 import SwiftUI
 import Combine
 import Network
-import ImageIO
 
 struct ViewerView: View {
 
     @EnvironmentObject private var app: AppState
-    @StateObject private var sessionStore = ViewerSessionStore()
-    @State private var savedConnectionTab: SavedConnectionTab = .connected
+    @EnvironmentObject private var sessionStore: ViewerSessionStore
     @State private var selectedShareOnlyDevice: DiscoveredHost?
 
     var body: some View {
@@ -140,156 +138,6 @@ struct ViewerView: View {
         }
     }
 
-    @ViewBuilder
-    private var savedConnectionsCard: some View {
-        let conns = app.savedConnections.connections
-        if !conns.isEmpty {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Label("Connections", systemImage: "rectangle.connected.to.line.below")
-                        .font(.headline)
-                    Spacer()
-                    if conns.contains(where: { !$0.isBookmark }) {
-                        Button("Clear Recents") {
-                            app.savedConnections.clearRecents()
-                        }
-                        .font(.caption)
-                        .foregroundColor(.red)
-                    }
-                }
-
-                Picker("Connection view", selection: $savedConnectionTab) {
-                    Text("Connected").tag(SavedConnectionTab.connected)
-                    Text("All").tag(SavedConnectionTab.all)
-                }
-                .pickerStyle(.segmented)
-
-                if savedConnectionTab == .connected {
-                    let continueItems = continueConnections(from: conns)
-                    if continueItems.isEmpty {
-                        Text("Connect once to create quick resume thumbnails.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.vertical, 6)
-                    } else {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 12) {
-                                ForEach(continueItems) { saved in
-                                    Button {
-                                        connect(to: saved)
-                                    } label: {
-                                        continueCard(saved)
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                            .padding(.vertical, 2)
-                        }
-                    }
-                } else {
-                    ForEach(conns) { saved in
-                        HStack {
-                            Button {
-                                connect(to: saved)
-                            } label: {
-                                HStack {
-                                    Image(systemName: saved.isBookmark ? "star.fill" : "clock")
-                                        .foregroundColor(saved.isBookmark ? .yellow : .secondary)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(saved.displayName).font(.body)
-                                        Text("\(saved.resolvedProtocol.displayName) - \(saved.address)").font(.caption).foregroundColor(.secondary)
-                                    }
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            Spacer()
-                            Button {
-                                app.savedConnections.toggleBookmark(saved.id)
-                            } label: {
-                                Image(systemName: saved.isBookmark ? "star.slash" : "star")
-                                    .font(.caption)
-                            }
-                            .buttonStyle(.borderless)
-                        }
-                    }
-                }
-            }
-            .padding(14)
-            .background(Color.black.opacity(0.6)).clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        }
-    }
-
-    private func continueCard(_ saved: SavedConnection) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            savedConnectionThumbnail(saved)
-                .frame(width: 210, height: 118)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay(continueProtocolBadge(saved))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(saved.displayName)
-                    .font(.subheadline.bold())
-                    .lineLimit(1)
-                Text(saved.address)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-            }
-        }
-        .frame(width: 210, alignment: .leading)
-        .padding(10)
-        .background(Color.primary.opacity(0.06))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-
-    private func continueProtocolBadge(_ saved: SavedConnection) -> some View {
-        VStack {
-            HStack {
-                Label(saved.resolvedProtocol.displayName, systemImage: protocolIcon(saved.resolvedProtocol))
-                    .font(.caption2.bold())
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(Color.black.opacity(0.68))
-                    .clipShape(Capsule())
-                Spacer()
-            }
-            Spacer()
-        }
-        .padding(8)
-    }
-
-    @ViewBuilder
-    private func savedConnectionThumbnail(_ saved: SavedConnection) -> some View {
-        if let data = saved.thumbnailData,
-           let source = CGImageSourceCreateWithData(data as CFData, nil),
-           let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
-            Image(decorative: image, scale: 1)
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-        } else {
-            ZStack {
-                Rectangle()
-                    .fill(Color.black.opacity(0.65))
-                Image(systemName: protocolIcon(saved.resolvedProtocol))
-                    .font(.system(size: 30, weight: .semibold))
-                    .foregroundColor(.secondary)
-            }
-        }
-    }
-
-    private func continueConnections(from connections: [SavedConnection]) -> [SavedConnection] {
-        var result: [SavedConnection] = []
-        if let windows = connections.first(where: { $0.resolvedProtocol == .rdp }) {
-            result.append(windows)
-        }
-        if let mac = connections.first(where: { $0.resolvedProtocol == .screenQ || $0.resolvedProtocol == .macScreenSharing || $0.resolvedProtocol == .vnc }) {
-            result.append(mac)
-        }
-        if result.isEmpty {
-            result = Array(connections.prefix(2))
-        }
-        return result
-    }
 
     private func connect(to saved: SavedConnection) {
         Task {
@@ -302,15 +150,6 @@ struct ViewerView: View {
             } else {
                 await sessionStore.connect(via: app, hostText: saved.host, port: saved.port, connectionProtocol: saved.resolvedProtocol)
             }
-        }
-    }
-
-    private func protocolIcon(_ connectionProtocol: RemoteConnectionProtocol) -> String {
-        switch connectionProtocol {
-        case .screenQ: return "display"
-        case .macScreenSharing: return "macwindow"
-        case .vnc: return "rectangle.on.rectangle"
-        case .rdp: return "pc"
         }
     }
 
@@ -458,11 +297,6 @@ private struct IOSShareOnlyDeviceSheet: View {
         .padding(24)
         .frame(minWidth: 360, idealWidth: 460, maxWidth: 520, alignment: .leading)
     }
-}
-
-private enum SavedConnectionTab: String, CaseIterable, Hashable {
-    case connected
-    case all
 }
 
 enum ViewerSessionSlotKind {

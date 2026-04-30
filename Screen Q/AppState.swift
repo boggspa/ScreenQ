@@ -47,6 +47,27 @@ final class AppState: ObservableObject {
     let connectionManager: ConnectionManager
     @Published var session: SessionState = .idle
 
+    /// Globally-owned viewer session store so the menu bar / status surfaces can
+    /// observe and act on active sessions regardless of which role pane is visible.
+    let viewerSessions = ViewerSessionStore()
+
+    // MARK: - Menu bar / headless mode
+
+    /// When `true`, Screen Q runs as a menu-bar-only accessory app (no Dock icon,
+    /// no app menu). Closing the main window keeps the app alive in either mode.
+    @Published var menuBarOnlyMode: Bool = {
+        UserDefaults.standard.bool(forKey: "ScreenQ.MenuBarOnlyMode")
+    }() {
+        didSet {
+            UserDefaults.standard.set(menuBarOnlyMode, forKey: "ScreenQ.MenuBarOnlyMode")
+            #if os(macOS)
+            // AppState is @MainActor, so calls are already isolated to main.
+            NSApp?.setActivationPolicy(menuBarOnlyMode ? .accessory : .regular)
+            if !menuBarOnlyMode { MacWindowControls.activateApp() }
+            #endif
+        }
+    }
+
     // MARK: - Host (macOS)
 
     #if os(macOS)
