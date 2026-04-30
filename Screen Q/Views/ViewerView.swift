@@ -102,39 +102,39 @@ struct ViewerView: View {
 
     @ViewBuilder
     private var discoverySurface: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                DiscoveryView { host in
-                    if host.isIOSShareOnlyPresence {
-                        selectedShareOnlyDevice = host
-                    } else {
-                        Task { await sessionStore.connect(via: app, discoveredHost: host) }
-                    }
-                } onSelectRFB: { rfbHost in
-                    Task { await sessionStore.openRFBHost(via: app, host: rfbHost) }
-                } onSelectTailnet: { device, connectionProtocol in
-                    guard let host = device.connectionHost else { return }
-                    Task {
-                        await sessionStore.connect(
-                            via: app,
-                            hostText: host,
-                            port: connectionProtocol.defaultPort,
-                            connectionProtocol: connectionProtocol
-                        )
-                    }
+        ConnectionHubView(
+            sessionStore: sessionStore,
+            onConnectDiscovered: { host in
+                if host.isIOSShareOnlyPresence {
+                    selectedShareOnlyDevice = host
+                } else {
+                    Task { await sessionStore.connect(via: app, discoveredHost: host) }
                 }
-                savedConnectionsCard
-                ManualConnectView { hostText, port, connectionProtocol in
-                    Task { await sessionStore.connect(via: app, hostText: hostText, port: port, connectionProtocol: connectionProtocol) }
-                } onImportRDP: { profile in
-                    sessionStore.startRDPSession(profile: profile, app: app)
+            },
+            onConnectRFB: { rfbHost in
+                Task { await sessionStore.openRFBHost(via: app, host: rfbHost) }
+            },
+            onConnectTailnet: { device, connectionProtocol in
+                guard let host = device.connectionHost else { return }
+                Task {
+                    await sessionStore.connect(
+                        via: app,
+                        hostText: host,
+                        port: connectionProtocol.defaultPort,
+                        connectionProtocol: connectionProtocol
+                    )
                 }
-                infoCard
+            },
+            onConnectSaved: { saved in
+                connect(to: saved)
+            },
+            onManualConnect: { hostText, port, connectionProtocol in
+                Task { await sessionStore.connect(via: app, hostText: hostText, port: port, connectionProtocol: connectionProtocol) }
+            },
+            onImportRDP: { profile in
+                sessionStore.startRDPSession(profile: profile, app: app)
             }
-            .padding(20)
-            .frame(maxWidth: 880, alignment: .leading)
-            .frame(maxWidth: .infinity)
-        }
+        )
         .sheet(item: $selectedShareOnlyDevice) { host in
             IOSShareOnlyDeviceSheet(host: host)
         }
