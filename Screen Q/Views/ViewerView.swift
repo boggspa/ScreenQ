@@ -19,22 +19,29 @@ struct ViewerView: View {
     @State private var selectedShareOnlyDevice: DiscoveredHost?
 
     var body: some View {
-        Group {
-            if let vncSession = sessionStore.activeVNCSession {
-                VNCViewerView(session: vncSession) {
-                    Task { await sessionStore.tearDownVNC() }
+        VStack(spacing: 0) {
+            #if os(macOS)
+            if !sessionStore.sessions.isEmpty {
+                MacSessionTabBar(store: sessionStore)
+            }
+            #endif
+            Group {
+                if let vncSession = sessionStore.activeVNCSession {
+                    VNCViewerView(session: vncSession) {
+                        Task { await sessionStore.tearDownVNC() }
+                    }
+                } else if let rdpSession = sessionStore.activeRDPSession {
+                    RDPViewerView(session: rdpSession) {
+                        Task { await sessionStore.tearDownRDP() }
+                    }
+                } else if let session = sessionStore.activeSession {
+                    RemoteScreenView(session: session) {
+                        Task { await sessionStore.tearDown() }
+                    }
+                    .environmentObject(app)
+                } else {
+                    discoverySurface
                 }
-            } else if let rdpSession = sessionStore.activeRDPSession {
-                RDPViewerView(session: rdpSession) {
-                    Task { await sessionStore.tearDownRDP() }
-                }
-            } else if let session = sessionStore.activeSession {
-                RemoteScreenView(session: session) {
-                    Task { await sessionStore.tearDown() }
-                }
-                .environmentObject(app)
-            } else {
-                discoverySurface
             }
         }
         #if os(iOS)
@@ -308,12 +315,7 @@ struct ViewerView: View {
     }
 
     private func consumePendingViewerConnection(_ pending: PendingViewerConnection) {
-        guard !sessionStore.hasActiveSession else {
-            sessionStore.lastError = "Disconnect the current viewer session before opening \(pending.displayName)."
-            app.clearPendingViewerConnection(id: pending.id)
-            return
-        }
-
+        // With multi-session support, new connections always open in a new tab.
         app.clearPendingViewerConnection(id: pending.id)
         switch pending {
         case .screenQ(let host):
@@ -347,6 +349,76 @@ struct ViewerView: View {
         .foregroundColor(.secondary)
     }
 }
+
+#if os(macOS)
+private struct MacSessionTabBar: View {
+    @ObservedObject var store: ViewerSessionStore
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(store.sessions) { slot in
+                        tabButton(for: slot)
+                    }
+                }
+                .padding(.horizontal, 6)
+            }
+
+            Button {
+                store.showDiscoverySurface()
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 24, height: 22)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(store.selectedSessionID == nil ? Color.accentColor.opacity(0.25) : Color.clear)
+                    )
+            }
+            .buttonStyle(.plain)
+            .help("New connection")
+            .padding(.trailing, 8)
+        }
+        .frame(height: 30)
+        .background(Color(NSColor.controlBackgroundColor))
+        .overlay(Divider(), alignment: .bottom)
+    }
+
+    private func tabButton(for slot: ViewerSessionSlot) -> some View {
+        let isSelected = store.selectedSessionID == slot.id
+        return HStack(spacing: 6) {
+            Image(systemName: slot.systemImage)
+                .font(.system(size: 11, weight: .semibold))
+            Text(slot.label)
+                .font(.system(size: 12))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Button {
+                Task { await store.closeSession(id: slot.id) }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .frame(width: 14, height: 14)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Close \(slot.label)")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .frame(maxWidth: 220)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(isSelected ? Color.accentColor.opacity(0.25) : Color.clear)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            store.selectSession(id: slot.id)
+        }
+    }
+}
+#endif
 
 private struct IOSShareOnlyDeviceSheet: View {
     let host: DiscoveredHost
@@ -393,8 +465,38 @@ private enum SavedConnectionTab: String, CaseIterable, Hashable {
     case all
 }
 
+enum ViewerSessionSlotKind {
+    case screenQ(ViewerSession)
+    case vnc(VNCSession)
+    case rdp(RDPSession)
+}
+
+struct ViewerSessionSlot: Identifiable {
+    let id = UUID()
+    var kind: ViewerSessionSlotKind
+
+    var label: String {
+        switch kind {
+        case .screenQ(let s): return s.peerLabel
+        case .vnc(let s):     return s.serverName.isEmpty ? s.peerLabel : s.serverName
+        case .rdp(let s):     return s.profile.displayName
+        }
+    }
+
+    var systemImage: String {
+        switch kind {
+        case .screenQ: return "display"
+        case .vnc:     return "rectangle.on.rectangle"
+        case .rdp:     return "pc"
+        }
+    }
+}
+
 @MainActor
 final class ViewerSessionStore: ObservableObject {
+
+    @Published private(set) var sessions: [ViewerSessionSlot] = []
+    @Published var selectedSessionID: UUID?
 
     @Published var activeSession: ViewerSession?
     @Published var activeVNCSession: VNCSession?
@@ -402,7 +504,58 @@ final class ViewerSessionStore: ObservableObject {
     @Published var lastError: String?
 
     var hasActiveSession: Bool {
-        activeSession != nil || activeVNCSession != nil || activeRDPSession != nil
+        !sessions.isEmpty && selectedSessionID != nil
+    }
+
+    var currentSlot: ViewerSessionSlot? {
+        guard let id = selectedSessionID else { return nil }
+        return sessions.first(where: { $0.id == id })
+    }
+
+    /// Deselect — shows the discovery surface while keeping background sessions alive.
+    func showDiscoverySurface() {
+        selectedSessionID = nil
+        refreshActiveBindings()
+    }
+
+    func selectSession(id: UUID) {
+        guard sessions.contains(where: { $0.id == id }) else { return }
+        selectedSessionID = id
+        refreshActiveBindings()
+    }
+
+    func closeSession(id: UUID) async {
+        guard let idx = sessions.firstIndex(where: { $0.id == id }) else { return }
+        let slot = sessions[idx]
+        switch slot.kind {
+        case .screenQ(let s): await s.tearDown(reason: "User disconnected")
+        case .vnc(let s):     await s.disconnect()
+        case .rdp(let s):     await s.disconnect()
+        }
+        sessions.remove(at: idx)
+        if selectedSessionID == id {
+            selectedSessionID = sessions.last?.id
+        }
+        refreshActiveBindings()
+    }
+
+    private func append(_ slot: ViewerSessionSlot) {
+        sessions.append(slot)
+        selectedSessionID = slot.id
+        refreshActiveBindings()
+    }
+
+    private func refreshActiveBindings() {
+        switch currentSlot?.kind {
+        case .screenQ(let s):
+            activeSession = s; activeVNCSession = nil; activeRDPSession = nil
+        case .vnc(let s):
+            activeSession = nil; activeVNCSession = s; activeRDPSession = nil
+        case .rdp(let s):
+            activeSession = nil; activeVNCSession = nil; activeRDPSession = s
+        case .none:
+            activeSession = nil; activeVNCSession = nil; activeRDPSession = nil
+        }
     }
 
     // MARK: - Screen Q connections
@@ -485,7 +638,7 @@ final class ViewerSessionStore: ObservableObject {
                 app: app,
                 controlPreferenceScope: controlPreferenceScope
             )
-            self.activeSession = session
+            append(ViewerSessionSlot(kind: .screenQ(session)))
             await session.beginHandshake()
         } catch {
             lastError = error.localizedDescription
@@ -493,10 +646,9 @@ final class ViewerSessionStore: ObservableObject {
     }
 
     func tearDown() async {
-        if let s = activeSession {
-            await s.tearDown(reason: "User disconnected")
+        if let id = currentSlot?.id, case .screenQ = currentSlot?.kind {
+            await closeSession(id: id)
         }
-        activeSession = nil
     }
 
     // MARK: - VNC / RFB connections
@@ -512,21 +664,20 @@ final class ViewerSessionStore: ObservableObject {
 
     func startVNCSession(host: String, port: UInt16 = 5900, label: String, profile: RFBConnectionProfile = .genericVNC) {
         let session = VNCSession(host: host, port: port, label: label, profile: profile)
-        self.activeVNCSession = session
+        append(ViewerSessionSlot(kind: .vnc(session)))
         session.startConnecting()
     }
 
     func startVNCSession(endpoint: NWEndpoint, label: String, profile: RFBConnectionProfile = .macScreenSharing) {
         let session = VNCSession(endpoint: endpoint, label: label, profile: profile)
-        self.activeVNCSession = session
+        append(ViewerSessionSlot(kind: .vnc(session)))
         session.startConnecting()
     }
 
     func tearDownVNC() async {
-        if let s = activeVNCSession {
-            await s.disconnect()
+        if let id = currentSlot?.id, case .vnc = currentSlot?.kind {
+            await closeSession(id: id)
         }
-        activeVNCSession = nil
     }
 
     // MARK: - RDP connections
@@ -544,20 +695,21 @@ final class ViewerSessionStore: ObservableObject {
             connectionProtocol: .rdp
         )
         let session = RDPSession(profile: profile)
-        self.activeRDPSession = session
+        append(ViewerSessionSlot(kind: .rdp(session)))
         Task { await session.connect() }
     }
 
     func tearDownRDP() async {
-        if let s = activeRDPSession {
-            await s.disconnect()
+        if let id = currentSlot?.id, case .rdp = currentSlot?.kind {
+            await closeSession(id: id)
         }
-        activeRDPSession = nil
     }
 
     func tearDownAll() async {
-        await tearDown()
-        await tearDownVNC()
-        await tearDownRDP()
+        // Snapshot ids so closeSession's mutations don't invalidate iteration.
+        let ids = sessions.map(\.id)
+        for id in ids {
+            await closeSession(id: id)
+        }
     }
 }
