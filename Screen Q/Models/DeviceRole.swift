@@ -8,7 +8,7 @@ import Foundation
 /// The high-level user roles surfaced from the home screen. The role
 /// gates which subsystem is started (capture, input injection, viewer, etc.)
 /// and is purely a UX construct; it is not transmitted over the wire.
-enum DeviceRole: String, CaseIterable, Identifiable, Codable {
+enum DeviceRole: String, CaseIterable, Identifiable, Codable, Sendable {
     /// macOS-only: turn this Mac into a controllable host.
     case hostMac
     /// macOS, iOS, iPadOS: connect to a remote host and view/control.

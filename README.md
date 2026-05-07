@@ -46,6 +46,8 @@ inside public Apple APIs.
 - **URL schemes / Quick Connect**: app-level handling for `screenq://`,
   `screens://`, `vnc://`, `rdp://`, and `ms-rd://` links. `ssh://` links
   are recognized and reported as unsupported until SSH sessions exist.
+- **First-run onboarding**: one-time setup router for hosting this Mac,
+  connecting to a Mac, Tailnet setup, Apple Screen Sharing, and RDP import.
 - **File transfer**: permission-gated chunked transfers with safe
   filename handling, size/order enforcement, streamed temp files, and
   progress UI.

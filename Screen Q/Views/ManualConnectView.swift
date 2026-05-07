@@ -14,6 +14,7 @@ struct ManualConnectView: View {
     @State private var probeResult: ProbeResult?
     @State private var isProbing = false
     @State private var isImportingRDP = false
+    @State private var shouldLaunchRDPImporter = false
     @State private var importedRDPProfile: RDPConnectionProfile?
     @State private var importError: String?
     @State private var wakeMACText: String = ""
@@ -21,9 +22,14 @@ struct ManualConnectView: View {
     var onImportRDP: (RDPConnectionProfile) -> Void
 
     init(
+        initialProtocol: RemoteConnectionProtocol = .screenQ,
+        launchRDPImporter: Bool = false,
         onConnect: @escaping (String, UInt16, RemoteConnectionProtocol) -> Void,
         onImportRDP: @escaping (RDPConnectionProfile) -> Void = { _ in }
     ) {
+        self._selectedProtocol = State(initialValue: initialProtocol)
+        self._portText = State(initialValue: String(initialProtocol.defaultPort))
+        self._shouldLaunchRDPImporter = State(initialValue: launchRDPImporter)
         self.onConnect = { host, port, connectionProtocol, _ in
             onConnect(host, port, connectionProtocol)
         }
@@ -31,14 +37,26 @@ struct ManualConnectView: View {
     }
 
     init(
+        initialProtocol: RemoteConnectionProtocol = .screenQ,
+        launchRDPImporter: Bool = false,
         onConnectWithWake: @escaping (String, UInt16, RemoteConnectionProtocol, String?) -> Void,
         onImportRDP: @escaping (RDPConnectionProfile) -> Void = { _ in }
     ) {
+        self._selectedProtocol = State(initialValue: initialProtocol)
+        self._portText = State(initialValue: String(initialProtocol.defaultPort))
+        self._shouldLaunchRDPImporter = State(initialValue: launchRDPImporter)
         self.onConnect = onConnectWithWake
         self.onImportRDP = onImportRDP
     }
 
-    init(onConnect: @escaping (String, UInt16) -> Void) {
+    init(
+        initialProtocol: RemoteConnectionProtocol = .screenQ,
+        launchRDPImporter: Bool = false,
+        onConnect: @escaping (String, UInt16) -> Void
+    ) {
+        self._selectedProtocol = State(initialValue: initialProtocol)
+        self._portText = State(initialValue: String(initialProtocol.defaultPort))
+        self._shouldLaunchRDPImporter = State(initialValue: launchRDPImporter)
         self.onConnect = { host, port, _, _ in onConnect(host, port) }
         self.onImportRDP = { _ in }
     }
@@ -156,6 +174,12 @@ struct ManualConnectView: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(.separator, lineWidth: 0.5)
         )
+        .onAppear {
+            guard shouldLaunchRDPImporter else { return }
+            shouldLaunchRDPImporter = false
+            selectedProtocol = .rdp
+            isImportingRDP = true
+        }
     }
 
     private var trimmedHost: String {

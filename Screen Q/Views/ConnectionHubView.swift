@@ -9,6 +9,7 @@
 //
 
 import SwiftUI
+import Combine
 import ImageIO
 #if os(macOS)
 import AppKit
@@ -35,6 +36,8 @@ struct ConnectionHubView: View {
     @State private var selectedTailnetDevice: TailnetDevice?
     @State private var editingGroup: ConnectionGroupEditorDraft?
     @State private var showTailnetSetupSheet = false
+    @State private var manualInitialProtocol: RemoteConnectionProtocol = .screenQ
+    @State private var manualLaunchRDPImporter = false
     @State private var quickConnectText = ""
     @State private var quickConnectProtocol: RemoteConnectionProtocol = .screenQ
     @State private var quickConnectError: String?
@@ -61,7 +64,13 @@ struct ConnectionHubView: View {
             .frame(maxWidth: .infinity)
         }
         .background(backgroundGradient.ignoresSafeArea())
-        .sheet(isPresented: $showManualSheet) {
+        .sheet(
+            isPresented: $showManualSheet,
+            onDismiss: {
+                manualInitialProtocol = .screenQ
+                manualLaunchRDPImporter = false
+            }
+        ) {
             manualConnectSheet
         }
         .sheet(item: $selectedSavedConnection) { saved in
@@ -131,6 +140,16 @@ struct ConnectionHubView: View {
         }
         .sheet(isPresented: $showTailnetSetupSheet) {
             tailnetSetupSheet
+        }
+        .onAppear {
+            if let action = app.consumePendingConnectionHubStartupAction() {
+                consumeStartupAction(action)
+            }
+        }
+        .onReceive(app.$pendingConnectionHubStartupAction.compactMap { $0 }) { _ in
+            if let action = app.consumePendingConnectionHubStartupAction() {
+                consumeStartupAction(action)
+            }
         }
         #if os(iOS)
         .overlay(
@@ -548,6 +567,8 @@ struct ConnectionHubView: View {
             Divider()
             ScrollView {
                 ManualConnectView(
+                    initialProtocol: manualInitialProtocol,
+                    launchRDPImporter: manualLaunchRDPImporter,
                     onConnectWithWake: { host, port, proto, wakeMAC in
                         showManualSheet = false
                         onManualConnect(host, port, proto, wakeMAC)
@@ -743,6 +764,29 @@ struct ConnectionHubView: View {
             )
         }
         onManualConnect(target.host, target.port, target.connectionProtocol, nil)
+    }
+
+    private func consumeStartupAction(_ action: ConnectionHubStartupAction) {
+        switch action {
+        case .screenQManualConnect:
+            manualInitialProtocol = .screenQ
+            manualLaunchRDPImporter = false
+            quickConnectProtocol = .screenQ
+            showManualSheet = true
+        case .tailnetSetup:
+            showTailnetSetupSheet = true
+            Task { await app.refreshTailnetDevices() }
+        case .appleScreenSharing:
+            manualInitialProtocol = .macScreenSharing
+            manualLaunchRDPImporter = false
+            quickConnectProtocol = .macScreenSharing
+            showManualSheet = true
+        case .importRDP:
+            manualInitialProtocol = .rdp
+            manualLaunchRDPImporter = true
+            quickConnectProtocol = .rdp
+            showManualSheet = true
+        }
     }
 
     private func saveTailnetDevice(_ device: TailnetDevice, bookmark: Bool) {

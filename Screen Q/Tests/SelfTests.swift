@@ -51,6 +51,7 @@ enum SelfTests {
         results.append(testSavedConnectionProtocolResolution())
         results.append(testQuickConnectParser())
         results.append(testSavedConnectionCodableBackfill())
+        results.append(testFirstRunOnboardingRoutes())
         results.append(testFileTransferFilenameSanitization())
         results.append(testViewerControlPreferenceScope())
         results.append(testSessionStateRoutingFlags())
@@ -779,6 +780,23 @@ enum SelfTests {
         } catch {
             return fail("Saved connection backfill", "\(error)")
         }
+    }
+
+    private static func testFirstRunOnboardingRoutes() -> Result {
+        guard FirstRunOnboardingRoute.hostMac.selectedRole == .hostMac,
+              FirstRunOnboardingRoute.hostMac.connectionHubStartupAction == nil else {
+            return fail("First-run onboarding routes", "Host route should open host mode directly")
+        }
+        guard FirstRunOnboardingRoute.connectExistingMac.selectedRole == .viewer,
+              FirstRunOnboardingRoute.connectExistingMac.connectionHubStartupAction == .screenQManualConnect else {
+            return fail("First-run onboarding routes", "Connect route should open viewer manual connect")
+        }
+        guard FirstRunOnboardingRoute.useTailscale.connectionHubStartupAction == .tailnetSetup,
+              FirstRunOnboardingRoute.useAppleScreenSharing.connectionHubStartupAction == .appleScreenSharing,
+              FirstRunOnboardingRoute.importRDP.connectionHubStartupAction == .importRDP else {
+            return fail("First-run onboarding routes", "Viewer routes should map to concrete hub actions")
+        }
+        return ok("First-run onboarding routes select concrete app surfaces")
     }
 
     private static func testFileTransferFilenameSanitization() -> Result {

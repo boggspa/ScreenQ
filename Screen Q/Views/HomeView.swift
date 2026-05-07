@@ -63,6 +63,10 @@ struct HomeView: View {
             SecurityTrustView()
                 .environmentObject(app)
         }
+        .sheet(isPresented: firstRunOnboardingBinding) {
+            FirstRunOnboardingView()
+                .environmentObject(app)
+        }
         .alert(isPresented: $showRoleSwitchPrompt) {
             Alert(
                 title: Text("Stop the active session?"),
@@ -173,6 +177,10 @@ struct HomeView: View {
         #if os(iOS)
         .navigationViewStyle(.stack)
         #endif
+        .sheet(isPresented: firstRunOnboardingBinding) {
+            FirstRunOnboardingView()
+                .environmentObject(app)
+        }
     }
 
     enum HomeRoute: Hashable {
@@ -207,6 +215,17 @@ struct HomeView: View {
 
     private var gridColumns: [GridItem] {
         [GridItem(.adaptive(minimum: 280), spacing: 16)]
+    }
+
+    private var firstRunOnboardingBinding: Binding<Bool> {
+        Binding(
+            get: { !app.firstRunOnboardingCompleted },
+            set: { isPresented in
+                if !isPresented {
+                    app.completeFirstRunOnboarding()
+                }
+            }
+        )
     }
 
     private func requestRoleSelection(_ role: DeviceRole) {

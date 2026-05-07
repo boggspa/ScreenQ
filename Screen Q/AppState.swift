@@ -15,6 +15,47 @@ import Network
 import UIKit
 #endif
 
+nonisolated enum ConnectionHubStartupAction: String, Codable, Hashable, Sendable {
+    case screenQManualConnect
+    case tailnetSetup
+    case appleScreenSharing
+    case importRDP
+}
+
+nonisolated enum FirstRunOnboardingRoute: String, CaseIterable, Identifiable, Codable, Sendable {
+    case hostMac
+    case connectExistingMac
+    case useTailscale
+    case useAppleScreenSharing
+    case importRDP
+
+    var id: String { rawValue }
+
+    var selectedRole: DeviceRole {
+        switch self {
+        case .hostMac:
+            return .hostMac
+        case .connectExistingMac, .useTailscale, .useAppleScreenSharing, .importRDP:
+            return .viewer
+        }
+    }
+
+    var connectionHubStartupAction: ConnectionHubStartupAction? {
+        switch self {
+        case .hostMac:
+            return nil
+        case .connectExistingMac:
+            return .screenQManualConnect
+        case .useTailscale:
+            return .tailnetSetup
+        case .useAppleScreenSharing:
+            return .appleScreenSharing
+        case .importRDP:
+            return .importRDP
+        }
+    }
+}
+
 @MainActor
 final class AppState: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
@@ -29,6 +70,14 @@ final class AppState: ObservableObject {
     @Published var selectedRole: DeviceRole?
     @Published var viewerHasActiveSession: Bool = false
     @Published var viewerFocusMode: Bool = false
+    @Published var firstRunOnboardingCompleted: Bool = {
+        UserDefaults.standard.bool(forKey: AppState.firstRunOnboardingCompletedKey)
+    }() {
+        didSet {
+            UserDefaults.standard.set(firstRunOnboardingCompleted, forKey: AppState.firstRunOnboardingCompletedKey)
+        }
+    }
+    @Published var pendingConnectionHubStartupAction: ConnectionHubStartupAction?
 
     // MARK: - Discovery
 
@@ -303,6 +352,31 @@ final class AppState: ObservableObject {
         pendingViewerConnection = nil
     }
 
+    func completeFirstRunOnboarding(route: FirstRunOnboardingRoute? = nil) {
+        firstRunOnboardingCompleted = true
+        guard let route else { return }
+        routeFromFirstRunOnboarding(route)
+    }
+
+    func resetFirstRunOnboarding() {
+        firstRunOnboardingCompleted = false
+        pendingConnectionHubStartupAction = nil
+    }
+
+    func consumePendingConnectionHubStartupAction() -> ConnectionHubStartupAction? {
+        let action = pendingConnectionHubStartupAction
+        pendingConnectionHubStartupAction = nil
+        return action
+    }
+
+    private func routeFromFirstRunOnboarding(_ route: FirstRunOnboardingRoute) {
+        viewerFocusMode = false
+        if let action = route.connectionHubStartupAction {
+            pendingConnectionHubStartupAction = action
+        }
+        selectRole(route.selectedRole)
+    }
+
     func handleExternalURL(_ url: URL) {
         Logger.shared.info("Received external URL: \(url.absoluteString)")
         switch QuickConnectParser.resolve(url) {
@@ -417,4 +491,6 @@ final class AppState: ObservableObject {
         UserDefaults.standard.set(id.uuidString, forKey: key)
         return id
     }
+
+    private static let firstRunOnboardingCompletedKey = "ScreenQ.FirstRunOnboardingCompleted"
 }
