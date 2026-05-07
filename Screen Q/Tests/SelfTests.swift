@@ -49,6 +49,8 @@ enum SelfTests {
         results.append(testRDPCredentialNormalisation())
         results.append(testRDPAuthFailureClassifier())
         results.append(testSavedConnectionProtocolResolution())
+        results.append(testQuickConnectParser())
+        results.append(testSavedConnectionCodableBackfill())
         results.append(testViewerControlPreferenceScope())
         results.append(testSessionStateRoutingFlags())
         results.append(testHostSessionPrivilegedStateGate())
@@ -693,6 +695,66 @@ enum SelfTests {
         }
 
         return ok("Saved connections resolve protocol routes")
+    }
+
+    private static func testQuickConnectParser() -> Result {
+        guard let screenQ = QuickConnectParser.parse("mac-mini.local:\(ScreenQProtocol.defaultPort)") else {
+            return fail("Quick Connect parser", "host:port did not parse")
+        }
+        guard screenQ.host == "mac-mini.local",
+              screenQ.port == ScreenQProtocol.defaultPort,
+              screenQ.connectionProtocol == .screenQ else {
+            return fail("Quick Connect parser", "unexpected Screen Q target: \(screenQ)")
+        }
+
+        guard let vnc = QuickConnectParser.parse("vnc://workstation.local:5901") else {
+            return fail("Quick Connect parser", "vnc URL did not parse")
+        }
+        guard vnc.host == "workstation.local",
+              vnc.port == 5901,
+              vnc.connectionProtocol == .macScreenSharing else {
+            return fail("Quick Connect parser", "unexpected VNC target: \(vnc)")
+        }
+
+        guard let rdp = QuickConnectParser.parse("rdp://windows.tailnet.ts.net") else {
+            return fail("Quick Connect parser", "rdp URL did not parse")
+        }
+        guard rdp.port == RemoteConnectionProtocol.rdp.defaultPort,
+              rdp.connectionProtocol == .rdp else {
+            return fail("Quick Connect parser", "unexpected RDP defaults: \(rdp)")
+        }
+
+        guard QuickConnectParser.parse("ssh://server.local") == nil else {
+            return fail("Quick Connect parser", "unsupported ssh URL should not parse until SSH is implemented")
+        }
+
+        return ok("Quick Connect parser resolves supported host and URL forms")
+    }
+
+    private static func testSavedConnectionCodableBackfill() -> Result {
+        let legacyJSON = """
+        {
+          "id": "11111111-2222-3333-4444-555555555555",
+          "displayName": "Legacy",
+          "host": "legacy.local",
+          "port": \(ScreenQProtocol.defaultPort),
+          "isBookmark": true,
+          "lastConnected": 12345
+        }
+        """
+
+        do {
+            let saved = try JSONDecoder().decode(SavedConnection.self, from: Data(legacyJSON.utf8))
+            guard saved.notes.isEmpty,
+                  saved.groupIDs.isEmpty,
+                  saved.source == .manual,
+                  saved.resolvedProtocol == .screenQ else {
+                return fail("Saved connection backfill", "new library fields did not default safely")
+            }
+            return ok("Saved connections backfill library metadata")
+        } catch {
+            return fail("Saved connection backfill", "\(error)")
+        }
     }
 
     private static func testViewerControlPreferenceScope() -> Result {

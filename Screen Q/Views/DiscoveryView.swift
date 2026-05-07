@@ -16,6 +16,8 @@ struct DiscoveryView: View {
     var onSelect: (DiscoveredHost) -> Void
     var onSelectRFB: ((DiscoveredHost) -> Void)?
     var onSelectTailnet: ((TailnetDevice, RemoteConnectionProtocol) -> Void)? = nil
+    var showsTailnet: Bool = true
+    var onDetails: ((DiscoveredHost, RemoteConnectionProtocol) -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -52,6 +54,18 @@ struct DiscoveryView: View {
                         DiscoveryRow(host: host)
                     }
                     .buttonStyle(.plain)
+                    .contextMenu {
+                        Button {
+                            onSelect(host)
+                        } label: {
+                            Label("Connect", systemImage: "play.fill")
+                        }
+                        Button {
+                            onDetails?(host, .screenQ)
+                        } label: {
+                            Label("Details", systemImage: "info.circle")
+                        }
+                    }
                 }
             }
 
@@ -68,6 +82,18 @@ struct DiscoveryView: View {
                         RFBDiscoveryRow(host: host)
                     }
                     .buttonStyle(.plain)
+                    .contextMenu {
+                        Button {
+                            onSelectRFB?(host)
+                        } label: {
+                            Label("Connect", systemImage: "play.fill")
+                        }
+                        Button {
+                            onDetails?(host, .macScreenSharing)
+                        } label: {
+                            Label("Details", systemImage: "info.circle")
+                        }
+                    }
                 }
             }
 
@@ -90,13 +116,15 @@ struct DiscoveryView: View {
                 .padding(.vertical, 16)
             }
 
-            Divider()
-                .padding(.vertical, 2)
+            if showsTailnet {
+                Divider()
+                    .padding(.vertical, 2)
 
-            tailnetSection
+                tailnetSection
+            }
         }
         .onAppear {
-            if app.tailnetAuthConfigured && app.tailnetDevices.isEmpty {
+            if showsTailnet && app.tailnetAuthConfigured && app.tailnetDevices.isEmpty {
                 Task { await app.refreshTailnetDevices() }
             }
         }

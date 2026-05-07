@@ -94,6 +94,12 @@ final class ComputerListStore: ObservableObject {
         save()
     }
 
+    func updateGroup(_ group: ComputerGroup) {
+        guard let idx = groups.firstIndex(where: { $0.id == group.id }) else { return }
+        groups[idx] = group
+        save()
+    }
+
     func removeGroup(_ id: UUID) {
         groups.removeAll { $0.id == id }
         save()

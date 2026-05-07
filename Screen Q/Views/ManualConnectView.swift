@@ -409,19 +409,6 @@ private extension RemoteConnectionProtocol {
             return false
         }
     }
-
-    var systemImage: String {
-        switch self {
-        case .screenQ:
-            return "display"
-        case .macScreenSharing:
-            return "macwindow"
-        case .vnc:
-            return "rectangle.connected.to.line.below"
-        case .rdp:
-            return "pc"
-        }
-    }
 }
 
 private extension UTType {
