@@ -576,7 +576,9 @@ final class ViewerSession: ObservableObject {
             markFirstFrameReceivedIfRenderable()
         case .cursorUpdate(let cursor):
             cursorState.update(cursor)
-            inputMapper.updateRemotePointer(NormalisedPoint(x: cursor.x, y: cursor.y))
+            if cursor.visible {
+                inputMapper.updateRemotePointer(NormalisedPoint(x: cursor.x, y: cursor.y))
+            }
         case .audioFormat(let fmt):
             audioPlayer.configure(format: fmt)
         case .audioFrame(let data):

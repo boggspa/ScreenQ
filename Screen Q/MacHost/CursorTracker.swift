@@ -22,6 +22,7 @@ final class CursorTracker {
         var displayID: CGDirectDisplayID
         var displayFrame: CGRect
         var lastPoint: CGPoint = .zero
+        var lastVisible: Bool = false
         var lastCursorType: String = "arrow"
         var lastCursorImageBase64: String?
         var lastHotSpot: NSPoint = .zero
@@ -38,9 +39,9 @@ final class CursorTracker {
         if let frame {
             nextFrame = frame
         } else if displayID == DisplaySelectionService.allDisplaysID {
-            nextFrame = DisplaySelectionService.appKitDisplayFrameUnion()
+            nextFrame = DisplaySelectionService.cgDisplayBoundsUnion() ?? .zero
         } else {
-            nextFrame = appKitFrame(for: displayID) ?? CGDisplayBounds(displayID)
+            nextFrame = CGDisplayBounds(displayID)
         }
 
         subscribers[subscriberID] = CursorSubscriber(
@@ -74,25 +75,25 @@ final class CursorTracker {
     }
 
     private func tick() {
-        let mouseLocation = NSEvent.mouseLocation
+        let mouseLocation = MacScreenCoordinateSpace.topLeftMouseLocation()
         let cursorType = currentCursorTypeName()
         var cursorBitmap: (String?, NSPoint)?
 
         for id in Array(subscribers.keys) {
             guard var subscriber = subscribers[id] else { continue }
             let displayFrame = subscriber.displayFrame
-            // NSEvent reports AppKit screen coordinates. Use each subscriber's
-            // target frame, then flip y into the protocol's top-left space.
+            guard !displayFrame.isNull, !displayFrame.isEmpty else { continue }
             let cgPoint = CGPoint(
                 x: mouseLocation.x - displayFrame.minX,
-                y: displayFrame.height - (mouseLocation.y - displayFrame.minY)
+                y: mouseLocation.y - displayFrame.minY
             )
 
             let nx = displayFrame.width > 0 ? cgPoint.x / displayFrame.width : 0
             let ny = displayFrame.height > 0 ? cgPoint.y / displayFrame.height : 0
             let dx = abs(cgPoint.x - subscriber.lastPoint.x)
             let dy = abs(cgPoint.y - subscriber.lastPoint.y)
-            guard dx > 0.5 || dy > 0.5 || cursorType != subscriber.lastCursorType else {
+            let isVisible = displayFrame.contains(mouseLocation)
+            guard dx > 0.5 || dy > 0.5 || isVisible != subscriber.lastVisible || cursorType != subscriber.lastCursorType else {
                 continue
             }
 
@@ -105,12 +106,13 @@ final class CursorTracker {
                 subscriber.lastHotSpot = cursorBitmap?.1 ?? .zero
             }
             subscriber.lastPoint = cgPoint
+            subscriber.lastVisible = isVisible
             subscriber.lastCursorType = cursorType
 
             let msg = CursorUpdateMessage(
                 x: Double(nx).clamped01(),
                 y: Double(ny).clamped01(),
-                visible: true,
+                visible: isVisible,
                 cursorType: cursorType,
                 imageData: cursorChanged ? subscriber.lastCursorImageBase64 : nil,
                 hotSpotX: cursorChanged ? Double(subscriber.lastHotSpot.x) : nil,
@@ -120,15 +122,6 @@ final class CursorTracker {
             subscribers[id] = subscriber
             handler(msg)
         }
-    }
-
-    private func appKitFrame(for displayID: CGDirectDisplayID) -> CGRect? {
-        NSScreen.screens.first { screen in
-            guard let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
-                return false
-            }
-            return screenNumber == displayID
-        }?.frame
     }
 
     private func captureCursorBitmap() -> (String?, NSPoint) {

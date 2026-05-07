@@ -95,7 +95,7 @@ final class MacInputInjectionService: ObservableObject {
     }
 
     func resetTransientState() {
-        let point = lastPointerLocation ?? NSEvent.mouseLocation
+        let point = lastPointerLocation ?? MacScreenCoordinateSpace.topLeftMouseLocation()
         for button in activePointerButtons {
             postPointerRelease(button: button, at: point)
         }

@@ -751,6 +751,8 @@ final class MacHostRuntime: ObservableObject {
         box.identityFingerprint = viewerIdentityFingerprint
         box.grantedPermissions = primary.grantedPermissions
         box.sessionID = sessionID
+        box.primaryHostSessionBoxID = primary.id
+        box.captureTargetID = primary.captureTargetID
         box.state = primary.state
         box.encryptionEnabled = true
         box.encryptionStatusKnown = true
@@ -772,6 +774,20 @@ final class MacHostRuntime: ObservableObject {
         cancelHostHandshakeTimeout(for: box)
         registerAuxiliaryControlChannel(box, for: sessionID)
         Logger.shared.info("Attached Screen Q control channel for \(primary.peerName)")
+    }
+
+    private func primarySessionBox(for box: HostSessionBox) -> HostSessionBox {
+        guard box.isAuxiliaryControlChannel else { return box }
+        if let primaryID = box.primaryHostSessionBoxID,
+           let primary = hostConnections.first(where: { $0.id == primaryID }) {
+            return primary
+        }
+        guard let sessionID = box.sessionID, let peerID = box.peerID else { return box }
+        return hostConnections.first { candidate in
+            !candidate.isAuxiliaryControlChannel &&
+            candidate.sessionID == sessionID &&
+            candidate.peerID == peerID
+        } ?? box
     }
 
     private func handleHostInbound(_ message: InboundMessage, box: HostSessionBox) async {
@@ -910,10 +926,11 @@ final class MacHostRuntime: ObservableObject {
                     break
                 }
                 if #available(macOS 12.3, *) {
+                    let routingBox = primarySessionBox(for: box)
                     app.macInput.handle(
                         input.event,
-                        displayID: app.macCaptureService.activeDisplayID(for: box.id),
-                        inputConstraint: app.macCaptureService.activeInputConstraint(for: box.id)
+                        displayID: app.macCaptureService.activeDisplayID(for: routingBox.id),
+                        inputConstraint: app.macCaptureService.activeInputConstraint(for: routingBox.id)
                     )
                 } else {
                     app.macInput.handle(input.event)
@@ -1201,6 +1218,7 @@ final class HostSessionBox: ObservableObject, Identifiable {
     var grantedPermissions: PermissionSet = []
     var sessionID: UUID?
     var isAuxiliaryControlChannel: Bool = false
+    var primaryHostSessionBoxID: UUID?
     var captureTargetID: String?
     let transportStats = TransportStats()
     let adaptiveBitrate = AdaptiveBitrateController()
