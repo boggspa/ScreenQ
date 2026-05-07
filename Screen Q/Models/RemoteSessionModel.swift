@@ -78,8 +78,8 @@ nonisolated struct RemoteCapabilities: Codable, Hashable, Sendable {
         supportsAudio: true,
         platform: .windows,
         notes: [
-            "RDP route prepared",
-            "Requires the FreeRDP engine bridge before live rendering is available"
+            "RDP route",
+            "Uses the bundled FreeRDP bridge when available"
         ]
     )
 }

@@ -51,6 +51,7 @@ enum SelfTests {
         results.append(testSavedConnectionProtocolResolution())
         results.append(testQuickConnectParser())
         results.append(testSavedConnectionCodableBackfill())
+        results.append(testFileTransferFilenameSanitization())
         results.append(testViewerControlPreferenceScope())
         results.append(testSessionStateRoutingFlags())
         results.append(testHostSessionPrivilegedStateGate())
@@ -441,7 +442,7 @@ enum SelfTests {
             return fail("Protocol defaults", "Mac Screen Sharing should be selectable")
         }
         guard RemoteConnectionProtocol.rdp.isAvailable else {
-            return fail("Protocol defaults", "RDP preview route should be selectable")
+            return fail("Protocol defaults", "RDP route should be selectable")
         }
         guard RemoteConnectionProtocol.screenQ.connectionKind == .screenQ,
               RemoteConnectionProtocol.macScreenSharing.connectionKind == .macScreenSharing,
@@ -755,6 +756,22 @@ enum SelfTests {
         } catch {
             return fail("Saved connection backfill", "\(error)")
         }
+    }
+
+    private static func testFileTransferFilenameSanitization() -> Result {
+        guard FileTransferService.sanitizedFileName("report.pdf") == "report.pdf" else {
+            return fail("File transfer filename sanitization", "valid basename should pass")
+        }
+        guard FileTransferService.sanitizedFileName("../report.pdf") == nil else {
+            return fail("File transfer filename sanitization", "parent traversal should be rejected")
+        }
+        guard FileTransferService.sanitizedFileName("folder/report.pdf") == nil else {
+            return fail("File transfer filename sanitization", "path separator should be rejected")
+        }
+        guard FileTransferService.sanitizedFileName("..") == nil else {
+            return fail("File transfer filename sanitization", "dot-dot basename should be rejected")
+        }
+        return ok("File transfer filename sanitization rejects unsafe names")
     }
 
     private static func testViewerControlPreferenceScope() -> Result {

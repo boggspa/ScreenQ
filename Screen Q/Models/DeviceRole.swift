@@ -5,20 +5,24 @@
 
 import Foundation
 
-/// The four high-level user roles surfaced from the home screen. The role
+/// The high-level user roles surfaced from the home screen. The role
 /// gates which subsystem is started (capture, input injection, viewer, etc.)
 /// and is purely a UX construct; it is not transmitted over the wire.
 enum DeviceRole: String, CaseIterable, Identifiable, Codable {
     /// macOS-only: turn this Mac into a controllable host.
     case hostMac
-    /// macOS, iOS, iPadOS, visionOS: connect to a Screen Q host and view/control.
+    /// macOS, iOS, iPadOS: connect to a remote host and view/control.
     case viewer
-    /// iOS, iPadOS only: share this device's screen view-only via ReplayKit.
+    /// Legacy iOS/iPadOS ReplayKit experiment. Kept for compatibility, not marketed.
     case iosScreenShare
     /// Any platform: read-only help screen explaining Apple-native alternatives.
     case appleNativeAlternatives
 
     var id: String { rawValue }
+
+    static var primaryRoles: [DeviceRole] {
+        [.hostMac, .viewer, .appleNativeAlternatives]
+    }
 
     var title: String {
         switch self {
@@ -34,11 +38,11 @@ enum DeviceRole: String, CaseIterable, Identifiable, Codable {
         case .hostMac:
             return "Let a paired viewer see and control this Mac after explicit consent."
         case .viewer:
-            return "Discover hosts on your network or connect by hostname / Tailscale name."
+            return "Discover Macs, connect by hostname / Tailscale name, or open Windows RDP."
         case .iosScreenShare:
-            return "View-only screen sharing using ReplayKit. Touch control is not possible."
+            return "Legacy ReplayKit experiment. Use Apple-native options for iPhone and iPad."
         case .appleNativeAlternatives:
-            return "FaceTime SharePlay, iPhone Mirroring, Universal Control, and Screen Sharing."
+            return "iPhone Mirroring, FaceTime SharePlay, Universal Control, and Screen Sharing."
         }
     }
 
@@ -63,11 +67,7 @@ enum DeviceRole: String, CaseIterable, Identifiable, Codable {
         case .viewer:
             return true
         case .iosScreenShare:
-            #if os(iOS)
-            return true
-            #else
             return false
-            #endif
         case .appleNativeAlternatives:
             return true
         }

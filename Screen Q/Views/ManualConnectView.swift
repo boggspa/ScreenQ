@@ -201,8 +201,8 @@ struct ManualConnectView: View {
             .foregroundColor(.secondary)
         case .rdp:
             VStack(alignment: .leading, spacing: 6) {
-                Label("RDP preview: use the Windows PC's Tailscale IP or MagicDNS name with port 3389.", systemImage: "pc")
-                Label("Screen Q can import .rdp profiles and preflight reachability; live rendering needs the FreeRDP engine bridge.", systemImage: "puzzlepiece.extension")
+                Label("RDP: use the Windows PC's Tailscale IP or MagicDNS name with port 3389.", systemImage: "pc")
+                Label("Screen Q imports .rdp profiles, stores credentials in Keychain, reviews certificates, and uses the bundled FreeRDP bridge for live sessions.", systemImage: "puzzlepiece.extension")
                 Label(rdpSecurityHint, systemImage: rdpSecurityIcon)
                     .foregroundColor(rdpSecurityTint)
                 Button {
@@ -241,7 +241,7 @@ struct ManualConnectView: View {
             Button {
                 selectProtocol(.rdp)
             } label: {
-                Label("RDP / Windows preview", systemImage: selectedProtocol == .rdp ? "checkmark" : "pc")
+                Label("RDP / Windows", systemImage: selectedProtocol == .rdp ? "checkmark" : "pc")
             }
         } label: {
             Label(selectedProtocol.displayName, systemImage: selectedProtocol.systemImage)

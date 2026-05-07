@@ -784,6 +784,7 @@ struct RemoteScreenView: View {
     @ObservedObject var session: ViewerSession
     @ObservedObject private var renderer: RemoteScreenRenderer
     @ObservedObject private var stats: TransportStats
+    @ObservedObject private var recorder: SessionRecorder
     var onDisconnect: () -> Void
 
     @StateObject private var controlPreferences: ViewerControlPreferences
@@ -795,6 +796,7 @@ struct RemoteScreenView: View {
         self.session = session
         self.renderer = session.renderer
         self.stats = session.stats
+        self._recorder = ObservedObject(wrappedValue: session.recorder)
         self.onDisconnect = onDisconnect
         self._controlPreferences = StateObject(wrappedValue: ViewerControlPreferences(scope: session.controlPreferenceScope))
     }
@@ -839,6 +841,7 @@ struct RemoteScreenView: View {
         }
         .onChange(of: session.phase) { _ in
             applyStreamControls()
+            stopRecordingIfSessionInactive()
         }
         .onChange(of: session.activeShareTargetID) { _ in
             resetViewport()
@@ -851,6 +854,14 @@ struct RemoteScreenView: View {
                 connectionProtocol: .screenQ,
                 image: image
             )
+        }
+        .onReceive(renderer.$currentImage.compactMap { $0 }) { image in
+            recorder.appendFrame(image)
+        }
+        .onDisappear {
+            if recorder.isRecording {
+                recorder.stop()
+            }
         }
     }
 
@@ -910,6 +921,12 @@ struct RemoteScreenView: View {
                         .foregroundColor(session.encryptionEnabled ? .green : .orange)
                         .lineLimit(1)
                 }
+                if recorder.isRecording {
+                    Label(recordingDurationLabel, systemImage: "record.circle.fill")
+                        .font(.caption.bold())
+                        .foregroundColor(.red)
+                        .lineLimit(1)
+                }
             }
             .fixedSize(horizontal: true, vertical: false)
 
@@ -958,6 +975,11 @@ struct RemoteScreenView: View {
     private var rttLabel: String {
         guard stats.roundTripMillis > 0 else { return "RTT --" }
         return String(format: "%.0f ms RTT", stats.roundTripMillis)
+    }
+
+    private var recordingDurationLabel: String {
+        let totalSeconds = Int(recorder.duration.rounded(.down))
+        return String(format: "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
     }
 
     private var statusSymbol: String {
@@ -1020,6 +1042,7 @@ struct RemoteScreenView: View {
                 detail: "Controls native host bitrate, frame cadence, viewport-aware detail, and compression.",
                 compact: true
             )
+            recordingButton
             Button {
                 controlPreferences.showCursorOverlay.toggle()
             } label: {
@@ -1120,6 +1143,17 @@ struct RemoteScreenView: View {
             #endif
             #endif
         }
+    }
+
+    private var recordingButton: some View {
+        Button {
+            toggleRecording()
+        } label: {
+            Image(systemName: recorder.isRecording ? "stop.circle.fill" : "record.circle")
+                .foregroundColor(recorder.isRecording ? .red : .primary)
+        }
+        .disabled(!recorder.isRecording && !canStartRecording)
+        .help(recorder.isRecording ? "Stop recording" : "Record session")
     }
 
     @ViewBuilder
@@ -1470,6 +1504,32 @@ struct RemoteScreenView: View {
         #if os(iOS)
         sendViewportHint(canvasSize: lastCanvasSize, viewport: viewport, force: true)
         #endif
+    }
+
+    private var canStartRecording: Bool {
+        renderer.currentImage != nil || renderer.format != nil
+    }
+
+    private func toggleRecording() {
+        if recorder.isRecording {
+            recorder.stop()
+            return
+        }
+        if let image = renderer.currentImage {
+            recorder.start(width: image.width, height: image.height)
+        } else if let format = renderer.format {
+            recorder.start(width: format.pixelWidth, height: format.pixelHeight)
+        }
+    }
+
+    private func stopRecordingIfSessionInactive() {
+        guard recorder.isRecording else { return }
+        switch session.phase {
+        case .approved, .streaming, .viewOnly:
+            return
+        default:
+            recorder.stop()
+        }
     }
 
     #if os(iOS)

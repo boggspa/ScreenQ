@@ -77,7 +77,7 @@ struct MultiObserveView: View {
                         .foregroundColor(.secondary)
                     Text("No observed machines")
                         .font(.headline)
-                    Text("Add computers from the fleet sidebar to observe them.")
+                    Text("Open two or more sessions, then use the multi-observe button.")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
@@ -163,4 +163,283 @@ private struct ObserveTileView: View {
         .background(Color.gray.opacity(0.12))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
+}
+
+struct MultiObserveSessionGrid: View {
+    @ObservedObject var store: ViewerSessionStore
+    var onSelectSession: (UUID) -> Void
+
+    private let columns = [
+        GridItem(.adaptive(minimum: 280, maximum: 460), spacing: 12)
+    ]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Label("Multi-Observe", systemImage: "rectangle.3.group")
+                    .font(.headline)
+                Text("\(store.sessions.count) live")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Color.black.opacity(0.55))
+
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 12) {
+                    ForEach(store.sessions) { slot in
+                        LiveSessionObserveTile(
+                            slot: slot,
+                            onSelect: { onSelectSession(slot.id) },
+                            onClose: {
+                                Task { await store.closeSession(id: slot.id) }
+                            }
+                        )
+                    }
+                }
+                .padding(16)
+            }
+            .background(Color.black)
+        }
+    }
+}
+
+private struct LiveSessionObserveTile: View {
+    let slot: ViewerSessionSlot
+    var onSelect: () -> Void
+    var onClose: () -> Void
+
+    var body: some View {
+        switch slot.kind {
+        case .screenQ(let session):
+            ScreenQObserveSessionTile(
+                label: slot.label,
+                session: session,
+                onSelect: onSelect,
+                onClose: onClose
+            )
+        case .vnc(let session):
+            VNCObserveSessionTile(
+                label: slot.label,
+                session: session,
+                onSelect: onSelect,
+                onClose: onClose
+            )
+        case .rdp(let session):
+            RDPObserveSessionTile(
+                label: slot.label,
+                session: session,
+                onSelect: onSelect,
+                onClose: onClose
+            )
+        }
+    }
+}
+
+private struct ScreenQObserveSessionTile: View {
+    let label: String
+    @ObservedObject var session: ViewerSession
+    @ObservedObject private var renderer: RemoteScreenRenderer
+    var onSelect: () -> Void
+    var onClose: () -> Void
+
+    init(label: String, session: ViewerSession, onSelect: @escaping () -> Void, onClose: @escaping () -> Void) {
+        self.label = label
+        self.session = session
+        self._renderer = ObservedObject(wrappedValue: session.renderer)
+        self.onSelect = onSelect
+        self.onClose = onClose
+    }
+
+    var body: some View {
+        ObserveSessionTileChrome(
+            label: label,
+            detail: session.phase.humanDescription,
+            systemImage: "display",
+            statusColor: session.phase.isActive ? .green : .secondary,
+            onSelect: onSelect,
+            onClose: onClose
+        ) {
+            if let image = renderer.currentImage {
+                observeImage(image)
+            } else if let region = renderer.currentRegionFrame {
+                observeImage(region.image)
+            } else {
+                tilePlaceholder("Waiting for frames")
+            }
+        }
+    }
+}
+
+private struct VNCObserveSessionTile: View {
+    let label: String
+    @ObservedObject var session: VNCSession
+    var onSelect: () -> Void
+    var onClose: () -> Void
+
+    var body: some View {
+        ObserveSessionTileChrome(
+            label: label,
+            detail: vncStatus,
+            systemImage: "rectangle.on.rectangle",
+            statusColor: vncStatusColor,
+            onSelect: onSelect,
+            onClose: onClose
+        ) {
+            if let image = session.currentImage {
+                observeImage(image)
+            } else {
+                tilePlaceholder("Waiting for framebuffer")
+            }
+        }
+    }
+
+    private var vncStatus: String {
+        switch session.phase {
+        case .connecting: return "Connecting"
+        case .authenticating: return "Authenticating"
+        case .connected: return session.serverWidth > 0 ? "\(session.serverWidth)x\(session.serverHeight)" : "Connected"
+        case .reconnecting(let attempt): return "Reconnecting \(attempt)"
+        case .failed: return "Failed"
+        case .ended: return "Ended"
+        }
+    }
+
+    private var vncStatusColor: Color {
+        switch session.phase {
+        case .connected: return .green
+        case .failed: return .red
+        case .reconnecting: return .orange
+        default: return .secondary
+        }
+    }
+}
+
+private struct RDPObserveSessionTile: View {
+    let label: String
+    @ObservedObject var session: RDPSession
+    var onSelect: () -> Void
+    var onClose: () -> Void
+
+    var body: some View {
+        ObserveSessionTileChrome(
+            label: label,
+            detail: rdpStatus,
+            systemImage: "pc",
+            statusColor: rdpStatusColor,
+            onSelect: onSelect,
+            onClose: onClose
+        ) {
+            if let image = session.currentImage {
+                observeImage(image)
+            } else {
+                tilePlaceholder("Waiting for RDP frames")
+            }
+        }
+    }
+
+    private var rdpStatus: String {
+        switch session.phase {
+        case .preflighting: return "Preflighting"
+        case .credentialsRequired: return "Credentials required"
+        case .connecting: return "Connecting"
+        case .certificateTrustRequired: return "Certificate review"
+        case .connected: return session.remoteWidth > 0 ? "\(session.remoteWidth)x\(session.remoteHeight)" : "Connected"
+        case .engineUnavailable: return "Engine unavailable"
+        case .failed: return "Failed"
+        case .ended: return "Ended"
+        }
+    }
+
+    private var rdpStatusColor: Color {
+        switch session.phase {
+        case .connected: return .green
+        case .failed, .engineUnavailable: return .red
+        case .certificateTrustRequired, .credentialsRequired: return .orange
+        default: return .secondary
+        }
+    }
+}
+
+private struct ObserveSessionTileChrome<FrameContent: View>: View {
+    let label: String
+    let detail: String
+    let systemImage: String
+    let statusColor: Color
+    var onSelect: () -> Void
+    var onClose: () -> Void
+    @ViewBuilder var frameContent: () -> FrameContent
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                Color.black
+                frameContent()
+            }
+            .aspectRatio(16 / 10, contentMode: .fit)
+            .clipped()
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onSelect)
+
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 7, height: 7)
+                Image(systemName: systemImage)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(label)
+                        .font(.caption.bold())
+                        .lineLimit(1)
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                Button {
+                    onClose()
+                } label: {
+                    Image(systemName: "xmark.circle")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .help("Close \(label)")
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .background(Color.gray.opacity(0.14))
+        }
+        .background(Color.gray.opacity(0.14))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.secondary.opacity(0.18), lineWidth: 1)
+        )
+        .contextMenu {
+            Button("Open") { onSelect() }
+            Button("Close") { onClose() }
+        }
+    }
+}
+
+private func observeImage(_ image: CGImage) -> some View {
+    Image(decorative: image, scale: 1.0)
+        .resizable()
+        .interpolation(.medium)
+        .aspectRatio(contentMode: .fit)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+}
+
+private func tilePlaceholder(_ text: String) -> some View {
+    VStack(spacing: 8) {
+        ProgressView()
+        Text(text)
+            .font(.caption)
+            .foregroundColor(.secondary)
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
 }

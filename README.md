@@ -21,19 +21,13 @@ inside public Apple APIs.
   remote pointer + keyboard injection via Accessibility +
   [`CGEvent`](https://developer.apple.com/documentation/coregraphics/cgevent).
   Pairing-code consent + explicit host approval gate every session.
-- **Viewer** (macOS, iOS, iPadOS, visionOS): discover Mac hosts via
+- **Viewer** (macOS, iOS, iPadOS): discover Mac hosts via
   Bonjour `_screenq._tcp`, or connect manually by hostname/IP/port (works
   with LAN, VPN, or Tailscale).
-- **iPhone / iPad screen-sharing scaffold**: ReplayKit
-  `RPSystemBroadcastPickerView` exposed inside the app, plus a sibling
-  `ScreenQBroadcastExtension/` folder containing the `SampleHandler` and
-  `BroadcastSetupViewController` ready to drop into a Broadcast Upload
-  Extension target. Touch / pointer / keyboard injection into iOS or
-  iPadOS is intentionally **not** implemented — Apple does not expose
-  any third-party API for it.
 - **Apple-native alternatives** help screen explaining FaceTime SharePlay
   Remote Control, iPhone Mirroring, Universal Control, Switch Control,
-  and the built-in Mac Screen Sharing flow.
+  and the built-in Mac Screen Sharing flow. Screen Q does not market
+  iPhone/iPad ReplayKit sharing as a commercial remote-control path.
 - **Pairing flow**: 6-digit code shown on host, viewer enters it, host
   must explicitly approve the request before any video frame or input
   event can flow.
@@ -46,6 +40,16 @@ inside public Apple APIs.
 - **Security & Trust view**: local inventory for saved connections,
   pinned Screen Q identities, credential boundaries, and recent audit
   entries, including reviewed RDP certificate pins.
+- **RDP / Windows route**: `.rdp` import, Keychain-backed credentials,
+  certificate review/pinning, live frame/input bridge integration, and an
+  explicit packaging error when the FreeRDP bridge is not bundled.
+- **File transfer**: permission-gated chunked transfers with safe
+  filename handling, size/order enforcement, streamed temp files, and
+  progress UI.
+- **Multi-observe**: a live tile overview for active Screen Q, VNC, and
+  RDP sessions.
+- **Session recording**: viewer-side `.mov` recording from decoded
+  Screen Q, VNC, and RDP frames.
 
 ### Beta
 
@@ -55,10 +59,6 @@ inside public Apple APIs.
   macOS account credentials through Apple's RFB authentication extension
   when offered; generic VNC remains a legacy password-only compatibility
   route. Screen Q's native protocol remains separate on port `38745`.
-- **RDP bridge scaffold**: Screen Q can import `.rdp` profiles and load
-  a native `ScreenQFreeRDPBridge` dylib at runtime. The app target does
-  not link FreeRDP directly; build the bridge separately with
-  `Scripts/build_freerdp_bridge.sh`.
 - **Advanced Mac-session features**: clipboard sync, audio forwarding,
   saved connections, multi-display switching, adaptive bitrate, cursor
   overlay, and reconnection are being developed around the native Screen Q
@@ -66,16 +66,19 @@ inside public Apple APIs.
 
 ### Planned
 
-- **Windows access, stage 1**: VNC / RFB compatibility first, so Screen Q
-  viewers can reach Windows machines running compatible VNC servers.
 - **Windows access, stage 2**: a dedicated Windows host agent that speaks
   Screen Q's native protocol.
-- **Windows access, stage 3**: package/cross-compile the FreeRDP bridge
-  for each supported platform, including an iOS-compatible build before
-  RDP can be considered a real iPhone/iPad feature.
-- **Power-user workflows**: file transfer, Wake-on-LAN, curtain mode,
-  performance graphs, session recording, system actions, audit logging,
-  and richer permission presets.
+- **Supportability workflows**: exportable diagnostics, guided connection
+  tests, redacted logs, and richer permission presets.
+
+### Demoted / not marketed
+
+- **Vision Pro** remains a compile target experiment only until it can be
+  tested as a first-class viewer surface.
+- **iPhone / iPad screen sharing** remains Apple-native guidance rather
+  than a Screen Q product path.
+- **Curtain mode** and **fleet/RMM management** are not commercial claims
+  for this product direction.
 
 ## What is intentionally not possible (and never will be in a
 well-behaved third-party app)
@@ -94,7 +97,7 @@ well-behaved third-party app)
 ## Project layout
 
 ```
-Screen Q.xcodeproj          // multiplatform target (iOS, iPadOS, macOS, visionOS)
+Screen Q.xcodeproj          // multiplatform target (macOS, iOS, iPadOS; visionOS experimental)
 Screen Q/
   Screen_QApp.swift         // app entry point
   AppState.swift            // top-level observable state
@@ -331,13 +334,12 @@ and App Store-friendly. Clipboard, audio, drive redirection, and dynamic
 channel features should be re-enabled one at a time with explicit iOS
 dependency packaging and tests.
 
-## iOS Broadcast Upload Extension
+## iOS Broadcast Upload Extension (demoted)
 
-The companion `ScreenQBroadcastExtension/` target is embedded in iOS builds so
-the system broadcast picker can offer **Screen Q Broadcast**. The target
-currently provides the stable ReplayKit capture entry point and setup UI; the
-next transport slice is to upload those sample buffers into a paired Screen Q
-viewer session.
+The companion `ScreenQBroadcastExtension/` target remains in the repository as
+a ReplayKit experiment and compatibility reference. It is not a marketed Screen
+Q remote-control path because iOS and iPadOS do not expose public input
+injection APIs to third-party apps.
 
 The `ScreenQBroadcastExtension/` folder contains:
 
@@ -346,11 +348,9 @@ The `ScreenQBroadcastExtension/` folder contains:
 - `Info.plist` — extension principal class declaration.
 - `README-EXT.md` — implementation notes for the capture/upload transport.
 
-Screen Q also advertises iPhone and iPad devices over Bonjour as
-ReplayKit-capable, share-only peers. They appear in Nearby Devices with
-truthful capabilities: view-only screen capture is possible through Apple's
-broadcast flow, but system-wide remote control is not exposed to third-party
-apps.
+If this code is enabled in a development build, Screen Q should treat nearby
+iPhone and iPad entries as Apple-native guidance, not as connectable commercial
+remote-control sessions.
 
 ## How to enable native Mac Screen Sharing as an alternative
 
@@ -378,8 +378,9 @@ Screen Sharing and Windows VNC hosts.
   `NWConnection`, separate from VNC / RFB.
 - **macOS public-API control path** — ScreenCaptureKit capture and
   Accessibility-backed `CGEvent` input injection.
-- **iOS / iPadOS view-only host scaffolding** — ReplayKit broadcast
-  extension scaffolding for screen sharing, without touch injection.
+- **Apple-native iPhone/iPad guidance** — Screen Q directs users to
+  Apple-managed sharing/control flows instead of marketing ReplayKit as a
+  remote-control product path.
 - **Diagnostics** — deterministic self-tests for protocol framing and
   viewer coordinate mapping.
 
@@ -397,23 +398,22 @@ Screen Sharing and Windows VNC hosts.
 - **iOS trackpad mode** — two-finger scroll, long-press right-click, pinch-to-zoom, three-finger drag
 - **macOS full keyboard capture** — intercepts all keys including system shortcuts
 - **Retina-aware scaling** — native `backingScaleFactor` per display
+- **File drag-and-drop** — chunked transfer with progress and hardened receive-side file handling
+- **Session recording** — `AVAssetWriter` H.264 `.mov` from decoded frame streams
+- **Multi-observe tile view** — simultaneous live thumbnails from active Screen Q, VNC, and RDP sessions
 
 ### Planned prosumer features
 
-- **File drag-and-drop** — chunked transfer with progress, auto-accept, drag onto viewer canvas
 - **Wake-on-LAN** — UDP magic packet sender
-- **Curtain mode** — blanks host display during remote control
 - **Performance graphs** — real-time sparkline for bandwidth, FPS, and RTT
 
 ### Planned administrative features
 
 - **Granular permission model** — 9 flags (observe, control, clipboard, file transfer, remote command, system actions, package install, audio, report) with presets (Full Access / Standard / View Only)
 - **Remote Unix command execution** — shell via `Process`, streamed stdout/stderr in a terminal view
-- **Multi-observe tile view** — simultaneous live thumbnails from multiple hosts
 - **System report / audit** — hardware model, serial, CPU, RAM, disk, IP addresses, installed apps
-- **Computer lists / fleet sidebar** — named groups, IP range scanning, online/offline status
+- **Connection lists** — saved hosts, recents, groups, and detail sheets for personal/studio organization
 - **Custom cursor bitmap** — actual `NSCursor.image` PNG sent to viewer
-- **Session recording** — `AVAssetWriter` H.264 .mov from decoded frame stream
 - **Restart / Sleep / Lock / Log Out / Shutdown** — system actions via AppleScript / pmset
 - **Remote package install** — file transfer + `installer -pkg` CLI
 - **Audit log** — persistent JSON-lines log at `~/Library/Logs/ScreenQ/audit.jsonl`

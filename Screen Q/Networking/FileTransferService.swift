@@ -42,6 +42,8 @@ final class FileTransferService: ObservableObject {
     // MARK: - Configuration
 
     var chunkSize: Int = 64 * 1024  // 64 KB
+    static let maximumTransferBytes: Int64 = 2 * 1024 * 1024 * 1024
+    static let maximumChunkBytes: Int = 2 * 1024 * 1024
     var downloadDirectory: URL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
         ?? FileManager.default.temporaryDirectory
 
@@ -51,7 +53,17 @@ final class FileTransferService: ObservableObject {
 
     // MARK: - Internal state
 
-    private var receiveBuffers: [UUID: Data] = [:]
+    private struct ReceiveState {
+        let fileName: String
+        let fileSize: Int64
+        let mimeType: String
+        var tempURL: URL?
+        var fileHandle: FileHandle?
+        var receivedBytes: Int64 = 0
+        var expectedChunkIndex: Int = 0
+    }
+
+    private var receiveStates: [UUID: ReceiveState] = [:]
     private var acceptedIncomingTransfers: Set<UUID> = []
     private var sendStreams: [UUID: FileReadStream] = [:]
 
@@ -101,9 +113,30 @@ final class FileTransferService: ObservableObject {
 
     /// Handle an incoming file offer from the remote peer.
     func handleOffer(_ offer: FileOfferMessage) {
+        guard let safeFileName = Self.sanitizedFileName(offer.fileName) else {
+            rejectIncomingOffer(offer.transferID, fileName: "Rejected file", reason: "Invalid file name")
+            Logger.shared.warn("FileTransfer: rejected offer with unsafe file name \(offer.fileName)")
+            return
+        }
+        guard offer.fileSize >= 0, offer.fileSize <= Self.maximumTransferBytes else {
+            rejectIncomingOffer(offer.transferID, fileName: safeFileName, reason: "File exceeds the \(ByteFormatting.human(Int(Self.maximumTransferBytes))) transfer limit")
+            Logger.shared.warn("FileTransfer: rejected \(safeFileName), invalid size \(offer.fileSize)")
+            return
+        }
+        guard offer.chunkSize > 0, offer.chunkSize <= Self.maximumChunkBytes else {
+            rejectIncomingOffer(offer.transferID, fileName: safeFileName, reason: "Invalid transfer chunk size")
+            Logger.shared.warn("FileTransfer: rejected \(safeFileName), invalid chunk size \(offer.chunkSize)")
+            return
+        }
+        guard receiveStates[offer.transferID] == nil else {
+            rejectIncomingOffer(offer.transferID, fileName: safeFileName, reason: "Duplicate transfer ID")
+            Logger.shared.warn("FileTransfer: rejected duplicate transfer \(offer.transferID)")
+            return
+        }
+
         let transfer = FileTransfer(
             id: offer.transferID,
-            fileName: offer.fileName,
+            fileName: safeFileName,
             fileSize: offer.fileSize,
             mimeType: offer.mimeType,
             state: .offered,
@@ -111,18 +144,40 @@ final class FileTransferService: ObservableObject {
             localURL: nil
         )
         incomingTransfers.append(transfer)
-        receiveBuffers[offer.transferID] = Data()
-        Logger.shared.info("FileTransfer: incoming offer \(offer.fileName) (\(offer.fileSize) bytes) awaiting user approval")
+        receiveStates[offer.transferID] = ReceiveState(
+            fileName: safeFileName,
+            fileSize: offer.fileSize,
+            mimeType: offer.mimeType
+        )
+        Logger.shared.info("FileTransfer: incoming offer \(safeFileName) (\(offer.fileSize) bytes) awaiting user approval")
     }
 
     /// Accept an incoming file offer.
     func acceptTransfer(_ transferID: UUID) {
-        if let idx = incomingTransfers.firstIndex(where: { $0.id == transferID }) {
-            guard incomingTransfers[idx].state == .offered else { return }
+        guard let idx = incomingTransfers.firstIndex(where: { $0.id == transferID }),
+              incomingTransfers[idx].state == .offered,
+              var state = receiveStates[transferID] else { return }
+
+        do {
+            let tempURL = try makeReceiveTempURL(transferID: transferID, fileName: state.fileName)
+            guard FileManager.default.createFile(atPath: tempURL.path, contents: nil) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            let handle = try FileHandle(forWritingTo: tempURL)
+            state.tempURL = tempURL
+            state.fileHandle = handle
+            state.receivedBytes = 0
+            state.expectedChunkIndex = 0
+            receiveStates[transferID] = state
             incomingTransfers[idx].state = .receiving
+            acceptedIncomingTransfers.insert(transferID)
+            sendMessage?(.fileAccept, FileAcceptMessage(transferID: transferID))
+        } catch {
+            incomingTransfers[idx].state = .failed("Could not prepare download: \(error.localizedDescription)")
+            receiveStates.removeValue(forKey: transferID)
+            sendMessage?(.fileReject, FileRejectMessage(transferID: transferID, reason: "Could not prepare download"))
+            Logger.shared.error("FileTransfer: failed to prepare incoming transfer \(transferID): \(error)")
         }
-        acceptedIncomingTransfers.insert(transferID)
-        sendMessage?(.fileAccept, FileAcceptMessage(transferID: transferID))
     }
 
     /// Reject an incoming file offer.
@@ -131,7 +186,7 @@ final class FileTransferService: ObservableObject {
         if let idx = incomingTransfers.firstIndex(where: { $0.id == transferID }) {
             incomingTransfers[idx].state = .rejected(reason)
         }
-        receiveBuffers.removeValue(forKey: transferID)
+        cleanupReceiveState(transferID)
         acceptedIncomingTransfers.remove(transferID)
     }
 
@@ -139,34 +194,65 @@ final class FileTransferService: ObservableObject {
 
     func handleChunk(_ chunk: FileChunkMessage) {
         guard acceptedIncomingTransfers.contains(chunk.transferID) else { return }
-        guard var buffer = receiveBuffers[chunk.transferID] else { return }
-        guard let chunkData = Data(base64Encoded: chunk.base64Data) else { return }
-        buffer.append(chunkData)
-        receiveBuffers[chunk.transferID] = buffer
+        guard var state = receiveStates[chunk.transferID],
+              let handle = state.fileHandle else { return }
+        guard chunk.chunkIndex == state.expectedChunkIndex else {
+            failReceive(chunk.transferID, reason: "Received chunk \(chunk.chunkIndex) out of order")
+            return
+        }
+        guard let chunkData = Data(base64Encoded: chunk.base64Data) else {
+            failReceive(chunk.transferID, reason: "Received invalid chunk data")
+            return
+        }
+        guard state.receivedBytes + Int64(chunkData.count) <= state.fileSize else {
+            failReceive(chunk.transferID, reason: "Received more data than the offered file size")
+            return
+        }
+
+        do {
+            try handle.write(contentsOf: chunkData)
+        } catch {
+            failReceive(chunk.transferID, reason: "Could not write incoming file: \(error.localizedDescription)")
+            return
+        }
+
+        state.receivedBytes += Int64(chunkData.count)
+        state.expectedChunkIndex += 1
+        receiveStates[chunk.transferID] = state
 
         // Update progress.
         if let idx = incomingTransfers.firstIndex(where: { $0.id == chunk.transferID }) {
             let total = incomingTransfers[idx].fileSize
             if total > 0 {
-                incomingTransfers[idx].progress = Double(buffer.count) / Double(total)
+                incomingTransfers[idx].progress = min(1, Double(state.receivedBytes) / Double(total))
+            } else if chunk.isLast {
+                incomingTransfers[idx].progress = 1
             }
         }
 
         if chunk.isLast {
+            guard state.receivedBytes == state.fileSize else {
+                failReceive(chunk.transferID, reason: "Transfer ended before all bytes arrived")
+                return
+            }
             finaliseReceive(chunk.transferID)
         }
     }
 
     private func finaliseReceive(_ transferID: UUID) {
-        guard let buffer = receiveBuffers.removeValue(forKey: transferID),
+        guard var state = receiveStates.removeValue(forKey: transferID),
+              let tempURL = state.tempURL,
               let idx = incomingTransfers.firstIndex(where: { $0.id == transferID }) else { return }
         acceptedIncomingTransfers.remove(transferID)
+        try? state.fileHandle?.close()
+        state.fileHandle = nil
 
-        let fileName = incomingTransfers[idx].fileName
+        let fileName = state.fileName
         let destURL = uniqueDestination(for: fileName)
 
         do {
-            try buffer.write(to: destURL)
+            try FileManager.default.createDirectory(at: downloadDirectory, withIntermediateDirectories: true)
+            try FileManager.default.moveItem(at: tempURL, to: destURL)
             incomingTransfers[idx].state = .completed
             incomingTransfers[idx].progress = 1.0
             incomingTransfers[idx].localURL = destURL
@@ -179,6 +265,7 @@ final class FileTransferService: ObservableObject {
             ))
         } catch {
             incomingTransfers[idx].state = .failed(error.localizedDescription)
+            try? FileManager.default.removeItem(at: tempURL)
             Logger.shared.error("FileTransfer: failed to write \(fileName): \(error)")
 
             sendMessage?(.fileComplete, FileCompleteMessage(
@@ -231,6 +318,21 @@ final class FileTransferService: ObservableObject {
         var chunkIndex = 0
         var totalSent: Int64 = 0
 
+        if fileSize == 0 {
+            let chunk = FileChunkMessage(
+                transferID: transferID,
+                chunkIndex: 0,
+                base64Data: "",
+                isLast: true
+            )
+            sendMessage?(.fileChunk, chunk)
+            if let idx = outgoingTransfers.firstIndex(where: { $0.id == transferID }) {
+                outgoingTransfers[idx].progress = 1
+            }
+            Logger.shared.info("FileTransfer: sent empty file \(fileURL.lastPathComponent)")
+            return
+        }
+
         while true {
             guard let data = try? handle.read(upToCount: chunkSize), !data.isEmpty else {
                 break
@@ -263,8 +365,61 @@ final class FileTransferService: ObservableObject {
 
     // MARK: - Helpers
 
+    nonisolated static func sanitizedFileName(_ rawName: String) -> String? {
+        let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard trimmed == (trimmed as NSString).lastPathComponent else { return nil }
+        guard !trimmed.contains("/") && !trimmed.contains("\\") && !trimmed.contains(":") else { return nil }
+        guard trimmed != "." && trimmed != ".." else { return nil }
+        guard trimmed.rangeOfCharacter(from: .controlCharacters) == nil else { return nil }
+        return trimmed
+    }
+
+    private func rejectIncomingOffer(_ transferID: UUID, fileName: String, reason: String) {
+        sendMessage?(.fileReject, FileRejectMessage(transferID: transferID, reason: reason))
+        incomingTransfers.append(FileTransfer(
+            id: transferID,
+            fileName: fileName,
+            fileSize: 0,
+            mimeType: "application/octet-stream",
+            state: .rejected(reason),
+            progress: 0,
+            localURL: nil
+        ))
+    }
+
+    private func failReceive(_ transferID: UUID, reason: String) {
+        cleanupReceiveState(transferID)
+        acceptedIncomingTransfers.remove(transferID)
+        if let idx = incomingTransfers.firstIndex(where: { $0.id == transferID }) {
+            incomingTransfers[idx].state = .failed(reason)
+        }
+        sendMessage?(.fileComplete, FileCompleteMessage(
+            transferID: transferID,
+            success: false,
+            savedPath: nil
+        ))
+        Logger.shared.error("FileTransfer: failed incoming transfer \(transferID): \(reason)")
+    }
+
+    private func cleanupReceiveState(_ transferID: UUID) {
+        guard var state = receiveStates.removeValue(forKey: transferID) else { return }
+        try? state.fileHandle?.close()
+        state.fileHandle = nil
+        if let tempURL = state.tempURL {
+            try? FileManager.default.removeItem(at: tempURL)
+        }
+    }
+
+    private func makeReceiveTempURL(transferID: UUID, fileName: String) throws -> URL {
+        let tempDir = downloadDirectory.appendingPathComponent(".screenq-incoming", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        return tempDir.appendingPathComponent("\(transferID.uuidString)-\(fileName)")
+    }
+
     private func uniqueDestination(for fileName: String) -> URL {
-        var dest = downloadDirectory.appendingPathComponent(fileName)
+        let safeFileName = Self.sanitizedFileName(fileName) ?? "ScreenQ Transfer"
+        var dest = downloadDirectory.appendingPathComponent(safeFileName)
         var counter = 1
         let name = dest.deletingPathExtension().lastPathComponent
         let ext = dest.pathExtension

@@ -87,7 +87,7 @@ struct HomeView: View {
                 header
                 Divider()
                 LazyVGrid(columns: gridColumns, spacing: 16) {
-                    ForEach(DeviceRole.allCases) { role in
+                    ForEach(DeviceRole.primaryRoles) { role in
                         Button {
                             requestRoleSelection(role)
                         } label: {
@@ -138,7 +138,7 @@ struct HomeView: View {
                     header
                     Divider()
                     LazyVGrid(columns: gridColumns, spacing: 16) {
-                        ForEach(DeviceRole.allCases) { role in
+                        ForEach(DeviceRole.primaryRoles) { role in
                             NavigationLink(destination: RoleDetailView(role: role)) {
                                 RoleCard(role: role, isSelected: false)
                             }
@@ -182,13 +182,13 @@ struct HomeView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
             #if os(iOS)
-            Text("Share and control Macs. View iPhone and iPad screens with Apple-safe guidance.")
+            Text("Control Macs and Windows PCs over LAN, Tailscale, or VPN.")
                 .font(.headline)
                 .foregroundColor(.secondary)
             #else
             Text("Screen Q")
                 .font(.largeTitle).bold()
-            Text("Share and control Macs. View iPhone and iPad screens with Apple-safe guidance.")
+            Text("Control Macs and Windows PCs over LAN, Tailscale, or VPN.")
                 .font(.title3)
                 .foregroundColor(.secondary)
             #endif
@@ -198,7 +198,7 @@ struct HomeView: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: 6) {
             Label("Local network discovery uses Bonjour. Connect across networks via Tailscale or your VPN.", systemImage: "network")
-            Label("iPhone and iPad cannot be remote-controlled by third-party apps. Screen Q is honest about this.", systemImage: "exclamationmark.shield")
+            Label("iPhone and iPad control stays with Apple-native options instead of private APIs.", systemImage: "exclamationmark.shield")
         }
         .font(.footnote)
         .foregroundColor(.secondary)

@@ -40,6 +40,7 @@ final class RDPSession: ObservableObject {
     let profile: RDPConnectionProfile
     let inputMapper = InputMappingService()
     let stats = TransportStats()
+    let recorder = SessionRecorder()
 
     private var engine: RDPEngine?
     private var eventTask: Task<Void, Never>?

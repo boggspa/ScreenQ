@@ -23,25 +23,52 @@ final class PackageInstallService {
     }
 
     func install(_ request: PackageInstallRequestMessage) async -> PackageInstallResultMessage {
-        let pkgURL = downloadDirectory.appendingPathComponent(request.fileName)
+        guard let safeFileName = FileTransferService.sanitizedFileName(request.fileName) else {
+            return PackageInstallResultMessage(
+                installID: request.installID,
+                success: false,
+                output: "Invalid package file name"
+            )
+        }
+
+        guard request.targetVolume == "/" else {
+            return PackageInstallResultMessage(
+                installID: request.installID,
+                success: false,
+                output: "Unsupported install target: \(request.targetVolume)"
+            )
+        }
+
+        let downloadsRoot = downloadDirectory.resolvingSymlinksInPath().standardizedFileURL
+        let pkgURL = downloadDirectory
+            .appendingPathComponent(safeFileName, isDirectory: false)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        guard pkgURL.deletingLastPathComponent() == downloadsRoot else {
+            return PackageInstallResultMessage(
+                installID: request.installID,
+                success: false,
+                output: "Package must be inside the managed download directory"
+            )
+        }
 
         guard FileManager.default.fileExists(atPath: pkgURL.path) else {
             return PackageInstallResultMessage(
                 installID: request.installID,
                 success: false,
-                output: "Package file not found: \(request.fileName)"
+                output: "Package file not found: \(safeFileName)"
             )
         }
 
-        guard pkgURL.pathExtension == "pkg" else {
+        guard pkgURL.pathExtension.lowercased() == "pkg" else {
             return PackageInstallResultMessage(
                 installID: request.installID,
                 success: false,
-                output: "Not a .pkg file: \(request.fileName)"
+                output: "Not a .pkg file: \(safeFileName)"
             )
         }
 
-        Logger.shared.info("PackageInstall: installing \(request.fileName) to \(request.targetVolume)")
+        Logger.shared.info("PackageInstall: installing \(safeFileName) to \(request.targetVolume)")
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/installer")
@@ -59,9 +86,9 @@ final class PackageInstallService {
             let success = process.terminationStatus == 0
 
             if success {
-                Logger.shared.info("PackageInstall: success for \(request.fileName)")
+                Logger.shared.info("PackageInstall: success for \(safeFileName)")
             } else {
-                Logger.shared.error("PackageInstall: failed (\(process.terminationStatus)) for \(request.fileName)")
+                Logger.shared.error("PackageInstall: failed (\(process.terminationStatus)) for \(safeFileName)")
             }
 
             return PackageInstallResultMessage(

@@ -116,7 +116,7 @@ final class AppState: ObservableObject {
 
     let adaptiveBitrate = AdaptiveBitrateController()
 
-    // MARK: - Fleet management
+    // MARK: - Connection organization
 
     let computerList = ComputerListStore()
     let multiObserve = MultiObserveStore()

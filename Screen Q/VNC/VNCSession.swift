@@ -269,6 +269,7 @@ final class VNCSession: ObservableObject {
     @Published private(set) var streamProfile = StreamQualityPreference().nativeProfile
     @Published private(set) var firstFrameTelemetry = VNCFirstFrameTelemetry()
     let inputMapper = InputMappingService()
+    let recorder = SessionRecorder()
 
     // Cursor tracking for iOS overlay.
     @Published private(set) var cursorViewX: Int = 0

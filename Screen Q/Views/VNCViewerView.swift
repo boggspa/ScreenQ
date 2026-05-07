@@ -15,6 +15,7 @@ import UIKit
 struct VNCViewerView: View {
     @EnvironmentObject private var app: AppState
     @ObservedObject var session: VNCSession
+    @ObservedObject private var recorder: SessionRecorder
     var onDisconnect: () -> Void
     @StateObject private var controlPreferences: ViewerControlPreferences
     @State private var metalRenderTimer: Timer?
@@ -31,6 +32,7 @@ struct VNCViewerView: View {
 
     init(session: VNCSession, onDisconnect: @escaping () -> Void) {
         self.session = session
+        self._recorder = ObservedObject(wrappedValue: session.recorder)
         self.onDisconnect = onDisconnect
         self._controlPreferences = StateObject(wrappedValue: ViewerControlPreferences(scope: session.controlPreferenceScope))
     }
@@ -87,6 +89,9 @@ struct VNCViewerView: View {
                     protocolName: session.profile.displayName,
                     detail: "Controls VNC request cadence, viewport size, and local framebuffer rendering. Tight compression-level support can build on this."
                 )
+            }
+            ToolbarItem(placement: .automatic) {
+                recordingButton
             }
             #if os(macOS)
             ToolbarItem(placement: .automatic) {
@@ -155,6 +160,9 @@ struct VNCViewerView: View {
         .onReceive(controlPreferences.$streamProfile.removeDuplicates()) { _ in
             Task { await applyStreamControls() }
         }
+        .onChange(of: session.phase) { _ in
+            stopRecordingIfSessionInactive()
+        }
         #if os(iOS)
         .onChange(of: touchMode) { _, newValue in
             controlPreferences.touchMode = newValue
@@ -173,6 +181,14 @@ struct VNCViewerView: View {
                 connectionProtocol: session.savedConnectionProtocol,
                 image: image
             )
+        }
+        .onReceive(session.$currentImage.compactMap { $0 }) { image in
+            recorder.appendFrame(image)
+        }
+        .onDisappear {
+            if recorder.isRecording {
+                recorder.stop()
+            }
         }
     }
 
@@ -548,8 +564,42 @@ struct VNCViewerView: View {
         return "Enter the VNC password configured on the remote host."
     }
 
+    private var recordingButton: some View {
+        Button {
+            toggleRecording()
+        } label: {
+            Image(systemName: recorder.isRecording ? "stop.circle.fill" : "record.circle")
+                .foregroundColor(recorder.isRecording ? .red : .primary)
+        }
+        .disabled(!recorder.isRecording && session.currentImage == nil && (session.serverWidth <= 0 || session.serverHeight <= 0))
+        .help(recorder.isRecording ? "Stop recording" : "Record session")
+    }
+
+    private func toggleRecording() {
+        if recorder.isRecording {
+            recorder.stop()
+            return
+        }
+        if let image = session.currentImage {
+            recorder.start(width: image.width, height: image.height)
+        } else {
+            recorder.start(width: session.serverWidth, height: session.serverHeight)
+        }
+    }
+
+    private func stopRecordingIfSessionInactive() {
+        guard recorder.isRecording else { return }
+        if case .connected = session.phase {
+            return
+        }
+        recorder.stop()
+    }
+
     private func disconnectAndExit() {
         Task {
+            if recorder.isRecording {
+                recorder.stop()
+            }
             await session.disconnect()
             onDisconnect()
         }

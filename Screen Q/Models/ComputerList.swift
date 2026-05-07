@@ -2,8 +2,9 @@
 //  ComputerList.swift
 //  Screen Q
 //
-//  Named groups of computers for fleet management, similar to ARD's
-//  computer lists. Persisted in UserDefaults.
+//  Named groups of computers for personal/studio connection organization.
+//  Persisted in UserDefaults. The historical "Fleet" keys stay for
+//  compatibility with existing local data.
 //
 
 import Foundation

@@ -2,8 +2,8 @@
 //  RDPViewerView.swift
 //  Screen Q
 //
-//  Preview surface for the Windows RDP route. It makes the current boundary
-//  explicit instead of leaving users at a generic spinner.
+//  Viewer surface for the Windows RDP route. It handles credentials,
+//  certificate trust, live frames, input, quality controls, and recording.
 //
 
 import SwiftUI
@@ -17,6 +17,7 @@ struct RDPViewerView: View {
     @EnvironmentObject private var app: AppState
     @ObservedObject var session: RDPSession
     @ObservedObject private var stats: TransportStats
+    @ObservedObject private var recorder: SessionRecorder
     var onDisconnect: () -> Void
 
     @State private var credentialDomain = ""
@@ -45,6 +46,7 @@ struct RDPViewerView: View {
     init(session: RDPSession, onDisconnect: @escaping () -> Void) {
         self.session = session
         self._stats = ObservedObject(wrappedValue: session.stats)
+        self._recorder = ObservedObject(wrappedValue: session.recorder)
         self.onDisconnect = onDisconnect
         self._controlPreferences = StateObject(wrappedValue: ViewerControlPreferences(scope: ViewerControlPreferenceScope(
             connectionProtocol: .rdp,
@@ -87,6 +89,8 @@ struct RDPViewerView: View {
                     detail: "Controls viewer frame cadence today. FreeRDP wire-level performance flags can use this same preference next."
                 )
                 .help("Quality and compression")
+
+                recordingButton
 
                 Button {
                     controlPreferences.showCursorOverlay.toggle()
@@ -183,6 +187,7 @@ struct RDPViewerView: View {
         }
         .onChange(of: session.phase) { newPhase in
             syncCredentialFields(from: newPhase)
+            stopRecordingIfSessionInactive()
         }
         .onReceive(session.$currentImage.compactMap { $0 }.throttle(for: .seconds(5), scheduler: RunLoop.main, latest: true)) { image in
             app.savedConnections.updateThumbnail(
@@ -192,6 +197,14 @@ struct RDPViewerView: View {
                 connectionProtocol: .rdp,
                 image: image
             )
+        }
+        .onReceive(session.$currentImage.compactMap { $0 }) { image in
+            recorder.appendFrame(image)
+        }
+        .onDisappear {
+            if recorder.isRecording {
+                recorder.stop()
+            }
         }
     }
 
@@ -575,7 +588,41 @@ struct RDPViewerView: View {
         )
     }
 
+    private var recordingButton: some View {
+        Button {
+            toggleRecording()
+        } label: {
+            Image(systemName: recorder.isRecording ? "stop.circle.fill" : "record.circle")
+                .foregroundColor(recorder.isRecording ? .red : .primary)
+        }
+        .disabled(!recorder.isRecording && session.currentImage == nil && (session.remoteWidth <= 0 || session.remoteHeight <= 0))
+        .help(recorder.isRecording ? "Stop recording" : "Record session")
+    }
+
+    private func toggleRecording() {
+        if recorder.isRecording {
+            recorder.stop()
+            return
+        }
+        if let image = session.currentImage {
+            recorder.start(width: image.width, height: image.height)
+        } else {
+            recorder.start(width: session.remoteWidth, height: session.remoteHeight)
+        }
+    }
+
+    private func stopRecordingIfSessionInactive() {
+        guard recorder.isRecording else { return }
+        if case .connected = session.phase {
+            return
+        }
+        recorder.stop()
+    }
+
     private func disconnect() {
+        if recorder.isRecording {
+            recorder.stop()
+        }
         Task { await session.disconnect() }
         #if os(macOS)
         app.viewerFocusMode = false

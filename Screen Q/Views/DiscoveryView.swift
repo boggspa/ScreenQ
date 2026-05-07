@@ -380,7 +380,7 @@ private struct DiscoveryRow: View {
                             .font(.caption)
                             .foregroundColor(.green)
                     } else if host.isIOSShareOnlyPresence {
-                        Label("ReplayKit", systemImage: "dot.radiowaves.left.and.right")
+                        Label("Apple-native", systemImage: "iphone")
                             .font(.caption)
                             .foregroundColor(.blue)
                     } else {

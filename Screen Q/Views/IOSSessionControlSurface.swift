@@ -432,6 +432,10 @@ struct IOSSessionControlSurface: View {
                 showStats.toggle()
                 preferences.showStats = showStats
             }
+            Button(session.recorder.isRecording ? "Stop Recording" : "Start Recording") {
+                toggleRecording()
+            }
+            .disabled(!session.recorder.isRecording && !canStartRecording)
             Button("Clear Modifiers") {
                 modifiers.clearAll()
             }
@@ -632,6 +636,22 @@ struct IOSSessionControlSurface: View {
 
     private var canControl: Bool {
         session.inputMapper.isControlEnabled
+    }
+
+    private var canStartRecording: Bool {
+        session.renderer.currentImage != nil || session.renderer.format != nil
+    }
+
+    private func toggleRecording() {
+        if session.recorder.isRecording {
+            session.recorder.stop()
+            return
+        }
+        if let image = session.renderer.currentImage {
+            session.recorder.start(width: image.width, height: image.height)
+        } else if let format = session.renderer.format {
+            session.recorder.start(width: format.pixelWidth, height: format.pixelHeight)
+        }
     }
 
     private var shouldShowLegacyDisplayPicker: Bool {

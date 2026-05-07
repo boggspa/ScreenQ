@@ -15,16 +15,25 @@ struct ViewerView: View {
     @EnvironmentObject private var app: AppState
     @EnvironmentObject private var sessionStore: ViewerSessionStore
     @State private var selectedShareOnlyDevice: DiscoveredHost?
+    @State private var showingMultiObserveOverview = false
 
     var body: some View {
         VStack(spacing: 0) {
             #if os(macOS)
             if !sessionStore.sessions.isEmpty {
-                MacSessionTabBar(store: sessionStore)
+                MacSessionTabBar(
+                    store: sessionStore,
+                    showingMultiObserveOverview: $showingMultiObserveOverview
+                )
             }
             #endif
             Group {
-                if let vncSession = sessionStore.activeVNCSession {
+                if showingMultiObserveOverview && !sessionStore.sessions.isEmpty {
+                    MultiObserveSessionGrid(store: sessionStore) { id in
+                        sessionStore.selectSession(id: id)
+                        showingMultiObserveOverview = false
+                    }
+                } else if let vncSession = sessionStore.activeVNCSession {
                     VNCViewerView(session: vncSession) {
                         Task { await sessionStore.tearDownVNC() }
                     }
@@ -66,12 +75,14 @@ struct ViewerView: View {
             app.viewerHasActiveSession = sessionStore.hasActiveSession
             if !sessionStore.hasActiveSession {
                 app.viewerFocusMode = false
+                showingMultiObserveOverview = false
             }
         }
         .onReceive(sessionStore.$activeRDPSession) { _ in
             app.viewerHasActiveSession = sessionStore.hasActiveSession
             if !sessionStore.hasActiveSession {
                 app.viewerFocusMode = false
+                showingMultiObserveOverview = false
             }
         }
         .onDisappear {
@@ -199,6 +210,7 @@ struct ViewerView: View {
 #if os(macOS)
 private struct MacSessionTabBar: View {
     @ObservedObject var store: ViewerSessionStore
+    @Binding var showingMultiObserveOverview: Bool
 
     var body: some View {
         HStack(spacing: 4) {
@@ -213,6 +225,7 @@ private struct MacSessionTabBar: View {
 
             Button {
                 store.showDiscoverySurface()
+                showingMultiObserveOverview = false
             } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 12, weight: .semibold))
@@ -224,6 +237,22 @@ private struct MacSessionTabBar: View {
             }
             .buttonStyle(.plain)
             .help("New connection")
+
+            Button {
+                showingMultiObserveOverview.toggle()
+            } label: {
+                Image(systemName: showingMultiObserveOverview ? "rectangle.3.group.fill" : "rectangle.3.group")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 24, height: 22)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(showingMultiObserveOverview ? Color.accentColor.opacity(0.25) : Color.clear)
+                    )
+            }
+            .buttonStyle(.plain)
+            .disabled(store.sessions.count < 2)
+            .opacity(store.sessions.count < 2 ? 0.45 : 1)
+            .help("Multi-observe")
             .padding(.trailing, 8)
         }
         .frame(height: 30)
@@ -261,6 +290,7 @@ private struct MacSessionTabBar: View {
         .contentShape(Rectangle())
         .onTapGesture {
             store.selectSession(id: slot.id)
+            showingMultiObserveOverview = false
         }
     }
 }
@@ -279,20 +309,20 @@ private struct IOSShareOnlyDeviceSheet: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(host.displayName)
                         .font(.title2.bold())
-                    Text("View-only iOS screen share")
+                    Text("Apple-native iPhone/iPad sharing")
                         .foregroundColor(.secondary)
                 }
             }
 
             VStack(alignment: .leading, spacing: 10) {
-                Label("Ask the user to open Screen Q on this device and choose Share this iPhone or iPad screen.", systemImage: "1.circle")
-                Label("They must start Screen Q Broadcast from Apple's system broadcast sheet.", systemImage: "2.circle")
-                Label("Screen Q treats this path as view-only; iOS does not allow third-party remote control.", systemImage: "3.circle")
+                Label("Use iPhone Mirroring on a nearby Mac when you need interactive control.", systemImage: "1.circle")
+                Label("Use FaceTime SharePlay Remote Control when both people can join the same call.", systemImage: "2.circle")
+                Label("Screen Q does not market ReplayKit iPhone/iPad sharing as a commercial remote-control path.", systemImage: "3.circle")
             }
             .font(.subheadline)
 
             HStack {
-                Label(host.advertisedStatus == "broadcasting" ? "Broadcasting" : "Ready to share", systemImage: "dot.radiowaves.left.and.right")
+                Label("Use Apple-managed controls", systemImage: "sparkles.tv")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()
