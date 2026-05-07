@@ -169,6 +169,7 @@ final class AppState: ObservableObject {
 
     let computerList = ComputerListStore()
     let multiObserve = MultiObserveStore()
+    let iCloudSync = ICloudSyncCoordinator()
 
     // MARK: - Audit log
 
@@ -233,6 +234,14 @@ final class AppState: ObservableObject {
         #endif
 
         bindBrowser()
+        self.iCloudSync.configure(
+            savedConnections: savedConnections,
+            computerList: computerList,
+            localDeviceID: id
+        )
+        self.iCloudSync.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
 
         #if os(macOS)
         self.macHost.configure(app: self)

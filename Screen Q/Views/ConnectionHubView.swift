@@ -616,13 +616,89 @@ struct ConnectionHubView: View {
     // MARK: - Footer
 
     private var infoFooter: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
+            iCloudSyncFooterRow
             Label("Bonjour discovers devices on your local network.", systemImage: "network")
             Label("Tailscale or a VPN lets you reach devices remotely.", systemImage: "lock.shield")
         }
         .font(.caption)
         .foregroundColor(.secondary)
         .opacity(0.85)
+    }
+
+    private var iCloudSyncFooterRow: some View {
+        HStack(spacing: 10) {
+            Label(iCloudSyncSummary, systemImage: iCloudSyncSystemImage)
+                .foregroundColor(iCloudSyncTint)
+                .lineLimit(1)
+            Spacer()
+            Button {
+                app.iCloudSync.syncNow(markPreferencesChanged: true)
+            } label: {
+                Image(systemName: "arrow.triangle.2.circlepath")
+            }
+            .buttonStyle(.plain)
+            .disabled(!app.iCloudSync.isEnabled || app.iCloudSync.status.phase == .syncing)
+            Toggle("iCloud Sync", isOn: iCloudSyncEnabledBinding)
+                #if os(macOS)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                #endif
+        }
+    }
+
+    private var iCloudSyncEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { app.iCloudSync.isEnabled },
+            set: { app.iCloudSync.isEnabled = $0 }
+        )
+    }
+
+    private var iCloudSyncSummary: String {
+        let status = app.iCloudSync.status
+        switch status.phase {
+        case .idle:
+            if let date = status.lastSyncedAt {
+                return "iCloud sync: \(RelativeDateTimeFormatter.screenQShort.localizedString(for: date, relativeTo: Date()))"
+            }
+            return "iCloud sync is ready."
+        case .syncing:
+            return status.message
+        case .unavailable:
+            return status.message
+        case .disabled:
+            return "iCloud sync is off."
+        case .error:
+            return status.message
+        }
+    }
+
+    private var iCloudSyncSystemImage: String {
+        switch app.iCloudSync.status.phase {
+        case .idle:
+            return "icloud"
+        case .syncing:
+            return "icloud.and.arrow.up"
+        case .unavailable:
+            return "icloud.slash"
+        case .disabled:
+            return "icloud.slash"
+        case .error:
+            return "exclamationmark.icloud"
+        }
+    }
+
+    private var iCloudSyncTint: Color {
+        switch app.iCloudSync.status.phase {
+        case .idle:
+            return .secondary
+        case .syncing:
+            return .accentColor
+        case .unavailable, .disabled:
+            return .secondary
+        case .error:
+            return .orange
+        }
     }
 
     // MARK: - Section container helper
@@ -1624,4 +1700,12 @@ private func detailRow(_ label: String, _ value: String) -> some View {
             .font(.body)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
+}
+
+private extension RelativeDateTimeFormatter {
+    static let screenQShort: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter
+    }()
 }

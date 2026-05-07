@@ -52,6 +52,9 @@ enum SelfTests {
         results.append(testQuickConnectParser())
         results.append(testSavedConnectionCodableBackfill())
         results.append(testFirstRunOnboardingRoutes())
+        results.append(testICloudSyncPayloadExcludesSecrets())
+        results.append(testICloudPreferenceFilter())
+        results.append(testComputerGroupCodableBackfill())
         results.append(testFileTransferFilenameSanitization())
         results.append(testViewerControlPreferenceScope())
         results.append(testSessionStateRoutingFlags())
@@ -797,6 +800,77 @@ enum SelfTests {
             return fail("First-run onboarding routes", "Viewer routes should map to concrete hub actions")
         }
         return ok("First-run onboarding routes select concrete app surfaces")
+    }
+
+    private static func testICloudSyncPayloadExcludesSecrets() -> Result {
+        let local = SavedConnection(
+            displayName: "Studio Mac",
+            host: "studio.local",
+            port: ScreenQProtocol.defaultPort,
+            connectionProtocol: .screenQ,
+            isBookmark: true,
+            peerFingerprint: "trusted-fingerprint",
+            thumbnailData: Data([1, 2, 3]),
+            thumbnailUpdatedAt: Date()
+        )
+
+        let record = ICloudSavedConnectionRecord(connection: local)
+        let fresh = record.savedConnection(preserving: nil)
+        guard fresh.peerFingerprint == nil,
+              fresh.thumbnailData == nil,
+              fresh.thumbnailUpdatedAt == nil else {
+            return fail("iCloud sync sanitization", "cloud records should not hydrate trust or thumbnail data")
+        }
+
+        let preserved = record.savedConnection(preserving: local)
+        guard preserved.peerFingerprint == local.peerFingerprint,
+              preserved.thumbnailData == local.thumbnailData else {
+            return fail("iCloud sync sanitization", "remote metadata should preserve local trust and thumbnail state")
+        }
+        return ok("iCloud sync excludes secrets and bulky local artifacts")
+    }
+
+    private static func testICloudPreferenceFilter() -> Result {
+        guard ICloudPreferenceStore.isSyncedPreferenceKey("viewer.controls.fitMode"),
+              ICloudPreferenceStore.isSyncedPreferenceKey("viewer.controls.connection.rdp.host.3389.fitMode") else {
+            return fail("iCloud preference filter", "viewer control preference keys should sync")
+        }
+        guard !ICloudPreferenceStore.isSyncedPreferenceKey("ScreenQ.TrustedPeers"),
+              !ICloudPreferenceStore.isSyncedPreferenceKey("ScreenQ.CredentialInventory"),
+              !ICloudPreferenceStore.isSyncedPreferenceKey("ScreenQ.MenuBarOnlyMode") else {
+            return fail("iCloud preference filter", "security or device-local keys should not sync")
+        }
+        guard ICloudPreferenceValue(propertyListValue: ["touchMode", "quality"]) == .stringArray(["touchMode", "quality"]),
+              ICloudPreferenceValue(propertyListValue: true) == .bool(true) else {
+            return fail("iCloud preference filter", "supported UserDefaults values should round-trip into sync records")
+        }
+        return ok("iCloud preference sync is limited to viewer controls")
+    }
+
+    private static func testComputerGroupCodableBackfill() -> Result {
+        let legacyJSON = """
+        {
+          "id": "11111111-2222-3333-4444-666666666666",
+          "name": "Studio",
+          "icon": "folder",
+          "computerIDs": [],
+          "sortOrder": 2
+        }
+        """
+
+        do {
+            let group = try JSONDecoder().decode(ComputerGroup.self, from: Data(legacyJSON.utf8))
+            let now = Date()
+            guard group.name == "Studio",
+                  group.sortOrder == 2,
+                  group.createdAt <= now,
+                  group.updatedAt <= now else {
+                return fail("Computer group backfill", "legacy group metadata did not decode safely")
+            }
+            return ok("Computer groups backfill sync timestamps")
+        } catch {
+            return fail("Computer group backfill", "\(error)")
+        }
     }
 
     private static func testFileTransferFilenameSanitization() -> Result {

@@ -48,6 +48,9 @@ inside public Apple APIs.
   are recognized and reported as unsupported until SSH sessions exist.
 - **First-run onboarding**: one-time setup router for hosting this Mac,
   connecting to a Mac, Tailnet setup, Apple Screen Sharing, and RDP import.
+- **iCloud sync**: saved connection metadata, groups, and viewer-control
+  preferences sync through iCloud key-value storage. Passwords remain in
+  Keychain/iCloud Keychain and thumbnails/trust decisions stay local.
 - **File transfer**: permission-gated chunked transfers with safe
   filename handling, size/order enforcement, streamed temp files, and
   progress UI.
@@ -397,7 +400,7 @@ Screen Sharing and Windows VNC hosts.
 - **120 Hz cursor overlay** — host tracks cursor separately, viewer renders with actual cursor bitmap
 - **Bidirectional clipboard sync** — NSPasteboard polling + offer/request/data flow
 - **Audio forwarding** — SCStream audio capture → AVAudioEngine playback on viewer
-- **Saved connections / bookmarks** — persisted in UserDefaults with recent + bookmark UI
+- **Saved connections / bookmarks** — local UserDefaults persistence with iCloud sync for non-secret metadata
 - **Multi-display switching** — host sends display list; viewer can switch mid-session
 - **Reconnection** — NWPathMonitor + exponential backoff with optional reconnect token
 - **iOS trackpad mode** — two-finger scroll, long-press right-click, pinch-to-zoom, three-finger drag

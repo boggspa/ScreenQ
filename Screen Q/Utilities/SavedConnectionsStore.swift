@@ -88,7 +88,7 @@ nonisolated enum SavedConnectionSource: String, Codable, Hashable, Sendable {
     }
 }
 
-struct SavedConnection: Codable, Identifiable, Hashable, Sendable {
+nonisolated struct SavedConnection: Codable, Identifiable, Hashable, Sendable {
     var id: UUID = UUID()
     var displayName: String
     var host: String
@@ -412,7 +412,9 @@ final class SavedConnectionsStore: ObservableObject {
     @Published private(set) var connections: [SavedConnection] = []
 
     private let key = "ScreenQ.SavedConnections"
+    private let deletedKey = "ScreenQ.SavedConnections.Deleted"
     private let maxRecent = 20
+    private var deletedConnectionTombstones: [UUID: Date] = [:]
 
     init() {
         load()
@@ -438,6 +440,7 @@ final class SavedConnectionsStore: ObservableObject {
 
         // If we already have this host:port, update it.
         if let idx = index(host: normalizedHost, port: port, connectionProtocol: connectionProtocol) {
+            deletedConnectionTombstones.removeValue(forKey: connections[idx].id)
             connections[idx].displayName = label
             connections[idx].host = normalizedHost
             connections[idx].lastConnected = Date()
@@ -468,14 +471,8 @@ final class SavedConnectionsStore: ObservableObject {
             connections.insert(entry, at: 0)
         }
 
-        // Trim non-bookmarked entries beyond max.
-        let bookmarks = connections.filter { $0.isBookmark }
-        var recents = connections.filter { !$0.isBookmark }
-        if recents.count > maxRecent {
-            recents = Array(recents.prefix(maxRecent))
-        }
-        connections = (bookmarks + recents).sorted { $0.lastConnected > $1.lastConnected }
-
+        trimAndSort()
+        saveDeletedConnectionTombstones()
         save()
         return connections.first {
             $0.host.caseInsensitiveCompare(normalizedHost) == .orderedSame &&
@@ -568,17 +565,124 @@ final class SavedConnectionsStore: ObservableObject {
 
     func remove(_ id: UUID) {
         connections.removeAll { $0.id == id }
+        deletedConnectionTombstones[id] = Date()
+        saveDeletedConnectionTombstones()
         save()
     }
 
     func clearRecents() {
+        let removed = connections.filter { !$0.isBookmark }
+        for connection in removed {
+            deletedConnectionTombstones[connection.id] = Date()
+        }
         connections.removeAll { !$0.isBookmark }
+        saveDeletedConnectionTombstones()
         save()
+    }
+
+    func iCloudRecords() -> [ICloudSavedConnectionRecord] {
+        connections
+            .map(ICloudSavedConnectionRecord.init)
+            .sorted {
+                if $0.updatedAt == $1.updatedAt {
+                    return $0.id.uuidString < $1.id.uuidString
+                }
+                return $0.updatedAt > $1.updatedAt
+            }
+    }
+
+    func iCloudDeletedRecords() -> [ICloudTombstone] {
+        deletedConnectionTombstones.map { ICloudTombstone(id: $0.key, deletedAt: $0.value) }
+            .sorted {
+                if $0.deletedAt == $1.deletedAt {
+                    return $0.id.uuidString < $1.id.uuidString
+                }
+                return $0.deletedAt > $1.deletedAt
+            }
+    }
+
+    @discardableResult
+    func mergeICloudRecords(
+        _ records: [ICloudSavedConnectionRecord],
+        deleted tombstones: [ICloudTombstone]
+    ) -> Bool {
+        var changed = false
+        let remoteTombstones = Dictionary(
+            tombstones.map { ($0.id, $0.deletedAt) },
+            uniquingKeysWith: max
+        )
+
+        for (id, deletedAt) in remoteTombstones {
+            let previous = deletedConnectionTombstones[id] ?? Date(timeIntervalSince1970: 0)
+            if deletedAt > previous {
+                deletedConnectionTombstones[id] = deletedAt
+                changed = true
+            }
+            if let idx = connections.firstIndex(where: { $0.id == id }),
+               connections[idx].updatedAt <= deletedAt {
+                connections.remove(at: idx)
+                changed = true
+            }
+        }
+
+        for record in records {
+            let deletedAt = deletedConnectionTombstones[record.id] ?? Date(timeIntervalSince1970: 0)
+            guard record.updatedAt > deletedAt else { continue }
+
+            if let idx = connections.firstIndex(where: { $0.id == record.id }) {
+                if record.updatedAt > connections[idx].updatedAt {
+                    connections[idx] = record.savedConnection(preserving: connections[idx])
+                    changed = true
+                }
+                if deletedConnectionTombstones.removeValue(forKey: record.id) != nil {
+                    changed = true
+                }
+                continue
+            }
+
+            if let idx = connections.firstIndex(where: {
+                ICloudSavedConnectionRecord(connection: $0).endpointKey == record.endpointKey
+            }) {
+                if record.updatedAt > connections[idx].updatedAt {
+                    let previousID = connections[idx].id
+                    connections[idx] = record.savedConnection(preserving: connections[idx])
+                    deletedConnectionTombstones.removeValue(forKey: previousID)
+                    changed = true
+                }
+                continue
+            }
+
+            connections.append(record.savedConnection(preserving: nil))
+            changed = true
+        }
+
+        if changed {
+            trimAndSort()
+            saveDeletedConnectionTombstones()
+            save()
+        }
+        return changed
+    }
+
+    func removeGroupReferencesFromICloud(_ groupIDs: [UUID]) {
+        let removed = Set(groupIDs)
+        guard !removed.isEmpty else { return }
+        var changed = false
+        for idx in connections.indices {
+            let next = connections[idx].groupIDs.filter { !removed.contains($0) }
+            if next != connections[idx].groupIDs {
+                connections[idx].groupIDs = next
+                connections[idx].updatedAt = Date()
+                changed = true
+            }
+        }
+        if changed { save() }
     }
 
     // MARK: - Persistence
 
     private func load() {
+        loadDeletedConnectionTombstones()
         guard let data = UserDefaults.standard.data(forKey: key),
               let decoded = try? JSONDecoder().decode([SavedConnection].self, from: data) else {
             return
@@ -592,11 +696,39 @@ final class SavedConnectionsStore: ObservableObject {
     }
 
     private func sortAndSave() {
-        connections.sort { lhs, rhs in
+        trimAndSort()
+        save()
+    }
+
+    private func trimAndSort() {
+        let bookmarks = connections.filter { $0.isBookmark }
+        var recents = connections.filter { !$0.isBookmark }
+        if recents.count > maxRecent {
+            recents = Array(recents.sorted { $0.lastConnected > $1.lastConnected }.prefix(maxRecent))
+        }
+        connections = (bookmarks + recents).sorted { lhs, rhs in
             if lhs.isBookmark != rhs.isBookmark { return lhs.isBookmark && !rhs.isBookmark }
             return lhs.lastConnected > rhs.lastConnected
         }
-        save()
+    }
+
+    private func loadDeletedConnectionTombstones() {
+        guard let data = UserDefaults.standard.data(forKey: deletedKey),
+              let decoded = try? JSONDecoder().decode([String: Date].self, from: data) else {
+            return
+        }
+        deletedConnectionTombstones = decoded.reduce(into: [:]) { result, pair in
+            guard let id = UUID(uuidString: pair.key) else { return }
+            result[id] = pair.value
+        }
+    }
+
+    private func saveDeletedConnectionTombstones() {
+        let encoded = Dictionary(
+            uniqueKeysWithValues: deletedConnectionTombstones.map { ($0.key.uuidString, $0.value) }
+        )
+        guard let data = try? JSONEncoder().encode(encoded) else { return }
+        UserDefaults.standard.set(data, forKey: deletedKey)
     }
 
     private func index(host: String, port: UInt16, connectionProtocol: RemoteConnectionProtocol?) -> Int? {
