@@ -16,6 +16,23 @@
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.chrisizatt.Screen-Q.quick-connect</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>screenq</string>
+				<string>sq</string>
+				<string>screens</string>
+				<string>vnc</string>
+				<string>rdp</string>
+				<string>ms-rd</string>
+				<string>ssh</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSUIElement</key>

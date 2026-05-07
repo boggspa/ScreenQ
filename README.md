@@ -43,6 +43,9 @@ inside public Apple APIs.
 - **RDP / Windows route**: `.rdp` import, Keychain-backed credentials,
   certificate review/pinning, live frame/input bridge integration, and an
   explicit packaging error when the FreeRDP bridge is not bundled.
+- **URL schemes / Quick Connect**: app-level handling for `screenq://`,
+  `screens://`, `vnc://`, `rdp://`, and `ms-rd://` links. `ssh://` links
+  are recognized and reported as unsupported until SSH sessions exist.
 - **File transfer**: permission-gated chunked transfers with safe
   filename handling, size/order enforcement, streamed temp files, and
   progress UI.

@@ -22,6 +22,9 @@ struct Screen_QApp: App {
             HomeView()
                 .environmentObject(appState)
                 .environmentObject(appState.viewerSessions)
+                .onOpenURL { url in
+                    appState.handleExternalURL(url)
+                }
                 #if os(macOS)
                 .background(MacMainWindowAccessor())
                 .onAppear {

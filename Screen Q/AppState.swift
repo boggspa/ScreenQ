@@ -303,6 +303,46 @@ final class AppState: ObservableObject {
         pendingViewerConnection = nil
     }
 
+    func handleExternalURL(_ url: URL) {
+        Logger.shared.info("Received external URL: \(url.absoluteString)")
+        switch QuickConnectParser.resolve(url) {
+        case .target(let target):
+            savedConnections.addOrUpdate(
+                host: target.host,
+                port: target.port,
+                displayName: target.displayName,
+                connectionProtocol: target.connectionProtocol,
+                source: .quickConnect
+            )
+            requestViewerConnection(.manual(
+                host: target.host,
+                port: target.port,
+                displayName: target.displayName,
+                connectionProtocol: target.connectionProtocol
+            ))
+            surfaceMainWindowForExternalURL()
+
+        case .unsupported(let unsupported):
+            presentExternalURLRoutingError(unsupported.message)
+
+        case .invalid(let message):
+            presentExternalURLRoutingError(message)
+        }
+    }
+
+    private func presentExternalURLRoutingError(_ message: String) {
+        viewerSessions.lastError = message
+        viewerFocusMode = false
+        selectRole(.viewer)
+        surfaceMainWindowForExternalURL()
+    }
+
+    private func surfaceMainWindowForExternalURL() {
+        #if os(macOS)
+        MacWindowControls.activateApp()
+        #endif
+    }
+
     #if os(macOS)
     func requestHostManagement() {
         viewerFocusMode = false

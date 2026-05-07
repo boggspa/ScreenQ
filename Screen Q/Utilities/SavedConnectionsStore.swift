@@ -209,42 +209,140 @@ nonisolated struct QuickConnectTarget: Equatable, Sendable {
     var sourceText: String
 }
 
+nonisolated struct UnsupportedQuickConnectLink: Equatable, Sendable {
+    var scheme: String
+    var message: String
+}
+
+nonisolated enum QuickConnectResolution: Equatable, Sendable {
+    case target(QuickConnectTarget)
+    case unsupported(UnsupportedQuickConnectLink)
+    case invalid(String)
+}
+
 nonisolated enum QuickConnectParser {
     static func parse(_ rawValue: String, defaultProtocol: RemoteConnectionProtocol = .screenQ) -> QuickConnectTarget? {
+        guard case .target(let target) = resolve(rawValue, defaultProtocol: defaultProtocol) else {
+            return nil
+        }
+        return target
+    }
+
+    static func resolve(_ rawValue: String, defaultProtocol: RemoteConnectionProtocol = .screenQ) -> QuickConnectResolution {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
+        guard !trimmed.isEmpty else { return .invalid("Enter a host, host:port, or supported link.") }
 
         if trimmed.contains("://"),
            let url = URL(string: trimmed),
            let scheme = url.scheme?.lowercased(),
            !scheme.isEmpty {
-            guard let connectionProtocol = protocolForScheme(scheme),
-                  let host = url.host?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !host.isEmpty else {
-                return nil
-            }
-            let rawPort = url.port ?? Int(connectionProtocol.defaultPort)
-            guard rawPort >= 0, rawPort <= Int(UInt16.max) else { return nil }
-            return QuickConnectTarget(
-                displayName: host,
-                host: host,
-                port: UInt16(rawPort),
-                connectionProtocol: connectionProtocol,
-                sourceText: trimmed
-            )
+            return resolve(url, sourceText: trimmed, defaultProtocol: defaultProtocol)
         }
 
         let pieces = trimmed.split(separator: ":", maxSplits: 1).map(String.init)
         let host = pieces.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !host.isEmpty else { return nil }
+        guard isValidHost(host) else { return .invalid("Enter a valid host name or IP address.") }
         let port = pieces.count == 2 ? UInt16(pieces[1]) ?? defaultProtocol.defaultPort : defaultProtocol.defaultPort
-        return QuickConnectTarget(
+        return .target(QuickConnectTarget(
             displayName: host,
             host: host,
             port: port,
             connectionProtocol: defaultProtocol,
             sourceText: trimmed
+        ))
+    }
+
+    static func resolve(_ url: URL, defaultProtocol: RemoteConnectionProtocol = .screenQ) -> QuickConnectResolution {
+        resolve(url, sourceText: url.absoluteString, defaultProtocol: defaultProtocol)
+    }
+
+    private static func resolve(
+        _ url: URL,
+        sourceText: String,
+        defaultProtocol: RemoteConnectionProtocol
+    ) -> QuickConnectResolution {
+        guard let scheme = url.scheme?.lowercased(), !scheme.isEmpty else {
+            return .invalid("Link has no URL scheme.")
+        }
+        guard scheme != "ssh" else {
+            return .unsupported(UnsupportedQuickConnectLink(
+                scheme: scheme,
+                message: "SSH links are recognized, but SSH sessions are not implemented in Screen Q yet."
+            ))
+        }
+
+        if scheme == "screenq" || scheme == "sq" {
+            return resolveScreenQURL(url, sourceText: sourceText, fallbackProtocol: defaultProtocol)
+        }
+
+        guard let connectionProtocol = protocolForScheme(scheme),
+              let host = normalizedURLHost(url) else {
+            return .invalid("Unsupported or incomplete link.")
+        }
+        return target(
+            host: host,
+            rawPort: url.port,
+            connectionProtocol: connectionProtocol,
+            displayName: displayName(from: url) ?? host,
+            sourceText: sourceText
         )
+    }
+
+    private static func resolveScreenQURL(
+        _ url: URL,
+        sourceText: String,
+        fallbackProtocol: RemoteConnectionProtocol
+    ) -> QuickConnectResolution {
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let hostValue = normalizedURLHost(url)
+        let queryURL = queryValue("url", components: components)
+        if let queryURL,
+           let nested = URL(string: queryURL),
+           nested.scheme != nil {
+            return resolve(nested, sourceText: sourceText, defaultProtocol: fallbackProtocol)
+        }
+
+        let routeToken = hostValue?.lowercased()
+        let isActionRoute = routeToken == "connect" || routeToken == "open" || routeToken == "quick-connect"
+        let queryHost = queryValue("host", components: components) ?? queryValue("address", components: components)
+        let pathHost = firstPathComponent(url)
+        let host = isActionRoute ? (queryHost ?? pathHost) : (queryHost ?? hostValue ?? pathHost)
+        guard let host, isValidHost(host) else {
+            return .invalid("Screen Q link is missing a host.")
+        }
+
+        let requestedProtocol = queryValue("protocol", components: components)
+            .flatMap(protocolForToken)
+            ?? fallbackProtocol
+        let rawPort = queryValue("port", components: components).flatMap(Int.init) ?? url.port
+        let name = displayName(from: url) ?? queryValue("name", components: components) ?? host
+        return target(
+            host: host,
+            rawPort: rawPort,
+            connectionProtocol: requestedProtocol,
+            displayName: name,
+            sourceText: sourceText
+        )
+    }
+
+    private static func target(
+        host: String,
+        rawPort: Int?,
+        connectionProtocol: RemoteConnectionProtocol,
+        displayName: String,
+        sourceText: String
+    ) -> QuickConnectResolution {
+        let portValue = rawPort ?? Int(connectionProtocol.defaultPort)
+        guard portValue > 0, portValue <= Int(UInt16.max) else {
+            return .invalid("Link uses an invalid port.")
+        }
+        return .target(QuickConnectTarget(
+            displayName: displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? host : displayName,
+            host: host,
+            port: UInt16(portValue),
+            connectionProtocol: connectionProtocol,
+            sourceText: sourceText
+        ))
     }
 
     private static func protocolForScheme(_ scheme: String) -> RemoteConnectionProtocol? {
@@ -260,6 +358,51 @@ nonisolated enum QuickConnectParser {
         default:
             return nil
         }
+    }
+
+    private static func protocolForToken(_ token: String) -> RemoteConnectionProtocol? {
+        switch token.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "screenq", "screen-q", "sq":
+            return .screenQ
+        case "screens", "mac", "mac-screen-sharing", "apple-screen-sharing":
+            return .macScreenSharing
+        case "vnc", "generic-vnc":
+            return .vnc
+        case "rdp", "windows", "ms-rd":
+            return .rdp
+        default:
+            return nil
+        }
+    }
+
+    private static func normalizedURLHost(_ url: URL) -> String? {
+        guard let host = url.host?.trimmingCharacters(in: .whitespacesAndNewlines),
+              isValidHost(host) else { return nil }
+        return host
+    }
+
+    private static func displayName(from url: URL) -> String? {
+        URLComponents(url: url, resolvingAgainstBaseURL: false)
+            .flatMap { queryValue("name", components: $0) ?? queryValue("displayName", components: $0) }
+    }
+
+    private static func queryValue(_ name: String, components: URLComponents?) -> String? {
+        guard let value = components?.queryItems?.first(where: {
+            $0.name.caseInsensitiveCompare(name) == .orderedSame
+        })?.value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else { return nil }
+        return value
+    }
+
+    private static func firstPathComponent(_ url: URL) -> String? {
+        url.pathComponents.first { $0 != "/" }?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func isValidHost(_ host: String) -> Bool {
+        guard !host.isEmpty else { return false }
+        guard host.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else { return false }
+        guard !host.contains("/") && !host.contains("\\") else { return false }
+        return true
     }
 }
 
@@ -304,7 +447,9 @@ final class SavedConnectionsStore: ObservableObject {
             if let isBookmark { connections[idx].isBookmark = isBookmark }
             if let notes { connections[idx].notes = notes }
             if let groupIDs { connections[idx].groupIDs = groupIDs }
-            connections[idx].source = source
+            if source != .manual || connections[idx].source == .manual {
+                connections[idx].source = source
+            }
             connections[idx].updatedAt = Date()
         } else {
             let entry = SavedConnection(

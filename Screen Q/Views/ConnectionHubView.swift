@@ -247,7 +247,7 @@ struct ConnectionHubView: View {
                     }
                     .buttonStyle(.bordered)
 
-                    TextField("host, host:port, screenq://, vnc://, rdp://", text: $quickConnectText)
+                    TextField("host, host:port, screenq://, screens://, vnc://, rdp://", text: $quickConnectText)
                         .textFieldStyle(.roundedBorder)
                         #if os(iOS)
                         .textInputAutocapitalization(.never)
@@ -719,8 +719,16 @@ struct ConnectionHubView: View {
     // MARK: - Library actions
 
     private func connectQuickLink(saveFirst: Bool) {
-        guard let target = QuickConnectParser.parse(quickConnectText, defaultProtocol: quickConnectProtocol) else {
-            quickConnectError = "Enter a host, host:port, or supported link."
+        let resolution = QuickConnectParser.resolve(quickConnectText, defaultProtocol: quickConnectProtocol)
+        guard case .target(let target) = resolution else {
+            switch resolution {
+            case .unsupported(let unsupported):
+                quickConnectError = unsupported.message
+            case .invalid(let message):
+                quickConnectError = message
+            case .target:
+                break
+            }
             return
         }
         quickConnectError = nil

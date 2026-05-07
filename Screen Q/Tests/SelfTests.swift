@@ -717,6 +717,15 @@ enum SelfTests {
             return fail("Quick Connect parser", "unexpected VNC target: \(vnc)")
         }
 
+        guard let screens = QuickConnectParser.parse("screens://studio-mac.local") else {
+            return fail("Quick Connect parser", "screens URL did not parse")
+        }
+        guard screens.host == "studio-mac.local",
+              screens.port == RemoteConnectionProtocol.macScreenSharing.defaultPort,
+              screens.connectionProtocol == .macScreenSharing else {
+            return fail("Quick Connect parser", "unexpected Screens target: \(screens)")
+        }
+
         guard let rdp = QuickConnectParser.parse("rdp://windows.tailnet.ts.net") else {
             return fail("Quick Connect parser", "rdp URL did not parse")
         }
@@ -725,8 +734,22 @@ enum SelfTests {
             return fail("Quick Connect parser", "unexpected RDP defaults: \(rdp)")
         }
 
+        guard let structured = QuickConnectParser.parse("screenq://connect?host=workstation.local&protocol=rdp&port=3390&name=Workstation") else {
+            return fail("Quick Connect parser", "structured Screen Q URL did not parse")
+        }
+        guard structured.displayName == "Workstation",
+              structured.host == "workstation.local",
+              structured.port == 3390,
+              structured.connectionProtocol == .rdp else {
+            return fail("Quick Connect parser", "unexpected structured target: \(structured)")
+        }
+
         guard QuickConnectParser.parse("ssh://server.local") == nil else {
             return fail("Quick Connect parser", "unsupported ssh URL should not parse until SSH is implemented")
+        }
+        guard case .unsupported(let ssh) = QuickConnectParser.resolve("ssh://server.local"),
+              ssh.scheme == "ssh" else {
+            return fail("Quick Connect parser", "ssh URL should resolve to an unsupported link")
         }
 
         return ok("Quick Connect parser resolves supported host and URL forms")
