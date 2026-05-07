@@ -161,24 +161,55 @@ private enum VNCRouteAttemptOutcome: @unchecked Sendable {
     case failed(VNCRouteFailure)
 }
 
-private actor VNCConnectionRaceCoordinator {
-    private let attempts: [VNCConnectionRouteAttempt]
-    private var winnerID: UUID?
+nonisolated struct VNCFirstFrameTelemetry: Equatable, Sendable {
+    var connectionStartedAt: Date?
+    var authenticatedAt: Date?
+    var connectedAt: Date?
+    var firstFramebufferRequestAt: Date?
+    var firstFramebufferAt: Date?
+    var recoveryFullFrameRequests: Int = 0
+    var reconnects: Int = 0
+    var lastFailure: String?
+    var lastRequestReason: String?
+    var offeredSecurityModes: [RFBSecurityMode] = []
+    var negotiatedSecurityMode: RFBSecurityMode = .unknown
 
-    init(attempts: [VNCConnectionRouteAttempt]) {
-        self.attempts = attempts
+    var firstFrameDuration: TimeInterval? {
+        guard let connectionStartedAt, let firstFramebufferAt else { return nil }
+        return firstFramebufferAt.timeIntervalSince(connectionStartedAt)
     }
 
-    func markVersionHandshake(for id: UUID) async throws {
-        if let winnerID {
-            if winnerID == id { return }
-            throw CancellationError()
+    var statusText: String {
+        if let firstFrameDuration {
+            return "First frame \(Self.formatSeconds(firstFrameDuration))"
         }
+        if let lastFailure, !lastFailure.isEmpty {
+            return "First frame stalled: \(lastFailure)"
+        }
+        if let firstFramebufferRequestAt {
+            let elapsed = Date().timeIntervalSince(firstFramebufferRequestAt)
+            let reason = lastRequestReason.map { " \($0)" } ?? ""
+            return "Waiting for\(reason) framebuffer \(Self.formatSeconds(elapsed))"
+        }
+        if let connectedAt {
+            return "Connected \(Self.formatSeconds(Date().timeIntervalSince(connectedAt)))"
+        }
+        if authenticatedAt != nil {
+            return "Authenticated; waiting for server init"
+        }
+        if connectionStartedAt != nil {
+            return "Dialing RFB"
+        }
+        return "Waiting for framebuffer"
+    }
 
-        winnerID = id
-        for attempt in attempts where attempt.id != id {
-            await attempt.connection.disconnect()
-        }
+    var securitySummary: String? {
+        guard negotiatedSecurityMode != .unknown else { return nil }
+        return "Auth \(negotiatedSecurityMode.displayName)"
+    }
+
+    static func formatSeconds(_ seconds: TimeInterval) -> String {
+        String(format: "%.1fs", max(0, seconds))
     }
 }
 
@@ -187,16 +218,14 @@ private func connectVNCConnectionRouteAttempt(
     username: String?,
     password: String?,
     securityPreference: RFBSecurityPreference,
-    timeouts: RFBConnectionTimeouts,
-    onVersionHandshake: (@Sendable () async throws -> Void)? = nil
+    timeouts: RFBConnectionTimeouts
 ) async -> VNCRouteAttemptOutcome {
     do {
         let serverInit = try await attempt.connection.connect(
             username: username,
             password: password,
             securityPreference: securityPreference,
-            timeouts: timeouts,
-            onVersionHandshake: onVersionHandshake
+            timeouts: timeouts
         )
         return .connected(VNCConnectedRoute(attempt: attempt, serverInit: serverInit))
     } catch {
@@ -222,6 +251,7 @@ final class VNCSession: ObservableObject {
     private var reconnectTask: Task<Void, Never>?
     private let maxReconnectAttempts = 5
     @Published private(set) var currentImage: CGImage?
+    @Published private(set) var renderRevision: UInt64 = 0
     @Published private(set) var serverName: String = ""
     @Published private(set) var serverWidth: Int = 0
     @Published private(set) var serverHeight: Int = 0
@@ -237,6 +267,8 @@ final class VNCSession: ObservableObject {
     @Published private(set) var securityStatus: RemoteSecurityStatus = .unknown
     @Published private(set) var streamQualityPreference = StreamQualityPreference()
     @Published private(set) var streamProfile = StreamQualityPreference().nativeProfile
+    @Published private(set) var firstFrameTelemetry = VNCFirstFrameTelemetry()
+    let inputMapper = InputMappingService()
 
     // Cursor tracking for iOS overlay.
     @Published private(set) var cursorViewX: Int = 0
@@ -280,6 +312,13 @@ final class VNCSession: ObservableObject {
     private var isViewportRefreshPending = false
     private var lastStreamRegionRequest = Date.distantPast
     private let minimumStreamRegionRequestInterval: TimeInterval = 0.10
+    private var framebufferWaitStartedAt = Date.distantPast
+    private var lastFramebufferUpdateAt = Date.distantPast
+    private var lastFramebufferRequestAt = Date.distantPast
+    private var lastFullFramebufferRequestAt = Date.distantPast
+    private let firstFramebufferTimeout: TimeInterval = 18.0
+    private let emptyFramebufferRetryInterval: TimeInterval = 3.0
+    private let steadyStateFullRefreshInterval: TimeInterval = 15.0
 
     // MARK: - Init
 
@@ -290,6 +329,7 @@ final class VNCSession: ObservableObject {
         self.peerLabel = label
         self.profile = profile
         self.securityStatus = .vncConnecting(scope: NetworkTrustScope.classify(host: host), profile: profile)
+        configureInputMapper()
     }
 
     init(endpoint: NWEndpoint, label: String, profile: RFBConnectionProfile = .macScreenSharing) {
@@ -299,6 +339,7 @@ final class VNCSession: ObservableObject {
         self.peerLabel = label
         self.profile = profile
         self.securityStatus = .vncConnecting(scope: NetworkTrustScope.classify(host: label), profile: profile)
+        configureInputMapper()
     }
 
     deinit {
@@ -316,6 +357,11 @@ final class VNCSession: ObservableObject {
         streamRegionRequestTask = nil
         isViewportRefreshPending = false
         isDisconnecting = false
+        framebufferWaitStartedAt = .distantPast
+        lastFramebufferUpdateAt = .distantPast
+        lastFramebufferRequestAt = .distantPast
+        lastFullFramebufferRequestAt = .distantPast
+        resetFirstFrameTelemetry()
         connectTask = Task { [weak self] in
             await self?.connect()
         }
@@ -347,13 +393,23 @@ final class VNCSession: ObservableObject {
             selectedDisplayRegion = displayRegions.first
             streamRegion = initialStreamRegion(in: selectedDisplayRegion)
             frameBuffer = makeFrameBuffer(for: streamRegion)
-            securityStatus = .vnc(report: await conn.securityReport(), scope: networkTrustScope, profile: profile)
+            if let renderer = metalRenderer, let frameBuffer {
+                renderer.ensureTextureSize(width: frameBuffer.width, height: frameBuffer.height)
+            }
+            let securityReport = await conn.securityReport()
+            recordSecurityReport(securityReport, authenticated: true)
+            securityStatus = .vnc(report: securityReport, scope: networkTrustScope, profile: profile)
             guard shouldContinueConnecting else {
                 await conn.disconnect()
                 return
             }
             phase = .connected
             reconnectAttempt = 0
+            markServerConnectedForFirstFrame()
+            framebufferWaitStartedAt = Date()
+            lastFramebufferUpdateAt = .distantPast
+            lastFramebufferRequestAt = .distantPast
+            lastFullFramebufferRequestAt = .distantPast
             Logger.shared.info("VNC connected to \(serverInit.name) (\(serverInit.width)×\(serverInit.height))")
             recordSuccessfulRoute(connectedRoute.attempt)
             saveCredentialIfAllowed()
@@ -362,19 +418,27 @@ final class VNCSession: ObservableObject {
             startClipboardSync()
         } catch RFBError.authRequired {
             guard shouldContinueConnecting else { return }
-            securityStatus = .vnc(report: await currentSecurityReport(), scope: networkTrustScope, profile: profile)
+            let report = await currentSecurityReport()
+            recordSecurityReport(report, authenticated: false)
+            securityStatus = .vnc(report: report, scope: networkTrustScope, profile: profile)
             needsPassword = true
             phase = .authenticating
             await disconnectCurrentConnection()
         } catch RFBError.credentialsRequired {
             guard shouldContinueConnecting else { return }
-            securityStatus = .vnc(report: await currentSecurityReport(), scope: networkTrustScope, profile: profile)
+            let report = await currentSecurityReport()
+            recordSecurityReport(report, authenticated: false)
+            securityStatus = .vnc(report: report, scope: networkTrustScope, profile: profile)
             needsCredentials = true
             phase = .authenticating
             await disconnectCurrentConnection()
+        } catch RFBError.unsupportedSecurity(let type) {
+            guard shouldContinueConnecting else { return }
+            await failUnsupportedSecurity(type)
         } catch RFBError.timeout(let stage) {
             guard shouldContinueConnecting else { return }
             let report = await currentSecurityReport()
+            recordSecurityReport(report, authenticated: false)
             if promptForLegacyVNCPasswordIfAvailable(afterTimeoutAt: stage, report: report) {
                 await disconnectCurrentConnection()
                 return
@@ -383,6 +447,7 @@ final class VNCSession: ObservableObject {
         } catch RFBError.authFailed(let reason) {
             guard shouldContinueConnecting else { return }
             let report = await currentSecurityReport()
+            recordSecurityReport(report, authenticated: false)
             let isMacAccountFailure = profile == .macScreenSharing && report.mode == .appleDH
             securityStatus = RemoteSecurityStatus(
                 level: .legacyAuth,
@@ -450,6 +515,10 @@ final class VNCSession: ObservableObject {
         forceLegacyVNCPasswordAuth = false
         currentImage = nil
         frameBuffer = nil
+        framebufferWaitStartedAt = .distantPast
+        lastFramebufferUpdateAt = .distantPast
+        lastFramebufferRequestAt = .distantPast
+        lastFullFramebufferRequestAt = .distantPast
         phase = .ended(reason: "Disconnected")
     }
 
@@ -662,6 +731,64 @@ final class VNCSession: ObservableObject {
         return profile == .macScreenSharing ? .macAccountFirst : .vncPasswordFirst
     }
 
+    private func resetFirstFrameTelemetry() {
+        firstFrameTelemetry = VNCFirstFrameTelemetry(
+            connectionStartedAt: Date(),
+            reconnects: reconnectAttempt
+        )
+    }
+
+    private func recordSecurityReport(_ report: RFBSecurityReport, authenticated: Bool) {
+        var telemetry = firstFrameTelemetry
+        if authenticated {
+            telemetry.authenticatedAt = Date()
+        }
+        telemetry.offeredSecurityModes = report.offeredModes
+        telemetry.negotiatedSecurityMode = report.mode
+        telemetry.lastFailure = nil
+        firstFrameTelemetry = telemetry
+    }
+
+    private func markServerConnectedForFirstFrame() {
+        var telemetry = firstFrameTelemetry
+        telemetry.connectedAt = Date()
+        telemetry.lastFailure = nil
+        firstFrameTelemetry = telemetry
+    }
+
+    private func markFirstFramebufferRequest(at date: Date, reason: String, incremental: Bool) {
+        guard firstFrameTelemetry.firstFramebufferAt == nil else { return }
+
+        var telemetry = firstFrameTelemetry
+        if telemetry.firstFramebufferRequestAt == nil || !incremental {
+            telemetry.firstFramebufferRequestAt = date
+            telemetry.lastRequestReason = reason
+        }
+        if reason == "recovery", !incremental {
+            telemetry.recoveryFullFrameRequests += 1
+        }
+        firstFrameTelemetry = telemetry
+    }
+
+    private func markFirstFramebufferReceived(rects: [RFBRect]) {
+        guard firstFrameTelemetry.firstFramebufferAt == nil else { return }
+
+        var telemetry = firstFrameTelemetry
+        let now = Date()
+        telemetry.firstFramebufferAt = now
+        telemetry.lastFailure = nil
+        firstFrameTelemetry = telemetry
+
+        let duration = telemetry.firstFrameDuration.map(VNCFirstFrameTelemetry.formatSeconds) ?? "unknown"
+        Logger.shared.info("VNC first framebuffer received in \(duration) with \(rects.count) rect(s)")
+    }
+
+    private func markFirstFrameFailure(_ reason: String) {
+        var telemetry = firstFrameTelemetry
+        telemetry.lastFailure = reason
+        firstFrameTelemetry = telemetry
+    }
+
     private func connectUsingPreferredRoute(
         username: String?,
         password: String?,
@@ -710,7 +837,6 @@ final class VNCSession: ObservableObject {
         securityPreference: RFBSecurityPreference,
         timeouts: RFBConnectionTimeouts
     ) async throws -> VNCConnectedRoute {
-        let coordinator = VNCConnectionRaceCoordinator(attempts: attempts)
         var failures: [VNCRouteFailure] = []
 
         return try await withThrowingTaskGroup(of: VNCRouteAttemptOutcome.self, returning: VNCConnectedRoute.self) { group in
@@ -721,10 +847,7 @@ final class VNCSession: ObservableObject {
                         username: username,
                         password: password,
                         securityPreference: securityPreference,
-                        timeouts: timeouts,
-                        onVersionHandshake: {
-                            try await coordinator.markVersionHandshake(for: attempt.id)
-                        }
+                        timeouts: timeouts
                     )
                 }
             }
@@ -889,6 +1012,7 @@ final class VNCSession: ObservableObject {
 
     private func failConnection(with error: Error) async {
         await disconnectCurrentConnection()
+        markFirstFrameFailure(error.localizedDescription)
         securityStatus = RemoteSecurityStatus(
             level: .unknown,
             title: profile == .macScreenSharing ? "Mac Screen Sharing failed" : "VNC connection failed",
@@ -901,6 +1025,37 @@ final class VNCSession: ObservableObject {
         )
         phase = .failed(reason: error.localizedDescription)
         Logger.shared.error("VNC connect failed: \(error.localizedDescription)")
+    }
+
+    private func failUnsupportedSecurity(_ type: UInt8) async {
+        let report = await currentSecurityReport()
+        recordSecurityReport(report, authenticated: false)
+        await disconnectCurrentConnection()
+
+        let mode = RFBSecurityMode(type: type)
+        guard mode.isModernAppleAccountAuth || report.requiresUnsupportedModernAppleAuth else {
+            await failConnection(with: RFBError.unsupportedSecurity(type))
+            return
+        }
+
+        let offered = report.offeredModesDescription.map { " Server offered: \($0)." } ?? ""
+        let detail = "This Mac selected \(mode.displayName), Apple's newer private Screen Sharing account-auth path. Screen Q supports Apple DH (30) and standard VNC password auth on port 5900, but does not yet send credentials through Apple's private 35/36 wire format.\(offered)"
+        markFirstFrameFailure(detail)
+        securityStatus = RemoteSecurityStatus(
+            level: .unknown,
+            title: "Modern Apple Screen Sharing auth required",
+            detail: detail,
+            isTransportEncrypted: false,
+            isAuthenticated: false,
+            recommendedAction: "Use Screen Q Native for this Mac, or enable legacy VNC viewers with a separate VNC password in macOS Screen Sharing settings for the port 5900 path.",
+            protocolName: profile.displayName,
+            authMethod: mode.displayName,
+            credentialStorage: "Keychain",
+            identityVerification: "Apple private Screen Sharing authentication",
+            warnings: ["Screen Q did not send saved credentials through unsupported Apple 35/36 authentication."]
+        )
+        phase = .failed(reason: detail)
+        Logger.shared.error("VNC unsupported Apple Screen Sharing auth \(type).\(offered)")
     }
 
     private func promptForLegacyVNCPasswordIfAvailable(afterTimeoutAt stage: String, report: RFBSecurityReport) -> Bool {
@@ -1011,6 +1166,89 @@ final class VNCSession: ObservableObject {
     }
 
     // MARK: - Input forwarding
+
+    private func configureInputMapper() {
+        inputMapper.isControlEnabled = true
+        inputMapper.keepsPredictedPointerVisible = true
+        inputMapper.sendEvent = { [weak self] event in
+            self?.sendInputEvent(event)
+        }
+    }
+
+    private func sendInputEvent(_ event: RemoteInputEvent) {
+        guard case .connected = phase else { return }
+        switch event {
+        case .pointerMove(let point, _):
+            sendNormalisedPointer(point, buttons: 0)
+        case .pointerDown(let point, let button, _):
+            sendNormalisedPointer(point, buttons: buttonMask(for: button))
+        case .pointerUp(let point, _, _):
+            sendNormalisedPointer(point, buttons: 0)
+        case .scroll(let deltaX, let deltaY, let point, _):
+            sendNormalisedScroll(deltaX: deltaX, deltaY: deltaY, at: point)
+        case .keyDown(let key, let modifiers):
+            sendMappedKey(key, modifiers: modifiers, isDown: true)
+        case .keyUp(let key, let modifiers):
+            sendMappedKey(key, modifiers: modifiers, isDown: false)
+        case .textInput(let text):
+            for scalar in text.unicodeScalars {
+                sendKeyTap(code: scalar.value)
+            }
+        }
+    }
+
+    private func sendNormalisedPointer(_ point: NormalisedPoint, buttons: UInt8) {
+        let mapped = remotePoint(normalised: point)
+        updateCursorPosition(viewX: mapped.viewX, viewY: mapped.viewY)
+        Task {
+            try? await connection?.sendPointerEvent(
+                buttons: buttons,
+                x: UInt16(clamping: mapped.remoteX),
+                y: UInt16(clamping: mapped.remoteY)
+            )
+        }
+    }
+
+    private func sendNormalisedScroll(deltaX: Double, deltaY: Double, at point: NormalisedPoint) {
+        let dominantDelta = abs(deltaY) >= abs(deltaX) ? deltaY : deltaX
+        guard dominantDelta.isFinite, abs(dominantDelta) > 0.5 else { return }
+        let mapped = remotePoint(normalised: point)
+        updateCursorPosition(viewX: mapped.viewX, viewY: mapped.viewY)
+
+        let steps = max(1, min(8, Int((abs(dominantDelta) / 24.0).rounded(.up))))
+        let button: UInt8 = dominantDelta < 0 ? (1 << 3) : (1 << 4)
+        Task {
+            for _ in 0..<steps {
+                try? await connection?.sendPointerEvent(buttons: button, x: UInt16(clamping: mapped.remoteX), y: UInt16(clamping: mapped.remoteY))
+                try? await connection?.sendPointerEvent(buttons: 0, x: UInt16(clamping: mapped.remoteX), y: UInt16(clamping: mapped.remoteY))
+            }
+        }
+    }
+
+    private func sendMappedKey(_ key: KeyCode, modifiers: KeyModifiers, isDown: Bool) {
+        let modifierKeysyms = vncModifierKeysyms(for: modifiers)
+        if isDown {
+            for modifier in modifierKeysyms {
+                sendKey(code: modifier, isDown: true)
+            }
+        }
+        if let code = vncKeysym(for: key) {
+            sendKey(code: code, isDown: isDown)
+        }
+        if !isDown {
+            for modifier in modifierKeysyms.reversed() {
+                sendKey(code: modifier, isDown: false)
+            }
+        }
+    }
+
+    private func buttonMask(for button: PointerButton) -> UInt8 {
+        switch button {
+        case .left: return 1 << 0
+        case .middle: return 1 << 1
+        case .right: return 1 << 2
+        }
+    }
 
     func sendMouseMove(x: Int, y: Int, buttons: UInt8 = 0) {
         guard case .connected = phase else { return }
@@ -1206,9 +1444,14 @@ final class VNCSession: ObservableObject {
         }
         reconnectAttempt += 1
         guard reconnectAttempt <= maxReconnectAttempts else {
+            markFirstFrameFailure("\(reason) (reconnect failed after \(maxReconnectAttempts) attempts)")
             phase = .failed(reason: "\(reason) (reconnect failed after \(maxReconnectAttempts) attempts)")
             return
         }
+        var telemetry = firstFrameTelemetry
+        telemetry.reconnects = reconnectAttempt
+        telemetry.lastFailure = reason
+        firstFrameTelemetry = telemetry
         phase = .reconnecting(attempt: reconnectAttempt)
         Logger.shared.info("VNC reconnecting (attempt \(reconnectAttempt)/\(maxReconnectAttempts)): \(reason)")
 
@@ -1222,6 +1465,11 @@ final class VNCSession: ObservableObject {
         connection = nil
         frameBuffer = nil
         currentImage = nil
+        framebufferWaitStartedAt = .distantPast
+        lastFramebufferUpdateAt = .distantPast
+        lastFramebufferRequestAt = .distantPast
+        lastFullFramebufferRequestAt = .distantPast
+        renderRevision &+= 1
 
         let delay = min(pow(2.0, Double(reconnectAttempt - 1)), 16.0) // 1, 2, 4, 8, 16s
         reconnectTask = Task { [weak self] in
@@ -1235,6 +1483,8 @@ final class VNCSession: ObservableObject {
         switch msg {
         case .framebufferUpdate(let rects):
             guard !rects.isEmpty else { return }
+            let wasWaitingForFirstFramebuffer = firstFrameTelemetry.firstFramebufferAt == nil
+            lastFramebufferUpdateAt = Date()
             frameBuffer?.apply(rects)
             recordFrameStats(rects: rects)
             if isViewportRefreshPending {
@@ -1242,6 +1492,12 @@ final class VNCSession: ObservableObject {
                 lastImagePublish = .distantPast
             }
             publishCurrentImageIfNeeded()
+            if currentImage != nil || useMetalRendering {
+                framebufferWaitStartedAt = .distantPast
+                if wasWaitingForFirstFramebuffer {
+                    markFirstFramebufferReceived(rects: rects)
+                }
+            }
             // Check for piggy-backed cursor update.
             Task {
                 if let cursor = await connection?.consumePendingCursorShape() {
@@ -1260,8 +1516,17 @@ final class VNCSession: ObservableObject {
             selectedDisplayRegion = displayRegions.first
             streamRegion = initialStreamRegion(in: selectedDisplayRegion)
             frameBuffer = makeFrameBuffer(for: streamRegion)
+            isViewportRefreshPending = true
+            if let renderer = metalRenderer, let frameBuffer {
+                renderer.ensureTextureSize(width: frameBuffer.width, height: frameBuffer.height)
+            }
             currentImage = nil
+            framebufferWaitStartedAt = Date()
             lastImagePublish = .distantPast
+            renderRevision &+= 1
+            if let streamRegion {
+                scheduleFullStreamRegionRefresh(streamRegion)
+            }
         case .bell:
             #if os(macOS)
             NSSound.beep()
@@ -1340,28 +1605,86 @@ final class VNCSession: ObservableObject {
 
     private func startRefreshLoop(_ conn: RFBConnection) {
         refreshTask = Task { [weak self] in
-            // Initial full request.
-            try? await conn.sendFramebufferUpdateRequest(
-                incremental: false,
-                x: UInt16(clamping: self?.viewportOriginX ?? 0),
-                y: UInt16(clamping: self?.viewportOriginY ?? 0),
-                w: UInt16(clamping: self?.viewWidth ?? 1920),
-                h: UInt16(clamping: self?.viewHeight ?? 1080)
-            )
+            guard let self else { return }
+            await self.sendFramebufferUpdateRequest(conn, incremental: false, reason: "initial")
 
             while !Task.isCancelled {
-                guard let s = self, case .connected = s.phase else { break }
-                try? await Task.sleep(nanoseconds: s.frameRequestIntervalNanoseconds)
-                guard !s.isViewportRefreshPending else { continue }
-                try? await conn.sendFramebufferUpdateRequest(
-                    incremental: true,
-                    x: UInt16(clamping: s.viewportOriginX),
-                    y: UInt16(clamping: s.viewportOriginY),
-                    w: UInt16(clamping: s.viewWidth),
-                    h: UInt16(clamping: s.viewHeight)
+                guard case .connected = self.phase else { break }
+                try? await Task.sleep(nanoseconds: self.frameRequestIntervalNanoseconds)
+                guard case .connected = self.phase else { break }
+                if self.shouldReconnectAfterMissingFirstFramebuffer() {
+                    self.scheduleReconnect(reason: "Timed out waiting for the first VNC framebuffer")
+                    break
+                }
+                guard !self.isViewportRefreshPending else { continue }
+                let now = Date()
+                let forceFull = self.shouldRequestRecoveryFullFrame(now: now)
+                await self.sendFramebufferUpdateRequest(
+                    conn,
+                    incremental: !forceFull,
+                    reason: forceFull ? "recovery" : "incremental"
                 )
             }
         }
+    }
+
+    @discardableResult
+    private func sendFramebufferUpdateRequest(
+        _ conn: RFBConnection,
+        incremental: Bool,
+        region: VNCDisplayRegion? = nil,
+        reason: String
+    ) async -> Bool {
+        guard case .connected = phase, !isDisconnecting else { return false }
+        let requestRegion = region ?? streamRegion ?? selectedDisplayRegion
+        let x = requestRegion?.x ?? viewportOriginX
+        let y = requestRegion?.y ?? viewportOriginY
+        let width = requestRegion?.width ?? viewWidth
+        let height = requestRegion?.height ?? viewHeight
+        guard width > 0, height > 0 else { return false }
+
+        let now = Date()
+        lastFramebufferRequestAt = now
+        if !incremental {
+            lastFullFramebufferRequestAt = now
+        }
+        if firstFrameTelemetry.firstFramebufferAt == nil, (!incremental || firstFrameTelemetry.firstFramebufferRequestAt == nil) {
+            markFirstFramebufferRequest(at: now, reason: reason, incremental: incremental)
+        }
+
+        do {
+            try await conn.sendFramebufferUpdateRequest(
+                incremental: incremental,
+                x: UInt16(clamping: x),
+                y: UInt16(clamping: y),
+                w: UInt16(clamping: width),
+                h: UInt16(clamping: height)
+            )
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            guard case .connected = phase, !isDisconnecting else { return false }
+            Logger.shared.warn("VNC \(reason) framebuffer request failed: \(error.localizedDescription)")
+            scheduleReconnect(reason: "VNC framebuffer request failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    private func shouldRequestRecoveryFullFrame(now: Date) -> Bool {
+        if currentImage == nil {
+            return now.timeIntervalSince(lastFullFramebufferRequestAt) >= emptyFramebufferRetryInterval
+        }
+        if lastFramebufferUpdateAt == .distantPast {
+            return now.timeIntervalSince(lastFullFramebufferRequestAt) >= steadyStateFullRefreshInterval
+        }
+        return now.timeIntervalSince(lastFramebufferUpdateAt) >= steadyStateFullRefreshInterval &&
+            now.timeIntervalSince(lastFullFramebufferRequestAt) >= steadyStateFullRefreshInterval
+    }
+
+    private func shouldReconnectAfterMissingFirstFramebuffer() -> Bool {
+        guard currentImage == nil, framebufferWaitStartedAt != .distantPast else { return false }
+        return Date().timeIntervalSince(framebufferWaitStartedAt) >= firstFramebufferTimeout
     }
 
     private func setStreamRegion(_ region: VNCDisplayRegion) async {
@@ -1374,7 +1697,13 @@ final class VNCSession: ObservableObject {
         } else {
             frameBuffer = makeFrameBuffer(for: region)
         }
+        if let renderer = metalRenderer, let frameBuffer {
+            renderer.ensureTextureSize(width: frameBuffer.width, height: frameBuffer.height)
+        }
+        currentImage = nil
+        framebufferWaitStartedAt = Date()
         lastImagePublish = .distantPast
+        renderRevision &+= 1
         scheduleFullStreamRegionRefresh(region)
     }
 
@@ -1398,13 +1727,8 @@ final class VNCSession: ObservableObject {
             return
         }
         lastStreamRegionRequest = Date()
-        try? await connection?.sendFramebufferUpdateRequest(
-            incremental: false,
-            x: UInt16(clamping: region.x),
-            y: UInt16(clamping: region.y),
-            w: UInt16(clamping: region.width),
-            h: UInt16(clamping: region.height)
-        )
+        guard let connection else { return }
+        await sendFramebufferUpdateRequest(connection, incremental: false, region: region, reason: "viewport")
     }
 
     private func initialStreamRegion(in bounds: VNCDisplayRegion?) -> VNCDisplayRegion? {
@@ -1534,6 +1858,77 @@ final class VNCSession: ObservableObject {
         )
     }
 
+    private func remotePoint(normalised point: NormalisedPoint) -> (remoteX: Int, remoteY: Int, viewX: Int, viewY: Int) {
+        let base = streamRegion ?? selectedDisplayRegion ?? VNCDisplayRegion(
+            id: "all",
+            name: "All Displays",
+            detail: "\(serverWidth)x\(serverHeight)",
+            x: 0,
+            y: 0,
+            width: max(1, serverWidth),
+            height: max(1, serverHeight)
+        )
+        let viewX = max(0, min(base.width - 1, Int((point.x * Double(max(1, base.width - 1))).rounded())))
+        let viewY = max(0, min(base.height - 1, Int((point.y * Double(max(1, base.height - 1))).rounded())))
+        let remoteX = max(0, min(serverWidth - 1, base.x + viewX))
+        let remoteY = max(0, min(serverHeight - 1, base.y + viewY))
+        return (remoteX, remoteY, viewX, viewY)
+    }
+
+    private func vncModifierKeysyms(for modifiers: KeyModifiers) -> [UInt32] {
+        var result: [UInt32] = []
+        if modifiers.contains(.shift) { result.append(0xFFE1) }
+        if modifiers.contains(.control) { result.append(0xFFE3) }
+        if modifiers.contains(.option) { result.append(0xFFE9) }
+        if modifiers.contains(.command) { result.append(0xFFE7) }
+        return result
+    }
+
+    private func vncKeysym(for key: KeyCode) -> UInt32? {
+        switch key {
+        case .returnKey: return 0xFF0D
+        case .escape: return 0xFF1B
+        case .tab: return 0xFF09
+        case .backspace: return 0xFF08
+        case .delete: return 0xFFFF
+        case .arrowUp: return 0xFF52
+        case .arrowDown: return 0xFF54
+        case .arrowLeft: return 0xFF51
+        case .arrowRight: return 0xFF53
+        case .spacebar: return 0x0020
+        case .home: return 0xFF50
+        case .end: return 0xFF57
+        case .pageUp: return 0xFF55
+        case .pageDown: return 0xFF56
+        case .a: return 0x0061
+        case .c: return 0x0063
+        case .d: return 0x0064
+        case .f: return 0x0066
+        case .h: return 0x0068
+        case .l: return 0x006C
+        case .m: return 0x006D
+        case .q: return 0x0071
+        case .v: return 0x0076
+        case .w: return 0x0077
+        case .x: return 0x0078
+        case .z: return 0x007A
+        case .f1: return 0xFFBE
+        case .f2: return 0xFFBF
+        case .f3: return 0xFFC0
+        case .f4: return 0xFFC1
+        case .f5: return 0xFFC2
+        case .f6: return 0xFFC3
+        case .f7: return 0xFFC4
+        case .f8: return 0xFFC5
+        case .f9: return 0xFFC6
+        case .f10: return 0xFFC7
+        case .f11: return 0xFFC8
+        case .f12: return 0xFFC9
+        case .capsLock:
+            return 0xFFE5
+        }
+    }
+
     private func publishCurrentImageIfNeeded() {
         let now = Date()
         guard currentImage == nil || now.timeIntervalSince(lastImagePublish) >= imagePublishInterval else {
@@ -1543,12 +1938,15 @@ final class VNCSession: ObservableObject {
 
         // Metal path: upload dirty pixels directly to GPU texture.
         if useMetalRendering, let renderer = metalRenderer, let fb = frameBuffer {
-            fb.uploadToMetal(renderer)
+            let didUpload = fb.uploadToMetal(renderer)
             // Still publish a CGImage for thumbnails and fallback consumers.
             if currentImage == nil {
                 currentImage = autoreleasepool {
                     fb.makeCGImage(maxDimension: renderMaxDimension)
                 }
+            }
+            if didUpload {
+                renderRevision &+= 1
             }
             return
         }

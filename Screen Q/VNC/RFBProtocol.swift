@@ -51,6 +51,11 @@ nonisolated struct RFBConnectionTimeouts: Sendable, Equatable {
 }
 
 nonisolated enum RFBSecurityNegotiationPolicy {
+    static func isModernAppleSecurityType(_ type: UInt8) -> Bool {
+        type == RFBSecurityType.appleModern35.rawValue ||
+            type == RFBSecurityType.appleModern36.rawValue
+    }
+
     static func chooseSecurityType(
         offered types: [UInt8],
         hasUsername: Bool,
@@ -58,12 +63,12 @@ nonisolated enum RFBSecurityNegotiationPolicy {
     ) -> UInt8 {
         switch preference {
         case .macAccountFirst:
-            if types.contains(RFBSecurityType.appleScreenSharing.rawValue) { return RFBSecurityType.appleScreenSharing.rawValue }
-            if types.contains(RFBSecurityType.appleDH.rawValue) { return RFBSecurityType.appleDH.rawValue }
+            if hasUsername, types.contains(RFBSecurityType.appleDH.rawValue) { return RFBSecurityType.appleDH.rawValue }
+            if hasUsername, types.contains(RFBSecurityType.appleScreenSharing.rawValue) { return RFBSecurityType.appleScreenSharing.rawValue }
             if types.contains(RFBSecurityType.vncAuth.rawValue) { return RFBSecurityType.vncAuth.rawValue }
         case .vncPasswordFirst:
-            if hasUsername, types.contains(RFBSecurityType.appleScreenSharing.rawValue) { return RFBSecurityType.appleScreenSharing.rawValue }
             if hasUsername, types.contains(RFBSecurityType.appleDH.rawValue) { return RFBSecurityType.appleDH.rawValue }
+            if hasUsername, types.contains(RFBSecurityType.appleScreenSharing.rawValue) { return RFBSecurityType.appleScreenSharing.rawValue }
             if types.contains(RFBSecurityType.vncAuth.rawValue) { return RFBSecurityType.vncAuth.rawValue }
         case .vncPasswordOnly:
             if types.contains(RFBSecurityType.vncAuth.rawValue) { return RFBSecurityType.vncAuth.rawValue }
@@ -82,9 +87,9 @@ nonisolated enum RFBSecurityNegotiationPolicy {
         switch preference {
         case .macAccountFirst:
             if types.contains(RFBSecurityType.appleDH.rawValue) { return RFBSecurityType.appleDH.rawValue }
+            if types.contains(RFBSecurityType.vncAuth.rawValue) { return RFBSecurityType.vncAuth.rawValue }
             if types.contains(RFBSecurityType.appleModern36.rawValue) { return RFBSecurityType.appleModern36.rawValue }
             if types.contains(RFBSecurityType.appleModern35.rawValue) { return RFBSecurityType.appleModern35.rawValue }
-            if types.contains(RFBSecurityType.vncAuth.rawValue) { return RFBSecurityType.vncAuth.rawValue }
         case .vncPasswordFirst:
             if hasUsername, types.contains(RFBSecurityType.appleDH.rawValue) { return RFBSecurityType.appleDH.rawValue }
             if types.contains(RFBSecurityType.vncAuth.rawValue) { return RFBSecurityType.vncAuth.rawValue }
@@ -166,6 +171,10 @@ nonisolated enum RFBSecurityMode: String, Codable, Hashable, Sendable {
             return "Screen Q could not determine the negotiated VNC security mode"
         }
     }
+
+    var isModernAppleAccountAuth: Bool {
+        self == .appleModern35 || self == .appleModern36
+    }
 }
 
 nonisolated struct RFBSecurityReport: Codable, Hashable, Sendable {
@@ -175,6 +184,18 @@ nonisolated struct RFBSecurityReport: Codable, Hashable, Sendable {
     var offeredModesDescription: String? {
         let names = offeredModes.map(\.displayName)
         return names.isEmpty ? nil : names.joined(separator: ", ")
+    }
+
+    var unsupportedModernAppleModes: [RFBSecurityMode] {
+        offeredModes.filter(\.isModernAppleAccountAuth)
+    }
+
+    var hasSupportedCredentialFallback: Bool {
+        offeredModes.contains(.appleDH) || offeredModes.contains(.vncAuth) || offeredModes.contains(.none)
+    }
+
+    var requiresUnsupportedModernAppleAuth: Bool {
+        mode.isModernAppleAccountAuth && !hasSupportedCredentialFallback
     }
 }
 
@@ -190,6 +211,7 @@ nonisolated enum RFBEncoding: Int32, Sendable {
     // Pseudo-encodings
     case cursor              = -239
     case tightPNG            = -260
+    case lastRect            = -224
     case desktopSize         = -223
     case extendedDesktopSize = -308
     case qemuExtendedKeyEvent = -258

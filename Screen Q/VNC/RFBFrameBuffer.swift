@@ -159,7 +159,7 @@ final class RFBFrameBuffer: @unchecked Sendable {
             bitmapInfo: bitmapInfo,
             provider: provider,
             decode: nil,
-            shouldInterpolate: false,
+            shouldInterpolate: true,
             intent: .defaultIntent
         )
     }
@@ -306,45 +306,37 @@ final class RFBFrameBuffer: @unchecked Sendable {
         let scale = CGFloat(maxDimension) / CGFloat(max(sourceWidth, sourceHeight))
         let scaledWidth = max(1, Int((CGFloat(sourceWidth) * scale).rounded(.down)))
         let scaledHeight = max(1, Int((CGFloat(sourceHeight) * scale).rounded(.down)))
-        guard let scaledByteCount = Self.validatedByteCount(width: scaledWidth, height: scaledHeight) else {
-            return nil
-        }
 
-        var scaledPixels = Data(count: scaledByteCount)
-        pixels.withUnsafeBytes { sourceRaw in
-            scaledPixels.withUnsafeMutableBytes { destinationRaw in
-                guard let sourceBase = sourceRaw.baseAddress,
-                      let destinationBase = destinationRaw.baseAddress else {
-                    return
-                }
-
-                for y in 0..<scaledHeight {
-                    let sourceY = min(sourceHeight - 1, y * sourceHeight / scaledHeight)
-                    for x in 0..<scaledWidth {
-                        let sourceX = min(sourceWidth - 1, x * sourceWidth / scaledWidth)
-                        let sourceOffset = (sourceY * sourceWidth + sourceX) * Self.bytesPerPixel
-                        let destinationOffset = (y * scaledWidth + x) * Self.bytesPerPixel
-                        destinationBase
-                            .advanced(by: destinationOffset)
-                            .copyMemory(from: sourceBase.advanced(by: sourceOffset), byteCount: Self.bytesPerPixel)
-                    }
-                }
-            }
-        }
-
-        guard let provider = CGDataProvider(data: scaledPixels as CFData) else { return nil }
-        return CGImage(
-            width: scaledWidth,
-            height: scaledHeight,
+        // Build full-res CGImage from current pixels (lock already held).
+        let snapshot = pixels
+        guard let provider = CGDataProvider(data: snapshot as CFData) else { return nil }
+        guard let sourceImage = CGImage(
+            width: sourceWidth,
+            height: sourceHeight,
             bitsPerComponent: 8,
             bitsPerPixel: 32,
-            bytesPerRow: scaledWidth * Self.bytesPerPixel,
+            bytesPerRow: sourceWidth * Self.bytesPerPixel,
             space: colorSpace,
             bitmapInfo: bitmapInfo,
             provider: provider,
             decode: nil,
-            shouldInterpolate: false,
+            shouldInterpolate: true,
             intent: .defaultIntent
-        )
+        ) else { return nil }
+
+        // Use Core Graphics high-quality interpolation for downscaling.
+        let scaledBytesPerRow = scaledWidth * Self.bytesPerPixel
+        guard let ctx = CGContext(
+            data: nil,
+            width: scaledWidth,
+            height: scaledHeight,
+            bitsPerComponent: 8,
+            bytesPerRow: scaledBytesPerRow,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo.rawValue
+        ) else { return nil }
+        ctx.interpolationQuality = .high
+        ctx.draw(sourceImage, in: CGRect(x: 0, y: 0, width: scaledWidth, height: scaledHeight))
+        return ctx.makeImage()
     }
 }

@@ -16,10 +16,28 @@ enum WakeOnLAN {
         let bytes: [UInt8]  // 6 bytes
 
         init?(_ string: String) {
-            let parts = string.split(separator: ":").compactMap { UInt8($0, radix: 16) }
+            guard let normalized = WakeOnLAN.normalizedMACString(string) else { return nil }
+            let parts = normalized.split(separator: ":").compactMap { UInt8($0, radix: 16) }
             guard parts.count == 6 else { return nil }
             bytes = parts
         }
+    }
+
+    static func normalizedMACString(_ string: String?) -> String? {
+        guard let string else { return nil }
+        let hex = string
+            .filter { $0.isHexDigit }
+            .lowercased()
+        guard hex.count == 12 else { return nil }
+
+        var groups: [String] = []
+        var index = hex.startIndex
+        for _ in 0..<6 {
+            let next = hex.index(index, offsetBy: 2)
+            groups.append(String(hex[index..<next]))
+            index = next
+        }
+        return groups.joined(separator: ":")
     }
 
     /// Send a WOL magic packet to the given MAC address.

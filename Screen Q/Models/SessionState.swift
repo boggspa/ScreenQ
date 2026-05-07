@@ -35,6 +35,13 @@ nonisolated enum SessionState: Equatable, Sendable {
         }
     }
 
+    var allowsPrivilegedHostMessages: Bool {
+        switch self {
+        case .approved, .streaming, .viewOnly: return true
+        default: return false
+        }
+    }
+
     var humanDescription: String {
         switch self {
         case .idle:                  return "Idle"

@@ -66,6 +66,7 @@ enum ViewerToolbarItem: String, CaseIterable, Identifiable {
     case fitMode
     case resetZoom
     case displays
+    case shareTargets
     case quality
     case keyboard
     case modifiers
@@ -84,6 +85,7 @@ enum ViewerToolbarItem: String, CaseIterable, Identifiable {
         case .fitMode: return "Fit or Fill"
         case .resetZoom: return "Reset Zoom"
         case .displays: return "Displays"
+        case .shareTargets: return "Share Target"
         case .quality: return "Quality"
         case .keyboard: return "Keyboard"
         case .modifiers: return "Modifiers"
@@ -102,6 +104,7 @@ enum ViewerToolbarItem: String, CaseIterable, Identifiable {
         case .fitMode: return "rectangle.arrowtriangle.2.inward"
         case .resetZoom: return "minus.magnifyingglass"
         case .displays: return "display.2"
+        case .shareTargets: return "rectangle.on.rectangle"
         case .quality: return "slider.horizontal.3"
         case .keyboard: return "keyboard"
         case .modifiers: return "command"
@@ -128,6 +131,7 @@ enum ViewerToolbarItem: String, CaseIterable, Identifiable {
         .fitMode,
         .resetZoom,
         .displays,
+        .shareTargets,
         .quality,
         .keyboard,
         .modifiers,
@@ -151,6 +155,9 @@ final class ViewerControlPreferences: ObservableObject {
     }
     @Published var toolbarPlacement: ViewerToolbarPlacement {
         didSet { defaults.set(toolbarPlacement.rawValue, forKey: keys.toolbarPlacement) }
+    }
+    @Published var toolbarCondensed: Bool {
+        didSet { defaults.set(toolbarCondensed, forKey: keys.toolbarCondensed) }
     }
     @Published var fitMode: Bool {
         didSet { defaults.set(fitMode, forKey: keys.fitMode) }
@@ -192,6 +199,7 @@ final class ViewerControlPreferences: ObservableObject {
         touchMode = TouchMode(rawValue: defaults.string(forKey: keys.touchMode, fallbackKey: PreferenceKeys.global.touchMode) ?? "") ?? .directTouch
         toolbarStyle = ViewerToolbarStyle(rawValue: defaults.string(forKey: keys.toolbarStyle, fallbackKey: PreferenceKeys.global.toolbarStyle) ?? "") ?? .dockedFloating
         toolbarPlacement = ViewerToolbarPlacement(rawValue: defaults.string(forKey: keys.toolbarPlacement, fallbackKey: PreferenceKeys.global.toolbarPlacement) ?? "") ?? .bottom
+        toolbarCondensed = defaults.bool(forKey: keys.toolbarCondensed, fallbackKey: PreferenceKeys.global.toolbarCondensed) ?? false
         fitMode = defaults.bool(forKey: keys.fitMode, fallbackKey: PreferenceKeys.global.fitMode) ?? true
         showStats = defaults.bool(forKey: keys.showStats, fallbackKey: PreferenceKeys.global.showStats) ?? true
         showCursorOverlay = defaults.bool(forKey: keys.showCursorOverlay, fallbackKey: PreferenceKeys.global.showCursorOverlay) ?? true
@@ -262,6 +270,7 @@ final class ViewerControlPreferences: ObservableObject {
         let touchMode: String
         let toolbarStyle: String
         let toolbarPlacement: String
+        let toolbarCondensed: String
         let fitMode: String
         let showStats: String
         let showCursorOverlay: String
@@ -285,6 +294,7 @@ final class ViewerControlPreferences: ObservableObject {
             touchMode = "\(prefix).touchMode"
             toolbarStyle = "\(prefix).toolbarStyle"
             toolbarPlacement = "\(prefix).toolbarPlacement"
+            toolbarCondensed = "\(prefix).toolbarCondensed"
             fitMode = "\(prefix).fitMode"
             showStats = "\(prefix).showStats"
             showCursorOverlay = "\(prefix).showCursorOverlay"

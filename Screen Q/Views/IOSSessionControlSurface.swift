@@ -27,9 +27,9 @@ struct IOSSessionControlSurface: View {
     let onDisconnect: () -> Void
 
     @State private var dragStartOffset: CGSize?
-    @State private var isCollapsed = false
     @State private var showGestureHelp = false
     @State private var showToolbarCustomization = false
+    @State private var showShareTargetPicker = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -76,27 +76,58 @@ struct IOSSessionControlSurface: View {
 
     private func floatingToolbar(in size: CGSize) -> some View {
         let base = floatingBasePosition(in: size)
-        return toolbarBody(vertical: isCollapsed)
+        let placement = resolvedToolbarPlacement(in: size)
+        let vertical = placement == .leading || placement == .trailing
+        let safeOffset = preferences.toolbarCondensed
+            ? .zero
+            : clampedOffset(preferences.toolbarOffset, in: size, base: base, vertical: vertical)
+        return toolbarBody(vertical: vertical)
             .position(base)
-            .offset(preferences.toolbarOffset)
+            .offset(safeOffset)
             .gesture(
                 DragGesture()
                     .onChanged { value in
                         if dragStartOffset == nil {
-                            dragStartOffset = preferences.toolbarOffset
+                            dragStartOffset = safeOffset
                         }
                         let start = dragStartOffset ?? .zero
                         preferences.toolbarOffset = clampedOffset(
                             CGSize(width: start.width + value.translation.width,
                                    height: start.height + value.translation.height),
                             in: size,
-                            base: base
+                            base: base,
+                            vertical: vertical
                         )
                     }
                     .onEnded { _ in
                         dragStartOffset = nil
                     }
             )
+            .onAppear {
+                clampStoredToolbarOffset(in: size, base: base, vertical: vertical)
+            }
+            .onChange(of: size) { _, _ in
+                let nextPlacement = resolvedToolbarPlacement(in: size)
+                clampStoredToolbarOffset(
+                    in: size,
+                    base: floatingBasePosition(in: size),
+                    vertical: nextPlacement == .leading || nextPlacement == .trailing
+                )
+            }
+            .onChange(of: preferences.toolbarPlacement) { _, _ in
+                resetToolbarOffset()
+            }
+            .onChange(of: preferences.toolbarStyle) { _, _ in
+                resetToolbarOffset()
+            }
+            .onChange(of: preferences.toolbarCondensed) { _, _ in
+                let nextPlacement = resolvedToolbarPlacement(in: size)
+                clampStoredToolbarOffset(
+                    in: size,
+                    base: floatingBasePosition(in: size),
+                    vertical: nextPlacement == .leading || nextPlacement == .trailing
+                )
+            }
     }
 
     private func dockedToolbar(in size: CGSize) -> some View {
@@ -107,51 +138,41 @@ struct IOSSessionControlSurface: View {
             .padding(dockedPadding(for: placement))
     }
 
+    @ViewBuilder
     private func toolbarBody(vertical: Bool) -> some View {
+        if preferences.toolbarCondensed {
+            toolbarChrome {
+                stack(vertical: vertical) {
+                    toolbarButtonSection(vertical: vertical) {
+                        expandToolbarButton
+                    }
+                    toolbarSection(vertical: vertical, prominent: true) {
+                        disconnectButton
+                    }
+                }
+                .padding(7)
+            }
+            .fixedSize(horizontal: !vertical, vertical: vertical)
+            .accessibilityElement(children: .contain)
+        } else {
+            expandedToolbarBody(vertical: vertical)
+        }
+    }
+
+    private func expandedToolbarBody(vertical: Bool) -> some View {
         let axis: Axis.Set = vertical ? .vertical : .horizontal
         return ScrollView(axis, showsIndicators: false) {
-            Group {
-                if isCollapsed && isPad {
-                    stack(vertical: vertical) {
-                        toolbarSection(vertical: vertical) {
-                            statusPill
-                            iconButton(systemName: "chevron.up.chevron.down", label: "Expand controls") {
-                                isCollapsed = false
-                            }
-                        }
-                        toolbarSection(vertical: vertical) {
-                            if preferences.isToolbarItemVisible(.keyboard) {
-                                keyboardButton
-                            }
-                            if preferences.isToolbarItemVisible(.quality) {
-                                qualityButton
-                            }
-                            if preferences.isToolbarItemVisible(.touchMode) {
-                                touchModeMenu
-                            }
-                        }
-                        toolbarSection(vertical: vertical) {
-                            actionMenu
-                        }
-                    }
-                } else {
-                    stack(vertical: vertical) {
-                        toolbarSection(vertical: vertical) {
-                            statusPill
-                            iconButton(systemName: "minus", label: isPad ? "Collapse controls" : "Hide controls") {
-                                if isPad {
-                                    isCollapsed = true
-                                } else {
-                                    controlsVisible = false
-                                }
-                            }
-                        }
-                        ForEach(toolbarItemSections, id: \.self) { section in
-                            toolbarSection(vertical: vertical, prominent: section.contains(.disconnect)) {
-                                ForEach(section) { item in
-                                    toolbarItem(item, vertical: vertical)
-                                }
-                            }
+            stack(vertical: vertical) {
+                toolbarButtonSection(vertical: vertical) {
+                    condenseToolbarButton
+                }
+                toolbarSection(vertical: vertical) {
+                    statusPill
+                }
+                ForEach(toolbarItemSections, id: \.self) { section in
+                    toolbarSection(vertical: vertical, prominent: section.contains(.disconnect)) {
+                        ForEach(section) { item in
+                            toolbarItem(item, vertical: vertical)
                         }
                     }
                 }
@@ -162,10 +183,25 @@ struct IOSSessionControlSurface: View {
             maxWidth: vertical ? 68 : min(UIScreen.main.bounds.width - 20, isPad ? 940 : 760),
             maxHeight: vertical ? min(UIScreen.main.bounds.height - 20, 660) : 66
         )
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .shadow(color: .black.opacity(0.25), radius: 14, x: 0, y: 6)
+        .toolbarChromeStyle()
         .accessibilityElement(children: .contain)
+    }
+
+    private func toolbarChrome<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content()
+            .toolbarChromeStyle()
+    }
+
+    private var expandToolbarButton: some View {
+        iconButton(systemName: "plus", label: "Expand controls", size: 44) {
+            preferences.toolbarCondensed = false
+        }
+    }
+
+    private var condenseToolbarButton: some View {
+        iconButton(systemName: "minus", label: "Condense controls", size: 44) {
+            preferences.toolbarCondensed = true
+        }
     }
 
     private var statusPill: some View {
@@ -208,8 +244,9 @@ struct IOSSessionControlSurface: View {
         StreamQualityButton(
             quality: $preferences.streamQuality,
             profile: $preferences.streamProfile,
+            stats: session.stats,
             protocolName: "Screen Q Native",
-            detail: "Controls native host bitrate, frame cadence, and JPEG fallback compression."
+            detail: "Controls native host bitrate, frame cadence, viewport-aware detail, and compression."
         )
     }
 
@@ -249,7 +286,7 @@ struct IOSSessionControlSurface: View {
 
     @ViewBuilder
     private var displayMenu: some View {
-        if session.remoteDisplays.count > 1 {
+        if shouldShowLegacyDisplayPicker {
             Menu {
                 ForEach(session.remoteDisplays) { display in
                     Button {
@@ -269,6 +306,26 @@ struct IOSSessionControlSurface: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Displays")
+        }
+    }
+
+    @ViewBuilder
+    private var shareTargetMenu: some View {
+        if session.shareTargets.count > 1 {
+            Button {
+                showShareTargetPicker.toggle()
+            } label: {
+                Image(systemName: "rectangle.on.rectangle")
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 38, height: 38)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Share target")
+            .popover(isPresented: $showShareTargetPicker) {
+                ShareTargetPickerContent(session: session) {
+                    showShareTargetPicker = false
+                }
+            }
         }
     }
 
@@ -411,6 +468,9 @@ struct IOSSessionControlSurface: View {
             Button("Customize Toolbar") {
                 showToolbarCustomization = true
             }
+            Button("Condense Controls") {
+                preferences.toolbarCondensed = true
+            }
             Button("Hide Controls") {
                 controlsVisible = false
             }
@@ -427,6 +487,7 @@ struct IOSSessionControlSurface: View {
         systemName: String,
         label: String,
         tint: Color = .primary,
+        size: CGFloat = 38,
         disabled: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
@@ -434,7 +495,8 @@ struct IOSSessionControlSurface: View {
             Image(systemName: systemName)
                 .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(tint)
-                .frame(width: 38, height: 38)
+                .frame(width: size, height: size)
+                .contentShape(Rectangle())
         }
         .disabled(disabled)
         .opacity(disabled ? 0.35 : 1)
@@ -472,7 +534,9 @@ struct IOSSessionControlSurface: View {
         case .resetZoom:
             return !viewport.isIdentity
         case .displays:
-            return session.remoteDisplays.count > 1
+            return shouldShowLegacyDisplayPicker
+        case .shareTargets:
+            return session.shareTargets.count > 1
         default:
             return true
         }
@@ -482,7 +546,7 @@ struct IOSSessionControlSurface: View {
         switch item {
         case .touchMode:
             return .touch
-        case .fitMode, .resetZoom, .displays, .quality:
+        case .fitMode, .resetZoom, .displays, .shareTargets, .quality:
             return .viewport
         case .disconnect:
             return .disconnect
@@ -502,6 +566,8 @@ struct IOSSessionControlSurface: View {
             resetZoomButton
         case .displays:
             displayMenu
+        case .shareTargets:
+            shareTargetMenu
         case .quality:
             qualityButton
         case .keyboard:
@@ -552,8 +618,24 @@ struct IOSSessionControlSurface: View {
             )
     }
 
+    private func toolbarButtonSection<Content: View>(
+        vertical: Bool,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        stack(vertical: vertical, content: content)
+            .padding(1)
+            .background(
+                Color.primary.opacity(0.11),
+                in: RoundedRectangle(cornerRadius: vertical ? 23 : 24, style: .continuous)
+            )
+    }
+
     private var canControl: Bool {
         session.inputMapper.isControlEnabled
+    }
+
+    private var shouldShowLegacyDisplayPicker: Bool {
+        session.shareTargets.isEmpty && session.remoteDisplays.count > 1
     }
 
     private func send(_ key: KeyCode, modifiers explicitModifiers: KeyModifiers = []) {
@@ -561,16 +643,47 @@ struct IOSSessionControlSurface: View {
         session.inputMapper.sendKey(key, modifiers: explicitModifiers)
     }
 
-    private func clampedOffset(_ offset: CGSize, in size: CGSize, base: CGPoint) -> CGSize {
-        let margin: CGFloat = 44
-        let minX = margin - base.x
-        let maxX = max(minX, size.width - margin - base.x)
-        let minY = margin - base.y
-        let maxY = max(minY, size.height - margin - base.y)
+    private func clampedOffset(_ offset: CGSize, in size: CGSize, base: CGPoint, vertical: Bool) -> CGSize {
+        let edge: CGFloat = 10
+        let footprint = toolbarFootprint(vertical: vertical, in: size)
+        let halfWidth = min(footprint.width / 2, max(0, size.width / 2 - edge))
+        let halfHeight = min(footprint.height / 2, max(0, size.height / 2 - edge))
+        let minCenterX = edge + halfWidth
+        let maxCenterX = max(minCenterX, size.width - edge - halfWidth)
+        let minCenterY = edge + halfHeight
+        let maxCenterY = max(minCenterY, size.height - edge - halfHeight)
+        let minX = minCenterX - base.x
+        let maxX = maxCenterX - base.x
+        let minY = minCenterY - base.y
+        let maxY = maxCenterY - base.y
         return CGSize(
             width: min(max(offset.width, minX), maxX),
             height: min(max(offset.height, minY), maxY)
         )
+    }
+
+    private func toolbarFootprint(vertical: Bool, in size: CGSize) -> CGSize {
+        if preferences.toolbarCondensed {
+            return vertical ? CGSize(width: 58, height: 126) : CGSize(width: 126, height: 58)
+        }
+        if vertical {
+            return CGSize(width: 68, height: min(max(size.height - 20, 68), 660))
+        }
+        return CGSize(width: min(max(size.width - 20, 126), isPad ? 940 : 760), height: 66)
+    }
+
+    private func clampStoredToolbarOffset(in size: CGSize, base: CGPoint, vertical: Bool) {
+        let clamped = clampedOffset(preferences.toolbarOffset, in: size, base: base, vertical: vertical)
+        guard abs(preferences.toolbarOffset.width - clamped.width) > 0.5 ||
+              abs(preferences.toolbarOffset.height - clamped.height) > 0.5 else {
+            return
+        }
+        preferences.toolbarOffset = clamped
+    }
+
+    private func resetToolbarOffset() {
+        dragStartOffset = nil
+        preferences.toolbarOffset = .zero
     }
 
     private func usesFloatingToolbar(in size: CGSize) -> Bool {
@@ -594,7 +707,21 @@ struct IOSSessionControlSurface: View {
     }
 
     private func floatingBasePosition(in size: CGSize) -> CGPoint {
-        switch resolvedToolbarPlacement(in: size) {
+        let placement = resolvedToolbarPlacement(in: size)
+        if preferences.toolbarCondensed {
+            let vertical = placement == .leading || placement == .trailing
+            let footprint = toolbarFootprint(vertical: vertical, in: size)
+            let x = 10 + min(footprint.width / 2, max(0, size.width / 2 - 10))
+            switch placement {
+            case .top:
+                return CGPoint(x: x, y: 68)
+            case .bottom:
+                return CGPoint(x: x, y: size.height - 68)
+            case .leading, .trailing:
+                return CGPoint(x: x, y: size.height / 2)
+            }
+        }
+        switch placement {
         case .top:
             return CGPoint(x: size.width / 2, y: 68)
         case .bottom:
@@ -607,6 +734,13 @@ struct IOSSessionControlSurface: View {
     }
 
     private func dockedAlignment(for placement: ViewerToolbarPlacement) -> Alignment {
+        if preferences.toolbarCondensed {
+            switch placement {
+            case .top: return .topLeading
+            case .bottom: return .bottomLeading
+            case .leading, .trailing: return .leading
+            }
+        }
         switch placement {
         case .top: return .top
         case .bottom: return .bottom
@@ -616,6 +750,16 @@ struct IOSSessionControlSurface: View {
     }
 
     private func dockedPadding(for placement: ViewerToolbarPlacement) -> EdgeInsets {
+        if preferences.toolbarCondensed {
+            switch placement {
+            case .top:
+                return EdgeInsets(top: 10, leading: 10, bottom: 0, trailing: 0)
+            case .bottom:
+                return EdgeInsets(top: 0, leading: 10, bottom: 10, trailing: 0)
+            case .leading, .trailing:
+                return EdgeInsets(top: 10, leading: 8, bottom: 10, trailing: 0)
+            }
+        }
         switch placement {
         case .top:
             return EdgeInsets(top: 10, leading: 10, bottom: 0, trailing: 10)
@@ -648,6 +792,9 @@ struct IOSSessionControlSurface: View {
                 }
                 Section("Cursor") {
                     Toggle("Show Overlay Cursor", isOn: $preferences.showCursorOverlay)
+                }
+                Section("Density") {
+                    Toggle("Condensed Toolbar", isOn: $preferences.toolbarCondensed)
                 }
                 Section("Toolbar Items") {
                     ForEach(preferences.toolbarItems) { item in
@@ -721,4 +868,13 @@ struct IOSSessionControlSurface: View {
         }
     }
 }
+
+private extension View {
+    func toolbarChromeStyle() -> some View {
+        background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .shadow(color: .black.opacity(0.25), radius: 14, x: 0, y: 6)
+    }
+}
+
 #endif

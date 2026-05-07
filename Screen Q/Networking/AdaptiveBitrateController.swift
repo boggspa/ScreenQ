@@ -20,8 +20,37 @@ final class AdaptiveBitrateController: ObservableObject {
         var maxFPS: Int = 60
         var rttThresholdUp: Double = 30     // ms — if RTT < this, increase quality
         var rttThresholdDown: Double = 100  // ms — if RTT > this, decrease quality
+        var frameLatencyThresholdUp: Double = 120
+        var frameLatencyThresholdDown: Double = 280
+        var severeFrameLatencyThreshold: Double = 1_000
         var dropThreshold: Int = 3          // dropped frames in window → decrease
         var adjustIntervalSeconds: TimeInterval = 2.0
+
+        nonisolated init(
+            minBitrate: Int = 500_000,
+            maxBitrate: Int = 16_000_000,
+            minFPS: Int = 5,
+            maxFPS: Int = 60,
+            rttThresholdUp: Double = 30,
+            rttThresholdDown: Double = 100,
+            frameLatencyThresholdUp: Double = 120,
+            frameLatencyThresholdDown: Double = 280,
+            severeFrameLatencyThreshold: Double = 1_000,
+            dropThreshold: Int = 3,
+            adjustIntervalSeconds: TimeInterval = 2.0
+        ) {
+            self.minBitrate = minBitrate
+            self.maxBitrate = maxBitrate
+            self.minFPS = minFPS
+            self.maxFPS = maxFPS
+            self.rttThresholdUp = rttThresholdUp
+            self.rttThresholdDown = rttThresholdDown
+            self.frameLatencyThresholdUp = frameLatencyThresholdUp
+            self.frameLatencyThresholdDown = frameLatencyThresholdDown
+            self.severeFrameLatencyThreshold = severeFrameLatencyThreshold
+            self.dropThreshold = dropThreshold
+            self.adjustIntervalSeconds = adjustIntervalSeconds
+        }
     }
 
     @Published private(set) var currentBitrate: Int
@@ -53,19 +82,37 @@ final class AdaptiveBitrateController: ObservableObject {
         let now = Date()
         guard now.timeIntervalSince(lastAdjust) >= config.adjustIntervalSeconds else { return false }
         lastAdjust = now
-        guard stats.totalBytes > 0 || stats.roundTripMillis > 0 || stats.droppedFrames > 0 else {
+        guard stats.totalBytes > 0 ||
+                stats.roundTripMillis > 0 ||
+                stats.frameLatencyMillis > 0 ||
+                stats.peakFrameLatencyMillis > 0 ||
+                stats.droppedFrames > 0 else {
             trend = .stable
             return false
         }
 
         let rtt = stats.roundTripMillis
+        let frameLatency = stats.frameLatencyMillis
+        let peakFrameLatency = stats.peakFrameLatencyMillis
+        let worstFrameLatency = max(frameLatency, peakFrameLatency)
         let newDrops = stats.droppedFrames - prevDropped
         prevDropped = stats.droppedFrames
 
         var changed = false
 
-        if rtt > config.rttThresholdDown || newDrops >= config.dropThreshold {
-            // Network struggling — reduce quality
+        if worstFrameLatency > config.severeFrameLatencyThreshold {
+            let newBitrate = max(config.minBitrate, currentBitrate * 45 / 100)
+            let newFPS = max(config.minFPS, currentFPS - 10)
+            if newBitrate != currentBitrate || newFPS != currentFPS {
+                currentBitrate = newBitrate
+                currentFPS = newFPS
+                trend = .down
+                changed = true
+                Logger.shared.debug("ABR ↓↓ bitrate=\(currentBitrate/1000)kbps fps=\(currentFPS) (frameLatency=\(Int(worstFrameLatency))ms)")
+            }
+        } else if rtt > config.rttThresholdDown ||
+                    worstFrameLatency > config.frameLatencyThresholdDown ||
+                    newDrops >= config.dropThreshold {
             let newBitrate = max(config.minBitrate, currentBitrate * 70 / 100)
             let newFPS = max(config.minFPS, currentFPS - 5)
             if newBitrate != currentBitrate || newFPS != currentFPS {
@@ -73,10 +120,11 @@ final class AdaptiveBitrateController: ObservableObject {
                 currentFPS = newFPS
                 trend = .down
                 changed = true
-                Logger.shared.debug("ABR ↓ bitrate=\(currentBitrate/1000)kbps fps=\(currentFPS) (rtt=\(Int(rtt))ms drops=\(newDrops))")
+                Logger.shared.debug("ABR ↓ bitrate=\(currentBitrate/1000)kbps fps=\(currentFPS) (rtt=\(Int(rtt))ms frameLatency=\(Int(worstFrameLatency))ms drops=\(newDrops))")
             }
-        } else if rtt < config.rttThresholdUp && newDrops == 0 {
-            // Network healthy — increase quality
+        } else if rtt < config.rttThresholdUp &&
+                    (frameLatency == 0 || frameLatency < config.frameLatencyThresholdUp) &&
+                    newDrops == 0 {
             let newBitrate = min(config.maxBitrate, currentBitrate * 120 / 100)
             let newFPS = min(config.maxFPS, currentFPS + 5)
             if newBitrate != currentBitrate || newFPS != currentFPS {

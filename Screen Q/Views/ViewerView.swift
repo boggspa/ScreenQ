@@ -126,8 +126,16 @@ struct ViewerView: View {
             onConnectSaved: { saved in
                 connect(to: saved)
             },
-            onManualConnect: { hostText, port, connectionProtocol in
-                Task { await sessionStore.connect(via: app, hostText: hostText, port: port, connectionProtocol: connectionProtocol) }
+            onManualConnect: { hostText, port, connectionProtocol, wakeMAC in
+                Task {
+                    await sessionStore.connect(
+                        via: app,
+                        hostText: hostText,
+                        port: port,
+                        connectionProtocol: connectionProtocol,
+                        wakeMACAddress: wakeMAC
+                    )
+                }
             },
             onImportRDP: { profile in
                 sessionStore.startRDPSession(profile: profile, app: app)
@@ -141,15 +149,14 @@ struct ViewerView: View {
 
     private func connect(to saved: SavedConnection) {
         Task {
-            if saved.resolvedProtocol == .macScreenSharing {
-                sessionStore.startVNCSession(host: saved.host, port: saved.port, label: saved.displayName, profile: .macScreenSharing)
-            } else if saved.resolvedProtocol == .vnc {
-                sessionStore.startVNCSession(host: saved.host, port: saved.port, label: saved.displayName, profile: .genericVNC)
-            } else if saved.resolvedProtocol == .rdp {
-                sessionStore.startRDPSession(host: saved.host, port: saved.port, label: saved.displayName, app: app)
-            } else {
-                await sessionStore.connect(via: app, hostText: saved.host, port: saved.port, connectionProtocol: saved.resolvedProtocol)
-            }
+            await sessionStore.connect(
+                via: app,
+                hostText: saved.host,
+                port: saved.port,
+                connectionProtocol: saved.resolvedProtocol,
+                displayName: saved.displayName,
+                wakeMACAddress: saved.wakeMACAddress
+            )
         }
     }
 
@@ -412,22 +419,45 @@ final class ViewerSessionStore: ObservableObject {
         hostText: String,
         port: UInt16,
         connectionProtocol: RemoteConnectionProtocol,
-        displayName: String? = nil
+        displayName: String? = nil,
+        wakeMACAddress: String? = nil
     ) async {
         let label = displayName ?? hostText
+        let wakeMAC = WakeOnLAN.normalizedMACString(wakeMACAddress)
+            ?? app.wakeMACAddress(forHost: hostText, port: port)
+        let didSendWake = await sendWakePacketIfPossible(macAddress: wakeMAC, host: hostText, port: port)
+
         switch connectionProtocol {
         case .macScreenSharing:
-            app.savedConnections.addOrUpdate(host: hostText, port: port, displayName: label, connectionProtocol: connectionProtocol)
+            app.savedConnections.addOrUpdate(
+                host: hostText,
+                port: port,
+                displayName: label,
+                connectionProtocol: connectionProtocol,
+                wakeMACAddress: wakeMAC
+            )
             startVNCSession(host: hostText, port: port, label: label, profile: .macScreenSharing)
             return
 
         case .vnc:
-            app.savedConnections.addOrUpdate(host: hostText, port: port, displayName: label, connectionProtocol: connectionProtocol)
+            app.savedConnections.addOrUpdate(
+                host: hostText,
+                port: port,
+                displayName: label,
+                connectionProtocol: connectionProtocol,
+                wakeMACAddress: wakeMAC
+            )
             startVNCSession(host: hostText, port: port, label: label, profile: .genericVNC)
             return
 
         case .rdp:
-            app.savedConnections.addOrUpdate(host: hostText, port: port, displayName: label, connectionProtocol: connectionProtocol)
+            app.savedConnections.addOrUpdate(
+                host: hostText,
+                port: port,
+                displayName: label,
+                connectionProtocol: connectionProtocol,
+                wakeMACAddress: wakeMAC
+            )
             startRDPSession(host: hostText, port: port, label: label, app: app)
             return
 
@@ -435,9 +465,12 @@ final class ViewerSessionStore: ObservableObject {
             break
         }
 
-        let probe = await ConnectivityProbe.probe(host: hostText, port: port, timeoutSeconds: 5)
+        let probeTimeout: TimeInterval = didSendWake ? 18 : 5
+        let probe = await ConnectivityProbe.probe(host: hostText, port: port, timeoutSeconds: probeTimeout)
         guard probe.succeeded else {
-            lastError = probe.friendlyMessage
+            lastError = didSendWake
+                ? "\(probe.friendlyMessage) A Wake-on-LAN packet was sent first, but the host did not become reachable before the timeout."
+                : probe.friendlyMessage
             Logger.shared.error("Probe \(hostText):\(port) → \(probe.friendlyMessage)")
             return
         }
@@ -445,7 +478,13 @@ final class ViewerSessionStore: ObservableObject {
         let host = NWEndpoint.Host(hostText)
         let p = NWEndpoint.Port(rawValue: port) ?? NWEndpoint.Port(rawValue: ScreenQProtocol.defaultPort)!
         let endpoint = NWEndpoint.hostPort(host: host, port: p)
-        app.savedConnections.addOrUpdate(host: hostText, port: port, displayName: label, connectionProtocol: connectionProtocol)
+        app.savedConnections.addOrUpdate(
+            host: hostText,
+            port: port,
+            displayName: label,
+            connectionProtocol: connectionProtocol,
+            wakeMACAddress: wakeMAC
+        )
         await connect(
             via: app,
             endpoint: endpoint,
@@ -456,6 +495,19 @@ final class ViewerSessionStore: ObservableObject {
                 port: port
             )
         )
+    }
+
+    private func sendWakePacketIfPossible(macAddress: String?, host: String, port: UInt16) async -> Bool {
+        guard let macAddress else { return false }
+        do {
+            try await WakeOnLAN.wake(macString: macAddress)
+            Logger.shared.info("Sent Wake-on-LAN packet before connecting to \(host):\(port)")
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            return true
+        } catch {
+            Logger.shared.warn("Wake-on-LAN failed for \(host):\(port): \(error.localizedDescription)")
+            return false
+        }
     }
 
     func connect(
@@ -470,6 +522,7 @@ final class ViewerSessionStore: ObservableObject {
                 connection: connection,
                 peerLabel: label,
                 app: app,
+                endpoint: endpoint,
                 controlPreferenceScope: controlPreferenceScope
             )
             append(ViewerSessionSlot(kind: .screenQ(session)))

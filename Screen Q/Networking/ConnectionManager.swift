@@ -24,7 +24,7 @@ nonisolated enum InboundMessage: Sendable {
     case videoFormat(VideoFormat)
     case videoFrame(VideoFrameMeta, Data)
     case cursorUpdate(CursorUpdateMessage)
-    case inputEvent(RemoteInputEvent)
+    case inputEvent(RemoteInputMessage)
     case clipboardOffer(ClipboardOfferMessage)
     case clipboardRequest(ClipboardRequestMessage)
     case clipboardData(ClipboardDataMessage)
@@ -32,6 +32,8 @@ nonisolated enum InboundMessage: Sendable {
     case audioFrame(Data)
     case displayList(DisplayListMessage)
     case displaySwitch(DisplaySwitchMessage)
+    case shareTargetList(ShareTargetListMessage)
+    case shareTargetSwitch(ShareTargetSwitchMessage)
     case viewerViewport(ViewerViewportMessage)
     case reconnectToken(ReconnectTokenMessage)
     case fileOffer(FileOfferMessage)
@@ -111,6 +113,8 @@ actor ScreenQConnection {
     private var pendingSends: [PendingSend] = []
     private var sendInProgress = false
     private let maxQueuedVideoFrames = 2
+    private let maxQueuedVideoFrameAge: TimeInterval = 0.85
+    private let maxQueuedKeyVideoFrameAge: TimeInterval = 1.6
     private var droppedQueuedVideoFrames = 0
     private(set) var isOpen = false
     private(set) var lastError: Error?
@@ -128,10 +132,21 @@ actor ScreenQConnection {
 
     private enum SendKind {
         case control
+        case input(RemoteInputEvent.Kind)
         case video(isKeyFrame: Bool)
 
         var isVideo: Bool {
             if case .video = self { return true }
+            return false
+        }
+
+        var isInput: Bool {
+            if case .input = self { return true }
+            return false
+        }
+
+        var isPointerMove: Bool {
+            if case .input(.pointerMove) = self { return true }
             return false
         }
 
@@ -144,7 +159,13 @@ actor ScreenQConnection {
     private struct PendingSend {
         let data: Data
         let kind: SendKind
+        let expiresAt: Date?
         let completion: CheckedContinuation<Void, Error>?
+
+        func isExpired(now: Date) -> Bool {
+            guard let expiresAt else { return false }
+            return expiresAt <= now
+        }
     }
 
     /// Enable encryption after key exchange completes.
@@ -153,6 +174,11 @@ actor ScreenQConnection {
         self.sendNonce = NonceCounter()
         self.recvNonce = NonceCounter()
         Logger.shared.info("Encryption enabled for connection \(id) (peer: \(material.peerFingerprint.prefix(16))...)")
+        do {
+            try drainDecodedFrames()
+        } catch {
+            handleFrameDecodeError(error)
+        }
     }
 
     func inboundMessages() -> AsyncStream<InboundMessage> {
@@ -182,6 +208,7 @@ actor ScreenQConnection {
         isOpen = false
         let queued = pendingSends
         pendingSends.removeAll()
+        pendingInboundMessages.removeAll()
         sendInProgress = false
         for item in queued {
             item.completion?.resume(throwing: CancellationError())
@@ -190,17 +217,48 @@ actor ScreenQConnection {
         inboundContinuation = nil
     }
 
-    func sendJSON<T: Encodable>(_ type: MessageType, _ message: T) async throws {
+    func sendJSON<T: Encodable>(
+        _ type: MessageType,
+        _ message: T,
+        waitForCompletion: Bool = true
+    ) async throws {
         sendSequence &+= 1
         let frame = try FrameCodec.encodeJSONMessage(type: type, sequence: sendSequence, message: message)
-        try await enqueueSend(try maybeEncryptFrame(frame), kind: .control, waitForCompletion: true)
+        try await enqueueSend(try maybeEncryptFrame(frame), kind: .control, waitForCompletion: waitForCompletion)
     }
 
-    func sendVideoFrame(meta: VideoFrameMeta, payload: Data) async throws {
+    func sendInputEvent(_ event: RemoteInputEvent, sentAt: TimeInterval = Date().timeIntervalSince1970) async throws {
+        sendSequence &+= 1
+        let message = RemoteInputMessage(
+            event: event,
+            sentAt: sentAt,
+            sequence: sendSequence
+        )
+        let frame = try FrameCodec.encodeJSONMessage(type: .inputEvent, sequence: sendSequence, message: message)
+        let expiresAt = Date().addingTimeInterval(event.sendQueueExpirySeconds)
+        try await enqueueSend(
+            try maybeEncryptFrame(frame),
+            kind: .input(event.kind),
+            waitForCompletion: false,
+            expiresAt: expiresAt
+        )
+    }
+
+    func sendVideoFrame(meta: VideoFrameMeta, payload: Data, waitForCompletion: Bool = false) async throws {
+        guard !isVideoFrameExpired(meta, now: Date()) else {
+            droppedQueuedVideoFrames &+= 1
+            logVideoDropIfNeeded()
+            return
+        }
         guard acceptIncomingVideoFrame(isKeyFrame: meta.isKeyFrame) else { return }
         sendSequence &+= 1
         let frame = try FrameCodec.encodeVideoFrame(sequence: sendSequence, meta: meta, payload: payload)
-        try await enqueueSend(try maybeEncryptFrame(frame), kind: .video(isKeyFrame: meta.isKeyFrame), waitForCompletion: false)
+        try await enqueueSend(
+            try maybeEncryptFrame(frame),
+            kind: .video(isKeyFrame: meta.isKeyFrame),
+            waitForCompletion: waitForCompletion,
+            expiresAt: Date().addingTimeInterval(meta.isKeyFrame ? maxQueuedKeyVideoFrameAge : maxQueuedVideoFrameAge)
+        )
     }
 
     /// Send raw audio frame bytes.
@@ -263,17 +321,70 @@ actor ScreenQConnection {
         type == .hello || type == .helloAck
     }
 
-    private func enqueueSend(_ data: Data, kind: SendKind, waitForCompletion: Bool) async throws {
+    private func enqueueSend(
+        _ data: Data,
+        kind: SendKind,
+        waitForCompletion: Bool,
+        expiresAt: Date? = nil
+    ) async throws {
         guard isOpen else { throw CancellationError() }
+        dropExpiredPendingSends()
+        coalescePendingInput(for: kind)
         if waitForCompletion {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                pendingSends.append(PendingSend(data: data, kind: kind, completion: cont))
+                appendPendingSend(PendingSend(data: data, kind: kind, expiresAt: expiresAt, completion: cont))
                 startNextSendIfNeeded()
             }
         } else {
-            pendingSends.append(PendingSend(data: data, kind: kind, completion: nil))
+            appendPendingSend(PendingSend(data: data, kind: kind, expiresAt: expiresAt, completion: nil))
             startNextSendIfNeeded()
         }
+    }
+
+    private func appendPendingSend(_ item: PendingSend) {
+        guard item.kind.isInput else {
+            pendingSends.append(item)
+            return
+        }
+        let insertionIndex = pendingSends.firstIndex { !$0.kind.isInput } ?? pendingSends.endIndex
+        pendingSends.insert(item, at: insertionIndex)
+    }
+
+    private func coalescePendingInput(for kind: SendKind) {
+        guard kind.isPointerMove else { return }
+        var kept: [PendingSend] = []
+        kept.reserveCapacity(pendingSends.count)
+        for item in pendingSends {
+            if item.kind.isPointerMove {
+                item.completion?.resume(throwing: CancellationError())
+            } else {
+                kept.append(item)
+            }
+        }
+        pendingSends = kept
+    }
+
+    private func dropExpiredPendingSends(now: Date = Date()) {
+        var kept: [PendingSend] = []
+        kept.reserveCapacity(pendingSends.count)
+        for item in pendingSends {
+            if item.isExpired(now: now) {
+                item.completion?.resume(throwing: CancellationError())
+                if item.kind.isVideo {
+                    droppedQueuedVideoFrames &+= 1
+                }
+            } else {
+                kept.append(item)
+            }
+        }
+        pendingSends = kept
+        logVideoDropIfNeeded()
+    }
+
+    private func isVideoFrameExpired(_ meta: VideoFrameMeta, now: Date) -> Bool {
+        guard let captureWallClockTimestamp = meta.captureWallClockTimestamp else { return false }
+        let maxAge = meta.isKeyFrame ? maxQueuedKeyVideoFrameAge : maxQueuedVideoFrameAge
+        return now.timeIntervalSince1970 - captureWallClockTimestamp > maxAge
     }
 
     private func acceptIncomingVideoFrame(isKeyFrame: Bool) -> Bool {
@@ -318,6 +429,7 @@ actor ScreenQConnection {
     }
 
     private func startNextSendIfNeeded() {
+        dropExpiredPendingSends()
         guard !sendInProgress, isOpen, !pendingSends.isEmpty else { return }
         let item = pendingSends.removeFirst()
         sendInProgress = true
@@ -357,14 +469,9 @@ actor ScreenQConnection {
         if let data = data, !data.isEmpty {
             decoder.feed(data)
             do {
-                while let frame = try decoder.nextFrame() {
-                    let inbound = try interpret(frame: decryptFrameIfNeeded(frame))
-                    emitInbound(inbound)
-                }
+                try drainDecodedFrames()
             } catch {
-                Logger.shared.error("Frame decode error: \(error)")
-                emitInbound(.error(ErrorMessage(code: "decode", message: "\(error)")))
-                stop()
+                handleFrameDecodeError(error)
                 return
             }
         }
@@ -390,6 +497,25 @@ actor ScreenQConnection {
         default:
             break
         }
+    }
+
+    private func drainDecodedFrames() throws {
+        while true {
+            guard let header = try decoder.peekHeader() else { return }
+            let encrypted = (header.flags & ScreenQProtocol.Flags.encryptedBody) != 0
+            if encrypted && keyMaterial == nil {
+                return
+            }
+            guard let frame = try decoder.nextFrame() else { return }
+            let inbound = try interpret(frame: decryptFrameIfNeeded(frame))
+            emitInbound(inbound)
+        }
+    }
+
+    private func handleFrameDecodeError(_ error: Error) {
+        Logger.shared.error("Frame decode error: \(error)")
+        emitInbound(.error(ErrorMessage(code: "decode", message: "\(error)")))
+        stop()
     }
 
     private func emitInbound(_ message: InboundMessage) {
@@ -422,7 +548,7 @@ actor ScreenQConnection {
             let (meta, payload) = try FrameCodec.decodeVideoFrame(body: frame.body)
             return .videoFrame(meta, payload)
         case .inputEvent:
-            return .inputEvent(try dec.decode(RemoteInputEvent.self, from: frame.body))
+            return .inputEvent(try dec.decode(RemoteInputMessage.self, from: frame.body))
         case .ping:
             return .ping(try dec.decode(PingMessage.self, from: frame.body))
         case .pong:
@@ -449,6 +575,10 @@ actor ScreenQConnection {
             return .displayList(try dec.decode(DisplayListMessage.self, from: frame.body))
         case .displaySwitch:
             return .displaySwitch(try dec.decode(DisplaySwitchMessage.self, from: frame.body))
+        case .shareTargetList:
+            return .shareTargetList(try dec.decode(ShareTargetListMessage.self, from: frame.body))
+        case .shareTargetSwitch:
+            return .shareTargetSwitch(try dec.decode(ShareTargetSwitchMessage.self, from: frame.body))
         case .viewerViewport:
             return .viewerViewport(try dec.decode(ViewerViewportMessage.self, from: frame.body))
         case .reconnectToken:

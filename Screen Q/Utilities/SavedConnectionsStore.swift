@@ -62,6 +62,7 @@ struct SavedConnection: Codable, Identifiable, Hashable, Sendable {
     var isBookmark: Bool = false
     var lastConnected: Date = Date()
     var peerFingerprint: String?  // optional encryption fingerprint for trust
+    var wakeMACAddress: String?
     var thumbnailData: Data?
     var thumbnailUpdatedAt: Date?
 
@@ -83,13 +84,23 @@ final class SavedConnectionsStore: ObservableObject {
         load()
     }
 
-    func addOrUpdate(host: String, port: UInt16, displayName: String, fingerprint: String? = nil, connectionProtocol: RemoteConnectionProtocol? = nil) {
+    func addOrUpdate(
+        host: String,
+        port: UInt16,
+        displayName: String,
+        fingerprint: String? = nil,
+        connectionProtocol: RemoteConnectionProtocol? = nil,
+        wakeMACAddress: String? = nil
+    ) {
+        let normalizedWakeMAC = WakeOnLAN.normalizedMACString(wakeMACAddress)
+
         // If we already have this host:port, update it.
         if let idx = connections.firstIndex(where: { $0.host == host && $0.port == port }) {
             connections[idx].displayName = displayName
             connections[idx].lastConnected = Date()
             if let connectionProtocol { connections[idx].connectionProtocol = connectionProtocol }
             if let fp = fingerprint { connections[idx].peerFingerprint = fp }
+            if let normalizedWakeMAC { connections[idx].wakeMACAddress = normalizedWakeMAC }
         } else {
             let entry = SavedConnection(
                 displayName: displayName,
@@ -97,7 +108,8 @@ final class SavedConnectionsStore: ObservableObject {
                 port: port,
                 connectionProtocol: connectionProtocol,
                 lastConnected: Date(),
-                peerFingerprint: fingerprint
+                peerFingerprint: fingerprint,
+                wakeMACAddress: normalizedWakeMAC
             )
             connections.insert(entry, at: 0)
         }
@@ -111,6 +123,10 @@ final class SavedConnectionsStore: ObservableObject {
         connections = (bookmarks + recents).sorted { $0.lastConnected > $1.lastConnected }
 
         save()
+    }
+
+    func wakeMACAddress(host: String, port: UInt16) -> String? {
+        connections.first { $0.host == host && $0.port == port }?.wakeMACAddress
     }
 
     func updateThumbnail(host: String, port: UInt16, displayName: String, connectionProtocol: RemoteConnectionProtocol, image: CGImage?) {

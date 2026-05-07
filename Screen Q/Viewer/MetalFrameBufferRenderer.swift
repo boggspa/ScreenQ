@@ -335,7 +335,7 @@ final class MetalFrameBufferRenderer {
 
         let scaleX = drawableW / texW
         let scaleY = drawableH / texH
-        let scale = min(scaleX, scaleY, 1.0)
+        let scale = min(scaleX, scaleY)
         let quadW = (texW * scale) / drawableW
         let quadH = (texH * scale) / drawableH
 
@@ -387,7 +387,8 @@ final class MetalFrameBufferRenderer {
     fragment float4 fragmentTexture(VertexOut in [[stage_in]],
                                      texture2d<float> tex [[texture(0)]],
                                      sampler smp [[sampler(0)]]) {
-        return tex.sample(smp, in.texCoord);
+        float4 color = tex.sample(smp, in.texCoord);
+        return float4(color.rgb, 1.0);
     }
     """
 }

@@ -21,6 +21,7 @@ struct TrackpadInputView: UIViewRepresentable {
     let remotePixelSize: CGSize
     let fit: Bool
     let viewport: ViewportTransform
+    let viewportPanInsets: ViewportPanInsets
     let onViewportChange: (ViewportTransform) -> Void
     let onViewportScaleChange: (CGFloat?) -> Void
     let onControlsToggle: () -> Void
@@ -39,6 +40,7 @@ struct TrackpadInputView: UIViewRepresentable {
         uiView.remotePixelSize = remotePixelSize
         uiView.fit = fit
         uiView.viewport = viewport
+        uiView.viewportPanInsets = viewportPanInsets
         uiView.inputMapper = inputMapper
         uiView.onViewportChange = onViewportChange
         uiView.onViewportScaleChange = onViewportScaleChange
@@ -65,6 +67,7 @@ final class TrackpadTouchView: UIView {
     var remotePixelSize: CGSize = .zero
     var fit: Bool = true
     var viewport: ViewportTransform = .identity
+    var viewportPanInsets: ViewportPanInsets = .zero
     var onViewportChange: ((ViewportTransform) -> Void)?
     var onViewportScaleChange: ((CGFloat?) -> Void)?
     var onControlsToggle: (() -> Void)?
@@ -551,7 +554,8 @@ final class TrackpadTouchView: UIView {
             canvasSize: canvasSize,
             remotePixelSize: remotePixelSize,
             fit: fit,
-            viewport: viewport
+            viewport: viewport,
+            viewportPanInsets: viewportPanInsets
         )
     }
 

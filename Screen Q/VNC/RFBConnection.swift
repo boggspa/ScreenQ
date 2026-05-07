@@ -16,12 +16,12 @@ import Security
 actor RFBConnection {
 
     nonisolated static let preferredClientEncodings: [RFBEncoding] = [
-        .zrle,
         .tight,
         .tightPNG,
         .copyRect,
         .hextile,
         .raw,
+        .lastRect,
         .desktopSize,
         .extendedDesktopSize,
         .cursor,
@@ -102,8 +102,7 @@ actor RFBConnection {
         username: String?,
         password: String?,
         securityPreference: RFBSecurityPreference = .vncPasswordFirst,
-        timeouts: RFBConnectionTimeouts = .default,
-        onVersionHandshake: (@Sendable () async throws -> Void)? = nil
+        timeouts: RFBConnectionTimeouts = .default
     ) async throws -> RFBServerInit {
         try await startTCP(timeout: timeouts.tcpConnect)
         isOpen = true
@@ -114,9 +113,6 @@ actor RFBConnection {
             timeout: timeouts.versionHandshake
         ) {
             try await negotiateVersion()
-        }
-        if let onVersionHandshake {
-            try await onVersionHandshake()
         }
 
         // 2. Security
@@ -616,7 +612,7 @@ actor RFBConnection {
         var didResize = false
         var cursorUpdate: CursorShape?
 
-        for _ in 0..<numRects {
+        rectLoop: for _ in 0..<numRects {
             let x = try await readUInt16()
             let y = try await readUInt16()
             let w = try await readUInt16()
@@ -665,6 +661,9 @@ actor RFBConnection {
 
             case RFBEncoding.qemuExtendedKeyEvent.rawValue:
                 serverSupportsQemuExtendedKey = true
+
+            case RFBEncoding.lastRect.rawValue:
+                break rectLoop
 
             case RFBEncoding.extendedDesktopSize.rawValue:
                 // Payload: number-of-screens (u8), 3 bytes padding, then per-screen 16 bytes.

@@ -20,7 +20,7 @@ struct ConnectionHubView: View {
     var onConnectRFB: (DiscoveredHost) -> Void
     var onConnectTailnet: (TailnetDevice, RemoteConnectionProtocol) -> Void
     var onConnectSaved: (SavedConnection) -> Void
-    var onManualConnect: (String, UInt16, RemoteConnectionProtocol) -> Void
+    var onManualConnect: (String, UInt16, RemoteConnectionProtocol, String?) -> Void
     var onImportRDP: (RDPConnectionProfile) -> Void
 
     @State private var showManualSheet = false
@@ -214,7 +214,7 @@ struct ConnectionHubView: View {
             symbol: "keyboard"
         ) {
             ManualConnectView(
-                onConnect: onManualConnect,
+                onConnectWithWake: onManualConnect,
                 onImportRDP: onImportRDP
             )
             .padding(16)
@@ -249,9 +249,9 @@ struct ConnectionHubView: View {
             Divider()
             ScrollView {
                 ManualConnectView(
-                    onConnect: { host, port, proto in
+                    onConnectWithWake: { host, port, proto, wakeMAC in
                         showManualSheet = false
-                        onManualConnect(host, port, proto)
+                        onManualConnect(host, port, proto, wakeMAC)
                     },
                     onImportRDP: { profile in
                         showManualSheet = false
@@ -344,7 +344,7 @@ struct ConnectionHubView: View {
     @ViewBuilder
     private func cardGrid(_ items: [SavedConnection], large: Bool) -> some View {
         let columns = large ? largeColumns : smallColumns
-        LazyVGrid(columns: columns, spacing: 14) {
+        LazyVGrid(columns: columns, alignment: .leading, spacing: large ? 18 : 20) {
             ForEach(items) { saved in
                 Button {
                     onConnectSaved(saved)
@@ -359,16 +359,18 @@ struct ConnectionHubView: View {
                     )
                 }
                 .buttonStyle(.plain)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
+        .padding(.top, 2)
     }
 
     private var largeColumns: [GridItem] {
-        [GridItem(.adaptive(minimum: 250, maximum: 320), spacing: 14)]
+        [GridItem(.adaptive(minimum: 260), spacing: 18, alignment: .top)]
     }
 
     private var smallColumns: [GridItem] {
-        [GridItem(.adaptive(minimum: 180, maximum: 240), spacing: 14)]
+        [GridItem(.adaptive(minimum: 210), spacing: 20, alignment: .top)]
     }
 
     // MARK: - Misc styling
@@ -576,7 +578,8 @@ private struct SavedConnectionCard: View {
                 .strokeBorder(Color.primary.opacity(isHovered ? 0.20 : 0.07), lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .scaleEffect(isHovered ? 1.02 : 1.0)
+        .scaleEffect(isHovered ? 1.01 : 1.0)
+        .zIndex(isHovered ? 1 : 0)
         .shadow(color: Color.black.opacity(isHovered ? 0.25 : 0.0), radius: isHovered ? 14 : 0, x: 0, y: isHovered ? 6 : 0)
         .animation(.easeOut(duration: 0.15), value: isHovered)
         #if os(macOS)
@@ -612,12 +615,15 @@ private struct SavedConnectionCard: View {
                 .font(.system(size: 10, weight: .bold))
             Text(saved.resolvedProtocol.displayName)
                 .font(.system(size: 10, weight: .bold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
         }
         .foregroundColor(.white)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(Color.black.opacity(0.55))
         .clipShape(Capsule())
+        .frame(maxWidth: large ? 170 : 145, alignment: .leading)
     }
 
     private var protocolIcon: String {

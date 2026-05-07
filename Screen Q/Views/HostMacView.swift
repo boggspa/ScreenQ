@@ -81,7 +81,12 @@ private struct HostMacContent: View {
             } else {
                 Picker("Display", selection: Binding(
                     get: { app.displaySelection.selectedDisplayID ?? app.displaySelection.displays.first?.id ?? 0 },
-                    set: { app.displaySelection.selectedDisplayID = $0 }
+                    set: { displayID in
+                        app.displaySelection.selectedDisplayID = displayID
+                        if #available(macOS 12.3, *) {
+                            app.captureTargetService.selectDisplayTarget(displayID)
+                        }
+                    }
                 )) {
                     ForEach(app.displaySelection.displayOptions()) { d in
                         Text("\(d.name) - \(d.pixelWidth)x\(d.pixelHeight)")
@@ -89,33 +94,45 @@ private struct HostMacContent: View {
                     }
                 }
                 .pickerStyle(.menu)
+                if #available(macOS 12.3, *) {
+                    shareTargetPicker
+                }
             }
             HStack {
                 Button("Refresh Displays") {
-                    Task { await app.displaySelection.refreshUsingSCShareableContent() }
+                    Task {
+                        await app.displaySelection.refreshUsingSCShareableContent()
+                        if #available(macOS 12.3, *) {
+                            await app.captureTargetService.refresh()
+                        }
+                    }
                 }
                 Spacer()
-                qualitySlider
             }
         }
         .panel()
     }
 
-    private var qualitySlider: some View {
-        HStack(spacing: 8) {
-            Text("Quality")
-                .foregroundColor(.secondary)
-            Slider(value: Binding(
-                get: { host.quality },
-                set: { host.quality = $0 }
-            ), in: 0.2...1.0)
-            .frame(width: 200)
-            .onChange(of: host.quality) { newValue in
-                host.applyStreamQuality(StreamQualityPreference(quality: newValue))
+    @available(macOS 12.3, *)
+    private var shareTargetPicker: some View {
+        Picker("Share Target", selection: Binding(
+            get: { app.captureTargetService.selectedTargetID ?? "" },
+            set: { app.captureTargetService.selectedTargetID = $0.isEmpty ? nil : $0 }
+        )) {
+            ForEach(app.captureTargetService.targets) { target in
+                Text(shareTargetLabel(target))
+                    .tag(target.id)
             }
-            Text("\(Int(host.quality * 100))%")
-                .font(.system(.body, design: .monospaced))
         }
+        .pickerStyle(.menu)
+    }
+
+    @available(macOS 12.3, *)
+    private func shareTargetLabel(_ target: CaptureTargetSelectionService.CaptureTargetOption) -> String {
+        if let detail = target.detail {
+            return "\(target.name) - \(detail)"
+        }
+        return target.name
     }
 
     private var advertiseCard: some View {

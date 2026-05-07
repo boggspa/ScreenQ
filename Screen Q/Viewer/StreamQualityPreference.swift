@@ -74,19 +74,25 @@ nonisolated struct StreamProfile: Codable, Hashable, Sendable {
     var keyframeInterval: Double
     var adaptive: Bool
     var prefersHardwareAcceleration: Bool
+    var viewportAwareDetail: Bool?
+
+    var usesViewportAwareDetail: Bool {
+        viewportAwareDetail ?? true
+    }
 
     static func nativeDefault(quality: Double = StreamQualityPreference.defaultQuality) -> StreamProfile {
         let preference = StreamQualityPreference(quality: quality)
         return StreamProfile(
             mode: .balanced,
-            scalePolicy: .balancedDownscale,
+            scalePolicy: .viewerMatched,
             codecPreference: .automatic,
             maxBitrate: preference.nativeTargetBitrate,
             targetFPS: preference.nativeTargetFPS,
             quality: preference.jpegQuality,
             keyframeInterval: 2.0,
             adaptive: true,
-            prefersHardwareAcceleration: true
+            prefersHardwareAcceleration: true,
+            viewportAwareDetail: true
         )
     }
 
@@ -158,7 +164,8 @@ nonisolated struct StreamQualityPreference: Codable, Hashable, Sendable {
             codecPreference: profile.codecPreference,
             keyframeInterval: profile.keyframeInterval,
             adaptive: profile.adaptive,
-            prefersHardwareAcceleration: profile.prefersHardwareAcceleration
+            prefersHardwareAcceleration: profile.prefersHardwareAcceleration,
+            viewportAwareDetail: profile.usesViewportAwareDetail
         )
     }
 
@@ -170,13 +177,13 @@ nonisolated struct StreamQualityPreference: Codable, Hashable, Sendable {
             profile.scalePolicy = .bandwidthSaver
         case 0.48..<0.78:
             profile.mode = .balanced
-            profile.scalePolicy = .balancedDownscale
+            profile.scalePolicy = .viewerMatched
         case 0.78..<0.92:
             profile.mode = .sharp
             profile.scalePolicy = .viewerMatched
         default:
             profile.mode = .smooth
-            profile.scalePolicy = .native
+            profile.scalePolicy = .viewerMatched
         }
         return profile
     }
@@ -265,6 +272,7 @@ nonisolated struct StreamQualityMessage: Codable, Sendable {
     var keyframeInterval: Double? = nil
     var adaptive: Bool? = nil
     var prefersHardwareAcceleration: Bool? = nil
+    var viewportAwareDetail: Bool? = nil
 
     init(quality: Double, profile: StreamProfile) {
         self.quality = StreamQualityPreference(quality: quality).quality
@@ -277,6 +285,7 @@ nonisolated struct StreamQualityMessage: Codable, Sendable {
         self.keyframeInterval = profile.keyframeInterval
         self.adaptive = profile.adaptive
         self.prefersHardwareAcceleration = profile.prefersHardwareAcceleration
+        self.viewportAwareDetail = profile.usesViewportAwareDetail
     }
 
     init(
@@ -289,7 +298,8 @@ nonisolated struct StreamQualityMessage: Codable, Sendable {
         codecPreference: StreamCodecPreference? = nil,
         keyframeInterval: Double? = nil,
         adaptive: Bool? = nil,
-        prefersHardwareAcceleration: Bool? = nil
+        prefersHardwareAcceleration: Bool? = nil,
+        viewportAwareDetail: Bool? = nil
     ) {
         self.quality = StreamQualityPreference(quality: quality).quality
         self.mode = mode
@@ -301,6 +311,7 @@ nonisolated struct StreamQualityMessage: Codable, Sendable {
         self.keyframeInterval = keyframeInterval
         self.adaptive = adaptive
         self.prefersHardwareAcceleration = prefersHardwareAcceleration
+        self.viewportAwareDetail = viewportAwareDetail
     }
 
     func cappedForMobileViewer() -> StreamQualityMessage {
@@ -315,21 +326,23 @@ nonisolated struct StreamQualityMessage: Codable, Sendable {
             codecPreference: codecPreference,
             keyframeInterval: keyframeInterval,
             adaptive: adaptive,
-            prefersHardwareAcceleration: prefersHardwareAcceleration
+            prefersHardwareAcceleration: prefersHardwareAcceleration,
+            viewportAwareDetail: viewportAwareDetail
         )
     }
 
     var profile: StreamProfile {
         StreamProfile(
             mode: mode ?? .custom,
-            scalePolicy: scalePolicy ?? .balancedDownscale,
+            scalePolicy: scalePolicy ?? .viewerMatched,
             codecPreference: codecPreference ?? .automatic,
             maxBitrate: targetBitrate,
             targetFPS: targetFPS,
             quality: jpegQuality,
             keyframeInterval: keyframeInterval ?? 2.0,
             adaptive: adaptive ?? true,
-            prefersHardwareAcceleration: prefersHardwareAcceleration ?? true
+            prefersHardwareAcceleration: prefersHardwareAcceleration ?? true,
+            viewportAwareDetail: viewportAwareDetail ?? true
         )
     }
 }

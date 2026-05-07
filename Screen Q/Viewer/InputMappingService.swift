@@ -67,14 +67,18 @@ nonisolated struct ViewportTransform: Equatable, Sendable {
             canvasLength: geometry.canvasSize.width,
             rectMin: drawRect.minX,
             rectMax: drawRect.maxX,
-            scale: nextScale
+            scale: nextScale,
+            leadingInset: geometry.viewportPanInsets.leading,
+            trailingInset: geometry.viewportPanInsets.trailing
         )
         let clampedY = Self.clampedAxis(
             proposed: offset.height,
             canvasLength: geometry.canvasSize.height,
             rectMin: drawRect.minY,
             rectMax: drawRect.maxY,
-            scale: nextScale
+            scale: nextScale,
+            leadingInset: geometry.viewportPanInsets.top,
+            trailingInset: geometry.viewportPanInsets.bottom
         )
 
         return ViewportTransform(scale: nextScale, offset: CGSize(width: clampedX, height: clampedY))
@@ -101,20 +105,37 @@ nonisolated struct ViewportTransform: Equatable, Sendable {
         canvasLength: CGFloat,
         rectMin: CGFloat,
         rectMax: CGFloat,
-        scale: CGFloat
+        scale: CGFloat,
+        leadingInset: CGFloat,
+        trailingInset: CGFloat
     ) -> CGFloat {
         let canvasMid = canvasLength / 2
-        let rectLength = rectMax - rectMin
-        let transformedLength = rectLength * scale
-
-        if transformedLength <= canvasLength {
-            let rectMid = (rectMin + rectMax) / 2
-            return -(rectMid - canvasMid) * scale
+        let lowerBound = canvasLength - max(0, trailingInset) - canvasMid - (rectMax - canvasMid) * scale
+        let upperBound = max(0, leadingInset) - canvasMid - (rectMin - canvasMid) * scale
+        if lowerBound <= upperBound {
+            return min(max(proposed, lowerBound), upperBound)
         }
+        return (lowerBound + upperBound) / 2
+    }
+}
 
-        let lowerBound = canvasLength - canvasMid - (rectMax - canvasMid) * scale
-        let upperBound = -canvasMid - (rectMin - canvasMid) * scale
-        return min(max(proposed, lowerBound), upperBound)
+nonisolated struct ViewportPanInsets: Equatable, Sendable {
+    static let zero = ViewportPanInsets()
+
+    var top: CGFloat = 0
+    var leading: CGFloat = 0
+    var bottom: CGFloat = 0
+    var trailing: CGFloat = 0
+
+    static func zoomedViewerInsets(for canvasSize: CGSize, keyboardActive: Bool) -> ViewportPanInsets {
+        guard canvasSize.width > 0, canvasSize.height > 0 else { return .zero }
+        let horizontal = min(max(canvasSize.width * 0.12, 48), 140)
+        let top = min(max(canvasSize.height * 0.14, 56), 180)
+        let bottomRatio: CGFloat = keyboardActive ? 0.42 : 0.28
+        let bottomMinimum: CGFloat = keyboardActive ? 180 : 110
+        let bottomMaximum: CGFloat = keyboardActive ? 360 : 260
+        let bottom = min(max(canvasSize.height * bottomRatio, bottomMinimum), bottomMaximum)
+        return ViewportPanInsets(top: top, leading: horizontal, bottom: bottom, trailing: horizontal)
     }
 }
 
@@ -128,17 +149,21 @@ nonisolated struct CanvasGeometry: Sendable {
     /// Local-only zoom/pan used by iOS viewers. Remote input coordinates are
     /// mapped through this so the rendered frame and pointer events stay aligned.
     var viewport: ViewportTransform
+    /// Extra local-only panning room around the remote frame while zoomed.
+    var viewportPanInsets: ViewportPanInsets
 
     init(
         canvasSize: CGSize,
         remotePixelSize: CGSize,
         fit: Bool,
-        viewport: ViewportTransform = .identity
+        viewport: ViewportTransform = .identity,
+        viewportPanInsets: ViewportPanInsets = .zero
     ) {
         self.canvasSize = canvasSize
         self.remotePixelSize = remotePixelSize
         self.fit = fit
         self.viewport = viewport
+        self.viewportPanInsets = viewportPanInsets
     }
 
     func normalised(localPoint: CGPoint) -> NormalisedPoint? {
@@ -269,6 +294,16 @@ final class InputMappingService: ObservableObject {
             flushPendingPointerMove()
             sendEvent?(event)
         }
+    }
+
+    func cancelPendingInput() {
+        pointerFlushTask?.cancel()
+        pointerFlushTask = nil
+        pendingPointerMove = nil
+        predictionClearTask?.cancel()
+        predictionClearTask = nil
+        predictedPointer = nil
+        localInteractionDepth = 0
     }
 
     func updateRemotePointer(_ point: NormalisedPoint) {

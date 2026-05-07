@@ -16,43 +16,53 @@ import CoreGraphics
 final class CursorTracker {
 
     private var timer: Timer?
-    private var lastPoint: CGPoint = .zero
-    private var lastCursorType: String = "arrow"
-    private var lastCursorImageBase64: String?
-    private var lastHotSpot: NSPoint = .zero
-    private var sendHandlers: [UUID: (CursorUpdateMessage) -> Void] = [:]
-    private var displayID: CGDirectDisplayID = 0
-    private var displayFrame: CGRect = .zero
+    private var subscribers: [UUID: CursorSubscriber] = [:]
 
-    func start(displayID: CGDirectDisplayID, subscriberID: UUID, handler: @escaping (CursorUpdateMessage) -> Void) {
-        if timer == nil || self.displayID != displayID {
-            stop()
-            self.displayID = displayID
-            if displayID == DisplaySelectionService.allDisplaysID {
-                self.displayFrame = DisplaySelectionService.appKitDisplayFrameUnion()
-            } else {
-                self.displayFrame = appKitFrame(for: displayID) ?? CGDisplayBounds(displayID)
-            }
-            lastPoint = .zero
-            lastCursorType = "arrow"
-            lastCursorImageBase64 = nil
-            lastHotSpot = .zero
+    private struct CursorSubscriber {
+        var displayID: CGDirectDisplayID
+        var displayFrame: CGRect
+        var lastPoint: CGPoint = .zero
+        var lastCursorType: String = "arrow"
+        var lastCursorImageBase64: String?
+        var lastHotSpot: NSPoint = .zero
+        var handler: (CursorUpdateMessage) -> Void
+    }
+
+    func start(
+        displayID: CGDirectDisplayID,
+        subscriberID: UUID,
+        frame: CGRect? = nil,
+        handler: @escaping (CursorUpdateMessage) -> Void
+    ) {
+        let nextFrame: CGRect
+        if let frame {
+            nextFrame = frame
+        } else if displayID == DisplaySelectionService.allDisplaysID {
+            nextFrame = DisplaySelectionService.appKitDisplayFrameUnion()
+        } else {
+            nextFrame = appKitFrame(for: displayID) ?? CGDisplayBounds(displayID)
         }
-        sendHandlers[subscriberID] = handler
+
+        subscribers[subscriberID] = CursorSubscriber(
+            displayID: displayID,
+            displayFrame: nextFrame,
+            handler: handler
+        )
 
         // Poll at 120Hz for responsive cursor — much cheaper than sending video frames.
         if timer == nil {
             timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
+                guard let self else { return }
                 Task { @MainActor in
-                    self?.tick()
+                    self.tick()
                 }
             }
         }
     }
 
     func removeSubscriber(_ id: UUID) {
-        sendHandlers.removeValue(forKey: id)
-        if sendHandlers.isEmpty {
+        subscribers.removeValue(forKey: id)
+        if subscribers.isEmpty {
             stop()
         }
     }
@@ -60,51 +70,54 @@ final class CursorTracker {
     func stop() {
         timer?.invalidate()
         timer = nil
-        sendHandlers.removeAll()
+        subscribers.removeAll()
     }
 
     private func tick() {
         let mouseLocation = NSEvent.mouseLocation
-        // NSEvent reports AppKit screen coordinates. Use the selected
-        // NSScreen frame, then flip y into the protocol's top-left space.
-        let cgPoint = CGPoint(
-            x: mouseLocation.x - displayFrame.minX,
-            y: displayFrame.height - (mouseLocation.y - displayFrame.minY)
-        )
-
-        // Normalise to 0..1
-        let nx = displayFrame.width > 0 ? cgPoint.x / displayFrame.width : 0
-        let ny = displayFrame.height > 0 ? cgPoint.y / displayFrame.height : 0
-
         let cursorType = currentCursorTypeName()
+        var cursorBitmap: (String?, NSPoint)?
 
-        // Only send if position changed significantly or cursor type changed.
-        let dx = abs(cgPoint.x - lastPoint.x)
-        let dy = abs(cgPoint.y - lastPoint.y)
-        guard dx > 0.5 || dy > 0.5 || cursorType != lastCursorType else { return }
+        for id in Array(subscribers.keys) {
+            guard var subscriber = subscribers[id] else { continue }
+            let displayFrame = subscriber.displayFrame
+            // NSEvent reports AppKit screen coordinates. Use each subscriber's
+            // target frame, then flip y into the protocol's top-left space.
+            let cgPoint = CGPoint(
+                x: mouseLocation.x - displayFrame.minX,
+                y: displayFrame.height - (mouseLocation.y - displayFrame.minY)
+            )
 
-        let cursorChanged = cursorType != lastCursorType
+            let nx = displayFrame.width > 0 ? cgPoint.x / displayFrame.width : 0
+            let ny = displayFrame.height > 0 ? cgPoint.y / displayFrame.height : 0
+            let dx = abs(cgPoint.x - subscriber.lastPoint.x)
+            let dy = abs(cgPoint.y - subscriber.lastPoint.y)
+            guard dx > 0.5 || dy > 0.5 || cursorType != subscriber.lastCursorType else {
+                continue
+            }
 
-        // Update bitmap cache when cursor type changes.
-        if cursorChanged {
-            let (b64, hotSpot) = captureCursorBitmap()
-            lastCursorImageBase64 = b64
-            lastHotSpot = hotSpot
-        }
+            let cursorChanged = cursorType != subscriber.lastCursorType
+            if cursorChanged {
+                if cursorBitmap == nil {
+                    cursorBitmap = captureCursorBitmap()
+                }
+                subscriber.lastCursorImageBase64 = cursorBitmap?.0
+                subscriber.lastHotSpot = cursorBitmap?.1 ?? .zero
+            }
+            subscriber.lastPoint = cgPoint
+            subscriber.lastCursorType = cursorType
 
-        lastPoint = cgPoint
-        lastCursorType = cursorType
-
-        let msg = CursorUpdateMessage(
-            x: Double(nx).clamped01(),
-            y: Double(ny).clamped01(),
-            visible: true,
-            cursorType: cursorType,
-            imageData: cursorChanged ? lastCursorImageBase64 : nil,
-            hotSpotX: cursorChanged ? Double(lastHotSpot.x) : nil,
-            hotSpotY: cursorChanged ? Double(lastHotSpot.y) : nil
-        )
-        for handler in sendHandlers.values {
+            let msg = CursorUpdateMessage(
+                x: Double(nx).clamped01(),
+                y: Double(ny).clamped01(),
+                visible: true,
+                cursorType: cursorType,
+                imageData: cursorChanged ? subscriber.lastCursorImageBase64 : nil,
+                hotSpotX: cursorChanged ? Double(subscriber.lastHotSpot.x) : nil,
+                hotSpotY: cursorChanged ? Double(subscriber.lastHotSpot.y) : nil
+            )
+            let handler = subscriber.handler
+            subscribers[id] = subscriber
             handler(msg)
         }
     }

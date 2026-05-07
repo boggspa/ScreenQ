@@ -78,6 +78,7 @@ nonisolated struct BigUInt: Equatable, Comparable, Sendable {
         let lc = lhs.limbs.count
         let rc = rhs.limbs.count
         if lc != rc { return lc < rc }
+        if lc == 0 { return false }
         for i in stride(from: lc - 1, through: 0, by: -1) {
             if lhs.limbs[i] != rhs.limbs[i] { return lhs.limbs[i] < rhs.limbs[i] }
         }
@@ -209,11 +210,14 @@ nonisolated struct BigUInt: Equatable, Comparable, Sendable {
         lhs.quotientAndRemainder(dividingBy: rhs).remainder
     }
 
-    // MARK: - Modular exponentiation (square-and-multiply)
+    // MARK: - Modular exponentiation
 
     nonisolated static func modpow(_ base: BigUInt, _ exp: BigUInt, _ mod: BigUInt) -> BigUInt {
         guard !mod.isZero else { return BigUInt() }
         if exp.isZero { return BigUInt(1) }
+        if mod.limbs.first.map({ $0 & 1 == 1 }) == true {
+            return MontgomeryContext(modulus: mod).pow(base: base, exponent: exp)
+        }
 
         var result = BigUInt(1)
         var b = base % mod
@@ -226,5 +230,117 @@ nonisolated struct BigUInt: Equatable, Comparable, Sendable {
             b = (b * b) % mod
         }
         return result
+    }
+
+    private struct MontgomeryContext {
+        let modulus: BigUInt
+        let n: Int
+        let modulusLimbs: [UInt32]
+        let negInverse: UInt32
+        let rMod: BigUInt
+        let rSquaredMod: BigUInt
+
+        init(modulus: BigUInt) {
+            self.modulus = modulus
+            self.n = max(1, modulus.limbs.count)
+            self.modulusLimbs = modulus.limbs
+            self.negInverse = 0 &- Self.inverseModWord(modulus.limbs.first ?? 1)
+            self.rMod = Self.powerOfBaseModulo(limbCount: max(1, modulus.limbs.count), multiplier: 1, modulus: modulus)
+            self.rSquaredMod = Self.powerOfBaseModulo(limbCount: max(1, modulus.limbs.count), multiplier: 2, modulus: modulus)
+        }
+
+        func pow(base: BigUInt, exponent: BigUInt) -> BigUInt {
+            var result = rMod
+            var b = toMontgomery(base < modulus ? base : base % modulus)
+            let bits = exponent.bitWidth
+
+            for i in 0..<bits {
+                if exponent.bit(i) {
+                    result = multiply(result, b)
+                }
+                b = multiply(b, b)
+            }
+
+            return fromMontgomery(result)
+        }
+
+        private func toMontgomery(_ value: BigUInt) -> BigUInt {
+            multiply(value, rSquaredMod)
+        }
+
+        private func fromMontgomery(_ value: BigUInt) -> BigUInt {
+            reduce(value.limbs)
+        }
+
+        private func multiply(_ lhs: BigUInt, _ rhs: BigUInt) -> BigUInt {
+            reduce((lhs * rhs).limbs)
+        }
+
+        private func reduce(_ input: [UInt32]) -> BigUInt {
+            var t = input
+            let minimumCount = (2 * n) + 2
+            if t.count < minimumCount {
+                t.append(contentsOf: repeatElement(0, count: minimumCount - t.count))
+            } else {
+                t.append(contentsOf: [0, 0])
+            }
+
+            for i in 0..<n {
+                let u = t[i] &* negInverse
+                var carry: UInt64 = 0
+
+                for j in 0..<n {
+                    let index = i + j
+                    let product = UInt64(u) * UInt64(modulusLimbs[j])
+                        + UInt64(t[index])
+                        + carry
+                    t[index] = UInt32(product & 0xFFFF_FFFF)
+                    carry = product >> 32
+                }
+
+                var index = i + n
+                var sum = UInt64(t[index]) + carry
+                t[index] = UInt32(sum & 0xFFFF_FFFF)
+                carry = sum >> 32
+                index += 1
+
+                while carry > 0 {
+                    if index >= t.count {
+                        t.append(0)
+                    }
+                    sum = UInt64(t[index]) + carry
+                    t[index] = UInt32(sum & 0xFFFF_FFFF)
+                    carry = sum >> 32
+                    index += 1
+                }
+            }
+
+            var result = BigUInt()
+            result.limbs = Array(t.dropFirst(n))
+            result.trimLeadingZeros()
+            while !(result < modulus) {
+                result = result - modulus
+            }
+            return result
+        }
+
+        private static func inverseModWord(_ value: UInt32) -> UInt32 {
+            var inverse: UInt32 = 1
+            for _ in 0..<5 {
+                inverse = inverse &* (2 &- value &* inverse)
+            }
+            return inverse
+        }
+
+        private static func powerOfBaseModulo(limbCount: Int, multiplier: Int, modulus: BigUInt) -> BigUInt {
+            var result = BigUInt(1)
+            for _ in 0..<(32 * limbCount * multiplier) {
+                result = result.shiftedLeft1()
+                if !(result < modulus) {
+                    result = result - modulus
+                }
+            }
+            return result
+        }
     }
 }

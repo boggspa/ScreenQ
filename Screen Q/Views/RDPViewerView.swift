@@ -30,6 +30,7 @@ struct RDPViewerView: View {
     @State private var keyboardDraft = ""
     @State private var viewport: ViewportTransform = .identity
     @State private var lastCanvasSize: CGSize = .zero
+    @State private var didScheduleInitialControlConfiguration = false
     @StateObject private var controlPreferences: ViewerControlPreferences
 
     #if os(iOS)
@@ -171,13 +172,13 @@ struct RDPViewerView: View {
             }
         }
         .onAppear {
-            configureRDPControls()
             syncCredentialFields(from: session.phase)
+            scheduleInitialControlConfiguration()
         }
-        .onReceive(controlPreferences.$streamQuality.removeDuplicates()) { _ in
+        .onReceive(controlPreferences.$streamQuality.removeDuplicates().dropFirst()) { _ in
             applyStreamControls()
         }
-        .onReceive(controlPreferences.$streamProfile.removeDuplicates()) { _ in
+        .onReceive(controlPreferences.$streamProfile.removeDuplicates().dropFirst()) { _ in
             applyStreamControls()
         }
         .onChange(of: session.phase) { newPhase in
@@ -342,6 +343,7 @@ struct RDPViewerView: View {
                         remotePixelSize: remotePixelSize,
                         fit: session.fitMode,
                         viewport: viewport,
+                        viewportPanInsets: ViewportPanInsets.zoomedViewerInsets(for: proxy.size, keyboardActive: viewerKeyboardActive),
                         onViewportChange: { newViewport in
                             setViewport(newViewport, canvasSize: proxy.size)
                         },
@@ -496,7 +498,12 @@ struct RDPViewerView: View {
 
     private func updateCanvas(size: CGSize, viewport: ViewportTransform) {
         lastCanvasSize = size
-        session.updateCanvas(size: size, fit: session.fitMode, viewport: viewport)
+        session.updateCanvas(
+            size: size,
+            fit: session.fitMode,
+            viewport: viewport,
+            viewportPanInsets: ViewportPanInsets.zoomedViewerInsets(for: size, keyboardActive: viewerKeyboardActive)
+        )
         session.inputMapper.ensurePredictedPointerVisible()
     }
 
@@ -505,8 +512,17 @@ struct RDPViewerView: View {
             canvasSize: size,
             remotePixelSize: remotePixelSize,
             fit: session.fitMode,
-            viewport: viewport ?? self.viewport
+            viewport: viewport ?? self.viewport,
+            viewportPanInsets: ViewportPanInsets.zoomedViewerInsets(for: size, keyboardActive: viewerKeyboardActive)
         )
+    }
+
+    private var viewerKeyboardActive: Bool {
+        #if os(iOS)
+        return isKeyboardActive
+        #else
+        return false
+        #endif
     }
 
     private func setViewport(_ newViewport: ViewportTransform, canvasSize: CGSize) {
@@ -537,6 +553,19 @@ struct RDPViewerView: View {
         }
         session.inputMapper.keepsPredictedPointerVisible = true
         #endif
+    }
+
+    private func scheduleInitialControlConfiguration() {
+        guard !didScheduleInitialControlConfiguration else { return }
+        didScheduleInitialControlConfiguration = true
+        // Run configuration asynchronously after the initial layout pass.
+        // Doing this synchronously from .onAppear (which mutates @Published
+        // state on `session` and `@State touchMode`) interacts with the
+        // .onReceive initial-value emissions above and causes a SwiftUI
+        // render loop that wedges the main thread.
+        DispatchQueue.main.async {
+            configureRDPControls()
+        }
     }
 
     private func applyStreamControls() {
@@ -856,7 +885,6 @@ private struct RDPIOSControlSurface: View {
     let onDisconnect: () -> Void
 
     @State private var dragStartOffset: CGSize?
-    @State private var isCollapsed = false
     @State private var showGestureHelp = false
 
     var body: some View {
@@ -901,27 +929,58 @@ private struct RDPIOSControlSurface: View {
 
     private func floatingToolbar(in size: CGSize) -> some View {
         let base = floatingBasePosition(in: size)
-        return toolbarBody(vertical: isCollapsed)
+        let placement = resolvedToolbarPlacement(in: size)
+        let vertical = placement == .leading || placement == .trailing
+        let safeOffset = preferences.toolbarCondensed
+            ? .zero
+            : clampedOffset(preferences.toolbarOffset, in: size, base: base, vertical: vertical)
+        return toolbarBody(vertical: vertical)
             .position(base)
-            .offset(preferences.toolbarOffset)
+            .offset(safeOffset)
             .gesture(
                 DragGesture()
                     .onChanged { value in
                         if dragStartOffset == nil {
-                            dragStartOffset = preferences.toolbarOffset
+                            dragStartOffset = safeOffset
                         }
                         let start = dragStartOffset ?? .zero
                         preferences.toolbarOffset = clampedOffset(
                             CGSize(width: start.width + value.translation.width,
                                    height: start.height + value.translation.height),
                             in: size,
-                            base: base
+                            base: base,
+                            vertical: vertical
                         )
                     }
                     .onEnded { _ in
                         dragStartOffset = nil
                     }
             )
+            .onAppear {
+                clampStoredToolbarOffset(in: size, base: base, vertical: vertical)
+            }
+            .onChange(of: size) { _, _ in
+                let nextPlacement = resolvedToolbarPlacement(in: size)
+                clampStoredToolbarOffset(
+                    in: size,
+                    base: floatingBasePosition(in: size),
+                    vertical: nextPlacement == .leading || nextPlacement == .trailing
+                )
+            }
+            .onChange(of: preferences.toolbarPlacement) { _, _ in
+                resetToolbarOffset()
+            }
+            .onChange(of: preferences.toolbarStyle) { _, _ in
+                resetToolbarOffset()
+            }
+            .onChange(of: preferences.toolbarCondensed) { _, _ in
+                let nextPlacement = resolvedToolbarPlacement(in: size)
+                clampStoredToolbarOffset(
+                    in: size,
+                    base: floatingBasePosition(in: size),
+                    vertical: nextPlacement == .leading || nextPlacement == .trailing
+                )
+            }
     }
 
     private func dockedToolbar(in size: CGSize) -> some View {
@@ -932,76 +991,71 @@ private struct RDPIOSControlSurface: View {
             .padding(dockedPadding(for: placement))
     }
 
+    @ViewBuilder
     private func toolbarBody(vertical: Bool) -> some View {
+        if preferences.toolbarCondensed {
+            toolbarChrome {
+                stack(vertical: vertical) {
+                    toolbarButtonSection(vertical: vertical) {
+                        expandToolbarButton
+                    }
+                    toolbarSection(vertical: vertical, prominent: true) {
+                        disconnectButton
+                    }
+                }
+                .padding(7)
+            }
+            .fixedSize(horizontal: !vertical, vertical: vertical)
+            .accessibilityElement(children: .contain)
+        } else {
+            expandedToolbarBody(vertical: vertical)
+        }
+    }
+
+    private func expandedToolbarBody(vertical: Bool) -> some View {
         let axis: Axis.Set = vertical ? .vertical : .horizontal
         return ScrollView(axis, showsIndicators: false) {
-            Group {
-                if isCollapsed && isPad {
-                    stack(vertical: vertical) {
-                        toolbarSection(vertical: vertical) {
-                            statusPill
-                            iconButton(systemName: "chevron.up.chevron.down", label: "Expand controls") {
-                                isCollapsed = false
-                            }
-                        }
-                        toolbarSection(vertical: vertical) {
-                            keyboardButton
-                            touchModeMenu
-                        }
-                        toolbarSection(vertical: vertical) {
-                            actionMenu
+            stack(vertical: vertical) {
+                toolbarButtonSection(vertical: vertical) {
+                    condenseToolbarButton
+                }
+                toolbarSection(vertical: vertical) {
+                    statusPill
+                }
+                toolbarSection(vertical: vertical) {
+                    touchModeMenu
+                }
+                toolbarSection(vertical: vertical) {
+                    iconButton(
+                        systemName: fitMode ? "rectangle.arrowtriangle.2.outward" : "rectangle.arrowtriangle.2.inward",
+                        label: fitMode ? "Fill screen" : "Fit to screen"
+                    ) {
+                        fitMode.toggle()
+                        preferences.fitMode = fitMode
+                    }
+                    StreamQualityButton(
+                        quality: $streamQuality,
+                        profile: $streamProfile,
+                        protocolName: "RDP",
+                        detail: "Controls viewer frame cadence today. FreeRDP wire-level performance flags can use this same preference next."
+                    )
+                    if !viewport.isIdentity {
+                        iconButton(systemName: "minus.magnifyingglass", label: "Reset zoom") {
+                            resetViewport()
                         }
                     }
-                } else {
-                    stack(vertical: vertical) {
-                        toolbarSection(vertical: vertical) {
-                            statusPill
-                            iconButton(systemName: "minus", label: isPad ? "Collapse controls" : "Hide controls") {
-                                if isPad {
-                                    isCollapsed = true
-                                } else {
-                                    controlsVisible = false
-                                }
-                            }
-                        }
-                        toolbarSection(vertical: vertical) {
-                            touchModeMenu
-                        }
-                        toolbarSection(vertical: vertical) {
-                            iconButton(
-                                systemName: fitMode ? "rectangle.arrowtriangle.2.outward" : "rectangle.arrowtriangle.2.inward",
-                                label: fitMode ? "Fill screen" : "Fit to screen"
-                            ) {
-                                fitMode.toggle()
-                                preferences.fitMode = fitMode
-                            }
-                            StreamQualityButton(
-                                quality: $streamQuality,
-                                profile: $streamProfile,
-                                protocolName: "RDP",
-                                detail: "Controls viewer frame cadence today. FreeRDP wire-level performance flags can use this same preference next."
-                            )
-                            if !viewport.isIdentity {
-                                iconButton(systemName: "minus.magnifyingglass", label: "Reset zoom") {
-                                    resetViewport()
-                                }
-                            }
-                        }
-                        toolbarSection(vertical: vertical) {
-                            keyboardButton
-                            modifierButtons(vertical: vertical)
-                            arrowsMenu
-                            specialKeysMenu
-                            functionKeysMenu
-                            shortcutsMenu
-                            actionMenu
-                        }
-                        toolbarSection(vertical: vertical, prominent: true) {
-                            iconButton(systemName: "xmark.circle", label: "Disconnect", tint: .red) {
-                                onDisconnect()
-                            }
-                        }
-                    }
+                }
+                toolbarSection(vertical: vertical) {
+                    keyboardButton
+                    modifierButtons(vertical: vertical)
+                    arrowsMenu
+                    specialKeysMenu
+                    functionKeysMenu
+                    shortcutsMenu
+                    actionMenu
+                }
+                toolbarSection(vertical: vertical, prominent: true) {
+                    disconnectButton
                 }
             }
             .padding(7)
@@ -1010,10 +1064,31 @@ private struct RDPIOSControlSurface: View {
             maxWidth: vertical ? 68 : min(UIScreen.main.bounds.width - 20, isPad ? 900 : 760),
             maxHeight: vertical ? min(UIScreen.main.bounds.height - 20, 660) : 66
         )
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .shadow(color: .black.opacity(0.25), radius: 14, x: 0, y: 6)
+        .rdpToolbarChromeStyle()
         .accessibilityElement(children: .contain)
+    }
+
+    private func toolbarChrome<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content()
+            .rdpToolbarChromeStyle()
+    }
+
+    private var expandToolbarButton: some View {
+        iconButton(systemName: "plus", label: "Expand controls", size: 44) {
+            preferences.toolbarCondensed = false
+        }
+    }
+
+    private var condenseToolbarButton: some View {
+        iconButton(systemName: "minus", label: "Condense controls", size: 44) {
+            preferences.toolbarCondensed = true
+        }
+    }
+
+    private var disconnectButton: some View {
+        iconButton(systemName: "xmark.circle", label: "Disconnect", tint: .red) {
+            onDisconnect()
+        }
     }
 
     private var statusPill: some View {
@@ -1200,6 +1275,9 @@ private struct RDPIOSControlSurface: View {
                     preferences.toolbarOffset = .zero
                 }
             }
+            Button("Condense Controls") {
+                preferences.toolbarCondensed = true
+            }
             Button("Hide Controls") {
                 controlsVisible = false
             }
@@ -1216,6 +1294,7 @@ private struct RDPIOSControlSurface: View {
         systemName: String,
         label: String,
         tint: Color = .primary,
+        size: CGFloat = 38,
         disabled: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
@@ -1223,7 +1302,8 @@ private struct RDPIOSControlSurface: View {
             Image(systemName: systemName)
                 .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(tint)
-                .frame(width: 38, height: 38)
+                .frame(width: size, height: size)
+                .contentShape(Rectangle())
         }
         .disabled(disabled)
         .opacity(disabled ? 0.35 : 1)
@@ -1253,21 +1333,64 @@ private struct RDPIOSControlSurface: View {
             )
     }
 
+    private func toolbarButtonSection<Content: View>(
+        vertical: Bool,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        stack(vertical: vertical, content: content)
+            .padding(1)
+            .background(
+                Color.primary.opacity(0.11),
+                in: RoundedRectangle(cornerRadius: vertical ? 23 : 24, style: .continuous)
+            )
+    }
+
     private func send(_ key: KeyCode, modifiers explicitModifiers: KeyModifiers = []) {
         guard inputMapper.isControlEnabled else { return }
         inputMapper.sendKey(key, modifiers: explicitModifiers)
     }
 
-    private func clampedOffset(_ offset: CGSize, in size: CGSize, base: CGPoint) -> CGSize {
-        let margin: CGFloat = 44
-        let minX = margin - base.x
-        let maxX = max(minX, size.width - margin - base.x)
-        let minY = margin - base.y
-        let maxY = max(minY, size.height - margin - base.y)
+    private func clampedOffset(_ offset: CGSize, in size: CGSize, base: CGPoint, vertical: Bool) -> CGSize {
+        let edge: CGFloat = 10
+        let footprint = toolbarFootprint(vertical: vertical, in: size)
+        let halfWidth = min(footprint.width / 2, max(0, size.width / 2 - edge))
+        let halfHeight = min(footprint.height / 2, max(0, size.height / 2 - edge))
+        let minCenterX = edge + halfWidth
+        let maxCenterX = max(minCenterX, size.width - edge - halfWidth)
+        let minCenterY = edge + halfHeight
+        let maxCenterY = max(minCenterY, size.height - edge - halfHeight)
+        let minX = minCenterX - base.x
+        let maxX = maxCenterX - base.x
+        let minY = minCenterY - base.y
+        let maxY = maxCenterY - base.y
         return CGSize(
             width: min(max(offset.width, minX), maxX),
             height: min(max(offset.height, minY), maxY)
         )
+    }
+
+    private func toolbarFootprint(vertical: Bool, in size: CGSize) -> CGSize {
+        if preferences.toolbarCondensed {
+            return vertical ? CGSize(width: 58, height: 126) : CGSize(width: 126, height: 58)
+        }
+        if vertical {
+            return CGSize(width: 68, height: min(max(size.height - 20, 68), 660))
+        }
+        return CGSize(width: min(max(size.width - 20, 126), isPad ? 900 : 760), height: 66)
+    }
+
+    private func clampStoredToolbarOffset(in size: CGSize, base: CGPoint, vertical: Bool) {
+        let clamped = clampedOffset(preferences.toolbarOffset, in: size, base: base, vertical: vertical)
+        guard abs(preferences.toolbarOffset.width - clamped.width) > 0.5 ||
+              abs(preferences.toolbarOffset.height - clamped.height) > 0.5 else {
+            return
+        }
+        preferences.toolbarOffset = clamped
+    }
+
+    private func resetToolbarOffset() {
+        dragStartOffset = nil
+        preferences.toolbarOffset = .zero
     }
 
     private func usesFloatingToolbar(in size: CGSize) -> Bool {
@@ -1291,7 +1414,21 @@ private struct RDPIOSControlSurface: View {
     }
 
     private func floatingBasePosition(in size: CGSize) -> CGPoint {
-        switch resolvedToolbarPlacement(in: size) {
+        let placement = resolvedToolbarPlacement(in: size)
+        if preferences.toolbarCondensed {
+            let vertical = placement == .leading || placement == .trailing
+            let footprint = toolbarFootprint(vertical: vertical, in: size)
+            let x = 10 + min(footprint.width / 2, max(0, size.width / 2 - 10))
+            switch placement {
+            case .top:
+                return CGPoint(x: x, y: 68)
+            case .bottom:
+                return CGPoint(x: x, y: size.height - 68)
+            case .leading, .trailing:
+                return CGPoint(x: x, y: size.height / 2)
+            }
+        }
+        switch placement {
         case .top:
             return CGPoint(x: size.width / 2, y: 68)
         case .bottom:
@@ -1304,6 +1441,13 @@ private struct RDPIOSControlSurface: View {
     }
 
     private func dockedAlignment(for placement: ViewerToolbarPlacement) -> Alignment {
+        if preferences.toolbarCondensed {
+            switch placement {
+            case .top: return .topLeading
+            case .bottom: return .bottomLeading
+            case .leading, .trailing: return .leading
+            }
+        }
         switch placement {
         case .top: return .top
         case .bottom: return .bottom
@@ -1313,6 +1457,16 @@ private struct RDPIOSControlSurface: View {
     }
 
     private func dockedPadding(for placement: ViewerToolbarPlacement) -> EdgeInsets {
+        if preferences.toolbarCondensed {
+            switch placement {
+            case .top:
+                return EdgeInsets(top: 10, leading: 10, bottom: 0, trailing: 0)
+            case .bottom:
+                return EdgeInsets(top: 0, leading: 10, bottom: 10, trailing: 0)
+            case .leading, .trailing:
+                return EdgeInsets(top: 10, leading: 8, bottom: 10, trailing: 0)
+            }
+        }
         switch placement {
         case .top:
             return EdgeInsets(top: 10, leading: 10, bottom: 0, trailing: 10)
@@ -1366,6 +1520,14 @@ private struct RDPIOSControlSurface: View {
                 }
             }
         }
+    }
+}
+
+private extension View {
+    func rdpToolbarChromeStyle() -> some View {
+        background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .shadow(color: .black.opacity(0.25), radius: 14, x: 0, y: 6)
     }
 }
 #endif

@@ -23,8 +23,46 @@ nonisolated enum RemoteInputEvent: Codable, Sendable, Hashable {
         case kind, point, button, deltaX, deltaY, key, modifiers, text
     }
 
-    enum Kind: String, Codable {
+    enum Kind: String, Codable, Hashable, Sendable {
         case pointerMove, pointerDown, pointerUp, scroll, keyDown, keyUp, textInput
+    }
+
+    var kind: Kind {
+        switch self {
+        case .pointerMove: return .pointerMove
+        case .pointerDown: return .pointerDown
+        case .pointerUp: return .pointerUp
+        case .scroll: return .scroll
+        case .keyDown: return .keyDown
+        case .keyUp: return .keyUp
+        case .textInput: return .textInput
+        }
+    }
+
+    var sendQueueExpirySeconds: TimeInterval {
+        switch self {
+        case .pointerMove:
+            return 0.18
+        case .scroll:
+            return 0.5
+        case .pointerDown, .keyDown, .textInput:
+            return 1.25
+        case .pointerUp, .keyUp:
+            return 5.0
+        }
+    }
+
+    var hostExpirySeconds: TimeInterval {
+        switch self {
+        case .pointerMove:
+            return 0.35
+        case .scroll:
+            return 0.75
+        case .pointerDown, .keyDown, .textInput:
+            return 1.5
+        case .pointerUp, .keyUp:
+            return 5.0
+        }
     }
 
     func encode(to encoder: Encoder) throws {
@@ -105,6 +143,52 @@ nonisolated enum RemoteInputEvent: Codable, Sendable, Hashable {
         case .textInput:
             self = .textInput(try c.decode(String.self, forKey: .text))
         }
+    }
+}
+
+nonisolated struct RemoteInputMessage: Codable, Sendable, Hashable {
+    var event: RemoteInputEvent
+    var sentAt: TimeInterval?
+    var sequence: UInt64?
+
+    init(
+        event: RemoteInputEvent,
+        sentAt: TimeInterval? = Date().timeIntervalSince1970,
+        sequence: UInt64? = nil
+    ) {
+        self.event = event
+        self.sentAt = sentAt
+        self.sequence = sequence
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case event, sentAt, sequence
+    }
+
+    init(from decoder: Decoder) throws {
+        if let envelope = try? decoder.container(keyedBy: CodingKeys.self),
+           let event = try? envelope.decode(RemoteInputEvent.self, forKey: .event) {
+            self.event = event
+            self.sentAt = try envelope.decodeIfPresent(TimeInterval.self, forKey: .sentAt)
+            self.sequence = try envelope.decodeIfPresent(UInt64.self, forKey: .sequence)
+        } else {
+            self.event = try RemoteInputEvent(from: decoder)
+            self.sentAt = nil
+            self.sequence = nil
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(event, forKey: .event)
+        try c.encodeIfPresent(sentAt, forKey: .sentAt)
+        try c.encodeIfPresent(sequence, forKey: .sequence)
+    }
+
+    func isExpired(now: TimeInterval = Date().timeIntervalSince1970) -> Bool {
+        guard let sentAt, sentAt.isFinite else { return false }
+        guard sentAt <= now else { return false }
+        return now - sentAt > event.hostExpirySeconds
     }
 }
 

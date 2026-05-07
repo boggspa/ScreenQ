@@ -42,8 +42,14 @@ final class MacHostRuntime: ObservableObject {
     private let hostFileTransfer = FileTransferService()
     private var cancellables: Set<AnyCancellable> = []
     private var abrTimer: Timer?
+    private var shareTargetRefreshTimer: Timer?
+    private var lastShareTargetListMessage: ShareTargetListMessage?
+    private var pendingShareTargetRefreshTask: Task<Void, Never>?
     private var didBindPairing = false
+    private var didBindShareTargetNotifications = false
     private var adaptiveStreamingEnabled = true
+    private var hostHandshakeTimeouts: [UUID: Task<Void, Never>] = [:]
+    private var controlChannelBoxesBySession: [UUID: [HostSessionBox]] = [:]
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -57,6 +63,7 @@ final class MacHostRuntime: ObservableObject {
     func configure(app: AppState) {
         self.app = app
         bindPairingIfNeeded()
+        bindShareTargetRefreshNotificationsIfNeeded()
     }
 
     var readyToHost: Bool {
@@ -67,6 +74,9 @@ final class MacHostRuntime: ObservableObject {
         guard let app else { return }
         app.macPermissions.refresh()
         await app.displaySelection.refreshUsingSCShareableContent()
+        if #available(macOS 12.3, *) {
+            await app.captureTargetService.refresh()
+        }
         if autoStartHosting && !isSharing && readyToHost {
             await startHosting()
         }
@@ -131,14 +141,29 @@ final class MacHostRuntime: ObservableObject {
         app.cursorTracker.stop()
         app.clipboardSync.stop()
         if #available(macOS 13.0, *) { app.audioCaptureService.stop() }
+        app.macInput.resetTransientState()
         abrTimer?.invalidate()
         abrTimer = nil
+        shareTargetRefreshTimer?.invalidate()
+        shareTargetRefreshTimer = nil
+        pendingShareTargetRefreshTask?.cancel()
+        pendingShareTargetRefreshTask = nil
+        lastShareTargetListMessage = nil
 
         let connections = hostConnections
         for box in connections {
             await box.connection.stop()
         }
+        let controlBoxes = controlChannelBoxesBySession.values.flatMap { $0 }
+        controlChannelBoxesBySession.removeAll()
+        for box in controlBoxes {
+            await box.connection.stop()
+        }
+        hostHandshakeTimeouts.values.forEach { $0.cancel() }
+        hostHandshakeTimeouts.removeAll()
         hostConnections.removeAll()
+        app.macInput.enabled = false
+        app.macInput.viewOnly = true
         isSharing = false
         app.session = .idle
         for request in pairing.pendingRequests {
@@ -158,6 +183,10 @@ final class MacHostRuntime: ObservableObject {
         }
         guard let app else { return }
         guard let box = hostConnections.first(where: { $0.pendingRequest?.id == request.id }) else { return }
+        guard box.encryptionEnabled, box.peerID == request.viewer.id else {
+            await reject(request, reason: "Secure handshake incomplete")
+            return
+        }
 
         let sessionID = UUID()
         let perms = permissions
@@ -167,9 +196,13 @@ final class MacHostRuntime: ObservableObject {
             controlEnabled: perms.contains(.control),
             permissions: perms
         )
-        try? await box.connection.sendJSON(.pairingApproved, approved)
+        cancelHostHandshakeTimeout(for: box)
         box.grantedPermissions = perms
         box.sessionID = sessionID
+        box.state = viewOnly || !perms.contains(.control) ? .viewOnly : .approved
+        box.pendingRequest = nil
+        refreshInputGate()
+        try? await box.connection.sendJSON(.pairingApproved, approved, waitForCompletion: false)
 
         if let fingerprint = request.identityFingerprint {
             pairing.trust(viewer: request.viewer, fingerprint: fingerprint)
@@ -199,23 +232,22 @@ final class MacHostRuntime: ObservableObject {
 
         pairing.remove(request.id)
         MacPairingPromptController.shared.dismiss(request.id)
-        box.state = viewOnly || !perms.contains(.control) ? .viewOnly : .approved
-        box.pendingRequest = nil
-        app.macInput.enabled = perms.contains(.control)
-        app.macInput.viewOnly = viewOnly || !perms.contains(.control)
 
         guard #available(macOS 12.3, *) else { return }
         app.macCaptureService.settings.captureAudio = enableAudio && perms.contains(.audioForward)
+        await app.captureTargetService.refresh()
+        box.captureTargetID = app.captureTargetService.activeTargetID()
         do {
             try await app.macCaptureService.start(
                 subscriberID: box.id,
+                targetID: box.captureTargetID,
                 onFormat: { [weak box] format in
                     guard let box else { return }
-                    try? await box.connection.sendJSON(.videoFormat, format)
+                    try? await box.connection.sendJSON(.videoFormat, format, waitForCompletion: false)
                 },
                 onFrame: { [weak box] meta, payload in
                     guard let box else { return }
-                    Task { try? await box.connection.sendVideoFrame(meta: meta, payload: payload) }
+                    box.videoSender.submit(meta: meta, payload: payload)
                 }
             )
             box.state = viewOnly || !perms.contains(.control) ? .viewOnly : .streaming
@@ -227,7 +259,12 @@ final class MacHostRuntime: ObservableObject {
                 detail: "Encrypted=\(box.encryptionEnabled). Permissions: \(perms.rawValue)"
             )
         } catch {
-            app.lastError = error.localizedDescription
+            await failHostSession(
+                box,
+                code: "captureStartFailed",
+                message: "Screen capture failed: \(error.localizedDescription)"
+            )
+            return
         }
 
         hostFileTransfer.sendMessage = { [weak box] type, msg in
@@ -235,9 +272,13 @@ final class MacHostRuntime: ObservableObject {
             Task { try? await box.connection.sendJSON(type, msg) }
         }
 
-        let cursorDisplayID = app.displaySelection.selectedDisplayID ?? app.displaySelection.displays.first?.id
+        let cursorDisplayID = app.macCaptureService.activeDisplayID(for: box.id) ?? app.displaySelection.displays.first?.id
         if let cursorDisplayID {
-            app.cursorTracker.start(displayID: cursorDisplayID, subscriberID: box.id) { [weak box] msg in
+            app.cursorTracker.start(
+                displayID: cursorDisplayID,
+                subscriberID: box.id,
+                frame: app.macCaptureService.activeInputConstraint(for: box.id)?.mappingFrame
+            ) { [weak box] msg in
                 guard let box else { return }
                 Task { try? await box.connection.sendJSON(.cursorUpdate, msg) }
             }
@@ -258,7 +299,9 @@ final class MacHostRuntime: ObservableObject {
         }
 
         await sendDisplayList(to: box)
+        await sendShareTargetList(to: box)
         startAdaptiveBitrateLoop()
+        startShareTargetRefreshLoop()
     }
 
     func reject(
@@ -274,6 +317,7 @@ final class MacHostRuntime: ObservableObject {
             )
         }
         if let box = hostConnections.first(where: { $0.pendingRequest?.id == request.id }) {
+            cancelHostHandshakeTimeout(for: box)
             try? await box.connection.sendJSON(.pairingRejected, PairingRejectedMessage(reason: reason))
             await box.connection.stop()
         }
@@ -283,6 +327,7 @@ final class MacHostRuntime: ObservableObject {
 
     func disconnect(_ box: HostSessionBox) async {
         guard let app else { return }
+        cancelHostHandshakeTimeout(for: box)
         try? await box.connection.sendJSON(.endSession, EndSessionMessage(reason: "Host disconnected"))
         await box.connection.stop()
         app.auditLog.log(
@@ -306,6 +351,47 @@ final class MacHostRuntime: ObservableObject {
             .store(in: &cancellables)
     }
 
+    private func bindShareTargetRefreshNotificationsIfNeeded() {
+        guard !didBindShareTargetNotifications else { return }
+        guard #available(macOS 12.3, *) else { return }
+        didBindShareTargetNotifications = true
+
+        let workspaceNotifications = [
+            NSWorkspace.didLaunchApplicationNotification,
+            NSWorkspace.didTerminateApplicationNotification,
+            NSWorkspace.didActivateApplicationNotification
+        ]
+        for notification in workspaceNotifications {
+            NSWorkspace.shared.notificationCenter.publisher(for: notification)
+                .sink { [weak self] _ in
+                    Task { @MainActor in
+                        self?.scheduleShareTargetRefresh()
+                    }
+                }
+                .store(in: &cancellables)
+        }
+
+        NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor in
+                    self?.scheduleShareTargetRefresh(force: true)
+                }
+            }
+            .store(in: &cancellables)
+    }
+
+    @available(macOS 12.3, *)
+    private func scheduleShareTargetRefresh(force: Bool = false, delay: TimeInterval = 0.4) {
+        guard isSharing else { return }
+        pendingShareTargetRefreshTask?.cancel()
+        pendingShareTargetRefreshTask = Task { @MainActor [weak self] in
+            let nanoseconds = UInt64(max(0, delay) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            guard !Task.isCancelled else { return }
+            await self?.broadcastShareTargetList(force: force)
+        }
+    }
+
     private func applyStreamQuality(_ message: StreamQualityMessage) {
         guard let app else { return }
         let profile = message.profile
@@ -317,6 +403,20 @@ final class MacHostRuntime: ObservableObject {
         )
         if #available(macOS 12.3, *) {
             app.macCaptureService.applyStreamQuality(message)
+        }
+    }
+
+    private func applyStreamQuality(_ message: StreamQualityMessage, for box: HostSessionBox) {
+        guard let app else { return }
+        let profile = message.profile
+        quality = StreamQualityPreference(quality: message.quality).quality
+        adaptiveStreamingEnabled = profile.adaptive
+        box.adaptiveBitrate.setUserCeiling(
+            bitrate: message.targetBitrate,
+            fps: message.targetFPS
+        )
+        if #available(macOS 12.3, *) {
+            app.macCaptureService.applyStreamQuality(for: box.id, message)
         }
     }
 
@@ -349,9 +449,85 @@ final class MacHostRuntime: ObservableObject {
                 isMain: d.id == firstID
             )
         }
-        let active = app.displaySelection.selectedDisplayID ?? infos.first?.id ?? 0
+        let targetDisplayID: UInt32? = {
+            guard #available(macOS 12.3, *) else { return nil }
+            return box.captureTargetID.flatMap { app.captureTargetService.displayID(forTargetID: $0) }
+        }()
+        let active = targetDisplayID
+            ?? app.displaySelection.selectedDisplayID
+            ?? infos.first?.id
+            ?? 0
         let msg = DisplayListMessage(displays: infos, activeDisplayID: active)
         try? await box.connection.sendJSON(.displayList, msg)
+    }
+
+    private func sendShareTargetList(to box: HostSessionBox) async {
+        guard let app else { return }
+        guard #available(macOS 12.3, *) else { return }
+        await app.captureTargetService.refresh()
+        if box.captureTargetID == nil {
+            box.captureTargetID = app.captureTargetService.activeTargetID()
+        }
+        let message = app.captureTargetService.targetListMessage(activeTargetID: box.captureTargetID)
+        lastShareTargetListMessage = message
+        try? await box.connection.sendJSON(
+            .shareTargetList,
+            message,
+            waitForCompletion: false
+        )
+    }
+
+    @available(macOS 12.3, *)
+    private func broadcastShareTargetList(force: Bool = false) async {
+        guard let app else { return }
+        await app.captureTargetService.refresh()
+        let message = app.captureTargetService.targetListMessage()
+        guard force || message != lastShareTargetListMessage else { return }
+        lastShareTargetListMessage = message
+
+        let activeBoxes = hostConnections.filter { box in
+            hostSession(box, allows: .observe)
+        }
+        for box in activeBoxes {
+            let perViewerMessage = app.captureTargetService.targetListMessage(activeTargetID: box.captureTargetID)
+            try? await box.connection.sendJSON(.shareTargetList, perViewerMessage, waitForCompletion: false)
+        }
+    }
+
+    @available(macOS 12.3, *)
+    private func restartCapture(for box: HostSessionBox, failureCode: String, failurePrefix: String) async {
+        guard let app else { return }
+        do {
+            try await app.macCaptureService.restartSubscriber(
+                box.id,
+                targetID: box.captureTargetID,
+                onFormat: { [weak box] format in
+                    guard let box else { return }
+                    try? await box.connection.sendJSON(.videoFormat, format, waitForCompletion: false)
+                },
+                onFrame: { [weak box] meta, payload in
+                    guard let box else { return }
+                    box.videoSender.submit(meta: meta, payload: payload)
+                }
+            )
+            let cursorDisplayID = app.macCaptureService.activeDisplayID(for: box.id) ?? app.displaySelection.displays.first?.id
+            if let cursorDisplayID {
+                app.cursorTracker.start(
+                    displayID: cursorDisplayID,
+                    subscriberID: box.id,
+                    frame: app.macCaptureService.activeInputConstraint(for: box.id)?.mappingFrame
+                ) { [weak box] msg in
+                    guard let box else { return }
+                    Task { try? await box.connection.sendJSON(.cursorUpdate, msg) }
+                }
+            }
+        } catch {
+            await failHostSession(
+                box,
+                code: failureCode,
+                message: "\(failurePrefix): \(error.localizedDescription)"
+            )
+        }
     }
 
     private func acceptIncoming(_ nw: NWConnection) async {
@@ -359,17 +535,73 @@ final class MacHostRuntime: ObservableObject {
         let conn = await app.connectionManager.adopt(nw, role: .host)
         let box = HostSessionBox(connection: conn)
         hostConnections.append(box)
+        scheduleHostHandshakeTimeout(for: box)
 
         let stream = await conn.inboundMessages()
         for await message in stream {
             await handleHostInbound(message, box: box)
         }
+        await cleanupDisconnectedHostSession(box, reason: "Remote disconnected")
+        await stopSessionServicesIfIdle()
+    }
+
+    private func cleanupDisconnectedHostSession(_ box: HostSessionBox, reason: String) async {
+        guard let app else { return }
+        cancelHostHandshakeTimeout(for: box)
+        if box.isAuxiliaryControlChannel {
+            removeAuxiliaryControlChannel(box)
+            box.state = .ended(reason: reason)
+            return
+        }
+        if let pendingRequest = box.pendingRequest {
+            pairing.remove(pendingRequest.id)
+            MacPairingPromptController.shared.dismiss(pendingRequest.id)
+            box.pendingRequest = nil
+        }
+        if let sessionID = box.sessionID {
+            await closeAuxiliaryControlChannels(for: sessionID)
+        }
         if #available(macOS 12.3, *) {
-            app.macCaptureService.removeSubscriber(box.id)
+            await app.macCaptureService.removeSubscriber(box.id)
         }
         app.cursorTracker.removeSubscriber(box.id)
+        if box.grantedPermissions.contains(.control) || box.state.allowsInputInjection {
+            app.macInput.resetTransientState()
+        }
+        if let sessionID = box.sessionID {
+            app.auditLog.log(
+                sessionID: sessionID,
+                peerName: box.peerName,
+                peerID: box.peerID,
+                event: .sessionEnded,
+                detail: reason
+            )
+        }
+        box.state = .ended(reason: reason)
         hostConnections.removeAll(where: { $0.id == box.id })
-        await stopSessionServicesIfIdle()
+        refreshInputGate()
+    }
+
+    private func registerAuxiliaryControlChannel(_ box: HostSessionBox, for sessionID: UUID) {
+        box.isAuxiliaryControlChannel = true
+        controlChannelBoxesBySession[sessionID, default: []].append(box)
+        hostConnections.removeAll(where: { $0.id == box.id })
+    }
+
+    private func removeAuxiliaryControlChannel(_ box: HostSessionBox) {
+        guard let sessionID = box.sessionID else { return }
+        controlChannelBoxesBySession[sessionID]?.removeAll(where: { $0.id == box.id })
+        if controlChannelBoxesBySession[sessionID]?.isEmpty == true {
+            controlChannelBoxesBySession.removeValue(forKey: sessionID)
+        }
+    }
+
+    private func closeAuxiliaryControlChannels(for sessionID: UUID) async {
+        let boxes = controlChannelBoxesBySession.removeValue(forKey: sessionID) ?? []
+        for box in boxes {
+            box.state = .ended(reason: "Primary session ended")
+            await box.connection.stop()
+        }
     }
 
     private func stopSessionServicesIfIdle() async {
@@ -382,14 +614,178 @@ final class MacHostRuntime: ObservableObject {
         if #available(macOS 13.0, *) {
             app.audioCaptureService.stop()
         }
+        app.macInput.resetTransientState()
         abrTimer?.invalidate()
         abrTimer = nil
+        shareTargetRefreshTimer?.invalidate()
+        shareTargetRefreshTimer = nil
+        pendingShareTargetRefreshTask?.cancel()
+        pendingShareTargetRefreshTask = nil
+        lastShareTargetListMessage = nil
+    }
+
+    private func failHostSession(
+        _ box: HostSessionBox,
+        code: String,
+        message: String
+    ) async {
+        guard let app else { return }
+        app.lastError = message
+        box.state = .failed(reason: message)
+        refreshInputGate()
+        Logger.shared.error(message)
+        app.auditLog.log(
+            sessionID: box.sessionID,
+            peerName: box.peerName,
+            peerID: box.peerID,
+            event: .error,
+            detail: message
+        )
+        cancelHostHandshakeTimeout(for: box)
+        try? await box.connection.sendJSON(.error, ErrorMessage(code: code, message: message), waitForCompletion: false)
+        await box.connection.stop()
+    }
+
+    private func scheduleHostHandshakeTimeout(for box: HostSessionBox) {
+        hostHandshakeTimeouts[box.id]?.cancel()
+        hostHandshakeTimeouts[box.id] = Task { [weak self, weak box] in
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            guard !Task.isCancelled, let self, let box else { return }
+            switch box.state {
+            case .handshake, .awaitingHostApproval:
+                await self.failHostSession(
+                    box,
+                    code: "handshakeTimeout",
+                    message: "Screen Q handshake timed out before the viewer completed pairing."
+                )
+            default:
+                break
+            }
+        }
+    }
+
+    private func cancelHostHandshakeTimeout(for box: HostSessionBox) {
+        hostHandshakeTimeouts.removeValue(forKey: box.id)?.cancel()
+    }
+
+    private func refreshInputGate() {
+        guard let app else { return }
+        let hasControlSession = hostConnections.contains { box in
+            box.state.allowsInputInjection && !viewOnly && hostSession(box, allows: .control)
+        }
+        app.macInput.enabled = hasControlSession
+        app.macInput.viewOnly = viewOnly || !hasControlSession
+    }
+
+    private func hostSession(_ box: HostSessionBox, allows permission: PermissionSet) -> Bool {
+        box.encryptionEnabled &&
+            box.sessionID != nil &&
+            box.state.allowsPrivilegedHostMessages &&
+            box.grantedPermissions.contains(permission)
+    }
+
+    private func handleControlChannelHello(_ hello: HelloMessage, box: HostSessionBox) async {
+        guard let app else { return }
+        guard let sessionID = hello.sessionID,
+              let viewerPublicKey = hello.ephemeralPublicKey else {
+            try? await box.connection.sendJSON(.error, ErrorMessage(
+                code: "controlChannelRejected",
+                message: "Control channel attach request was incomplete."
+            ), waitForCompletion: false)
+            await box.connection.stop()
+            return
+        }
+
+        let viewerIdentityFingerprint = DeviceIdentityStore.verify(
+            publicKeyBase64: hello.identityPublicKey,
+            signatureBase64: hello.identitySignature,
+            peerID: hello.peerID,
+            displayName: hello.displayName,
+            ephemeralPublicKey: hello.ephemeralPublicKey
+        )
+
+        guard let primary = hostConnections.first(where: { candidate in
+            !candidate.isAuxiliaryControlChannel &&
+            candidate.sessionID == sessionID &&
+            candidate.peerID == hello.peerID &&
+            candidate.identityFingerprint == viewerIdentityFingerprint &&
+            candidate.state.allowsInputInjection &&
+            hostSession(candidate, allows: .control)
+        }), !viewOnly else {
+            try? await box.connection.sendJSON(.error, ErrorMessage(
+                code: "controlChannelRejected",
+                message: "No approved controllable session matched this control channel."
+            ), waitForCompletion: false)
+            await box.connection.stop()
+            return
+        }
+
+        let secureFactory = SecureSessionFactory()
+        let hostPublicKey = secureFactory.publicKeyBase64
+        let hostProof = DeviceIdentityStore.proof(
+            peerID: app.localDeviceID,
+            displayName: app.localDeviceName,
+            ephemeralPublicKey: hostPublicKey
+        )
+        let keyMaterial: SecureSessionKeyMaterial
+        do {
+            keyMaterial = try secureFactory.deriveKey(
+                peerPublicKeyBase64: viewerPublicKey,
+                salt: ScreenQSecureSessionTranscript.salt(viewerID: hello.peerID, hostID: app.localDeviceID),
+                info: ScreenQSecureSessionTranscript.info(viewerPublicKey: viewerPublicKey, hostPublicKey: hostPublicKey),
+                role: .host
+            )
+        } catch {
+            try? await box.connection.sendJSON(.error, ErrorMessage(
+                code: "controlChannelEncryptionFailed",
+                message: "Unable to negotiate Screen Q control channel encryption."
+            ), waitForCompletion: false)
+            await box.connection.stop()
+            return
+        }
+
+        box.peerName = "\(primary.peerName) control"
+        box.peerID = hello.peerID
+        box.peerPlatform = hello.platform
+        box.peerAppVersion = hello.appVersion
+        box.identityFingerprint = viewerIdentityFingerprint
+        box.grantedPermissions = primary.grantedPermissions
+        box.sessionID = sessionID
+        box.state = primary.state
+        box.encryptionEnabled = true
+        box.encryptionStatusKnown = true
+
+        let ack = HelloAckMessage(
+            peerID: app.localDeviceID,
+            displayName: app.localDeviceName,
+            platform: .macOS,
+            appVersion: "1.0",
+            capabilities: hostCapabilities(),
+            ephemeralPublicKey: hostPublicKey,
+            identityPublicKey: hostProof?.publicKeyBase64,
+            identitySignature: hostProof?.signatureBase64,
+            encryptionEnabled: true,
+            trustedByHost: true
+        )
+        try? await box.connection.sendJSON(.helloAck, ack, waitForCompletion: false)
+        await box.connection.enableEncryption(keyMaterial)
+        cancelHostHandshakeTimeout(for: box)
+        registerAuxiliaryControlChannel(box, for: sessionID)
+        Logger.shared.info("Attached Screen Q control channel for \(primary.peerName)")
     }
 
     private func handleHostInbound(_ message: InboundMessage, box: HostSessionBox) async {
         guard let app else { return }
         switch message {
         case .hello(let hello):
+            if hello.channel == .control {
+                await handleControlChannelHello(hello, box: box)
+                return
+            }
+            guard box.peerID == nil else {
+                Logger.shared.warn("Ignoring duplicate Screen Q hello from \(hello.displayName) on session \(box.id)")
+                return
+            }
             guard let viewerPublicKey = hello.ephemeralPublicKey else {
                 try? await box.connection.sendJSON(.error, ErrorMessage(
                     code: "encryptionRequired",
@@ -452,7 +848,7 @@ final class MacHostRuntime: ObservableObject {
             )
             box.encryptionEnabled = ack.encryptionEnabled
             box.encryptionStatusKnown = true
-            try? await box.connection.sendJSON(.helloAck, ack)
+            try? await box.connection.sendJSON(.helloAck, ack, waitForCompletion: false)
             await box.connection.enableEncryption(keyMaterial)
 
             if viewerIsTrusted {
@@ -475,6 +871,14 @@ final class MacHostRuntime: ObservableObject {
                 await routeTrustedReconnect(pr, box: box)
             }
         case .pairingRequest(let req):
+            guard box.encryptionEnabled, box.peerID == req.viewerID else {
+                await failHostSession(
+                    box,
+                    code: "encryptionRequired",
+                    message: "Pairing requires an encrypted Screen Q handshake."
+                )
+                return
+            }
             let pr = PairingRequest(
                 id: UUID(),
                 viewer: PeerDevice(
@@ -499,75 +903,79 @@ final class MacHostRuntime: ObservableObject {
                 event: .pairingRequested,
                 detail: "Pairing request received. Identity fingerprint: \(box.identityFingerprint.map { String($0.prefix(16)) } ?? "missing")"
             )
-        case .inputEvent(let event):
-            if box.state.allowsInputInjection && !viewOnly && box.grantedPermissions.contains(.control) {
-                app.macInput.handle(event)
+        case .inputEvent(let input):
+            if box.state.allowsInputInjection && !viewOnly && hostSession(box, allows: .control) {
+                guard !input.isExpired() else {
+                    Logger.shared.debug("Dropped stale input \(input.event.kind.rawValue) from \(box.peerName)")
+                    break
+                }
+                if #available(macOS 12.3, *) {
+                    app.macInput.handle(
+                        input.event,
+                        displayID: app.macCaptureService.activeDisplayID(for: box.id),
+                        inputConstraint: app.macCaptureService.activeInputConstraint(for: box.id)
+                    )
+                } else {
+                    app.macInput.handle(input.event)
+                }
             }
         case .clipboardOffer(let offer):
-            guard enableClipboard, box.grantedPermissions.contains(.clipboard) else { break }
+            guard enableClipboard, hostSession(box, allows: .clipboard) else { break }
             app.clipboardSync.handleRemoteOffer(offer) { request in
                 Task { try? await box.connection.sendJSON(.clipboardRequest, request) }
             }
         case .clipboardRequest(let request):
-            guard enableClipboard, box.grantedPermissions.contains(.clipboard) else { break }
+            guard enableClipboard, hostSession(box, allows: .clipboard) else { break }
             app.clipboardSync.handleRequest(request)
         case .clipboardData(let data):
-            guard enableClipboard, box.grantedPermissions.contains(.clipboard) else { break }
+            guard enableClipboard, hostSession(box, allows: .clipboard) else { break }
             app.clipboardSync.applyRemoteClipboard(data)
         case .displaySwitch(let switchMsg):
-            guard box.grantedPermissions.contains(.observe) else { break }
-            app.displaySelection.selectedDisplayID = switchMsg.displayID
+            guard hostSession(box, allows: .observe) else { break }
             if #available(macOS 12.3, *) {
-                await app.macCaptureService.stop()
-                do {
-                    try await app.macCaptureService.start(
-                        subscriberID: box.id,
-                        onFormat: { [weak box] format in
-                            guard let box else { return }
-                            try? await box.connection.sendJSON(.videoFormat, format)
-                        },
-                        onFrame: { [weak box] meta, payload in
-                            guard let box else { return }
-                            Task { try? await box.connection.sendVideoFrame(meta: meta, payload: payload) }
-                        }
-                    )
-                    app.cursorTracker.start(displayID: switchMsg.displayID, subscriberID: box.id) { [weak box] msg in
-                        guard let box else { return }
-                        Task { try? await box.connection.sendJSON(.cursorUpdate, msg) }
-                    }
-                } catch {
-                    app.lastError = error.localizedDescription
-                }
+                box.captureTargetID = switchMsg.displayID == DisplaySelectionService.allDisplaysID
+                    ? CaptureTargetSelectionService.allDisplaysTargetID
+                    : CaptureTargetSelectionService.displayTargetID(switchMsg.displayID)
+                await restartCapture(for: box, failureCode: "captureDisplaySwitchFailed", failurePrefix: "Display switch failed")
+                await sendDisplayList(to: box)
+                await sendShareTargetList(to: box)
             }
+        case .shareTargetSwitch(let switchMsg):
+            guard hostSession(box, allows: .observe) else { break }
+            guard #available(macOS 12.3, *) else { break }
+            box.captureTargetID = switchMsg.targetID
+            await restartCapture(for: box, failureCode: "captureTargetSwitchFailed", failurePrefix: "Share target switch failed")
+            await sendDisplayList(to: box)
+            await sendShareTargetList(to: box)
         case .streamQuality(let qualityMessage):
-            guard box.encryptionEnabled else { break }
-            applyStreamQuality(sanitizedStreamQualityMessage(qualityMessage, for: box.peerPlatform))
+            guard hostSession(box, allows: .observe) else { break }
+            applyStreamQuality(sanitizedStreamQualityMessage(qualityMessage, for: box.peerPlatform), for: box)
         case .viewerViewport(let viewport):
-            guard box.encryptionEnabled else { break }
-            guard box.state == .streaming || box.state == .approved || box.state == .viewOnly else { break }
+            guard hostSession(box, allows: .observe) else { break }
             if #available(macOS 12.3, *) {
                 app.macCaptureService.applyViewerViewport(
+                    for: box.id,
                     viewport,
-                    adaptiveEnabled: adaptiveStreamingEnabled && viewport.adaptiveEnabled
+                    adaptiveEnabled: viewport.adaptiveEnabled
                 )
             }
         case .fileOffer(let offer):
-            guard box.grantedPermissions.contains(.fileTransfer) else { break }
+            guard hostSession(box, allows: .fileTransfer) else { break }
             hostFileTransfer.handleOffer(offer)
         case .fileAccept(let accept):
-            guard box.grantedPermissions.contains(.fileTransfer) else { break }
+            guard hostSession(box, allows: .fileTransfer) else { break }
             hostFileTransfer.handleAccept(accept)
         case .fileReject(let reject):
-            guard box.grantedPermissions.contains(.fileTransfer) else { break }
+            guard hostSession(box, allows: .fileTransfer) else { break }
             hostFileTransfer.handleReject(reject)
         case .fileChunk(let chunk):
-            guard box.grantedPermissions.contains(.fileTransfer) else { break }
+            guard hostSession(box, allows: .fileTransfer) else { break }
             hostFileTransfer.handleChunk(chunk)
         case .fileComplete(let complete):
-            guard box.grantedPermissions.contains(.fileTransfer) else { break }
+            guard hostSession(box, allows: .fileTransfer) else { break }
             hostFileTransfer.handleComplete(complete)
         case .remoteCommand(let cmd):
-            guard box.grantedPermissions.contains(.remoteCommand) else { break }
+            guard hostSession(box, allows: .remoteCommand) else { break }
             app.remoteCommandService.sendOutput = { [weak box] output in
                 guard let box else { return }
                 Task { try? await box.connection.sendJSON(.commandOutput, output) }
@@ -580,7 +988,7 @@ final class MacHostRuntime: ObservableObject {
                 detail: "\(cmd.command) \(cmd.arguments.joined(separator: " "))"
             )
         case .systemAction(let action):
-            guard box.grantedPermissions.contains(.systemActions) else { break }
+            guard hostSession(box, allows: .systemActions) else { break }
             let result = app.systemActionService.perform(action)
             try? await box.connection.sendJSON(.systemActionResult, result)
             app.auditLog.log(
@@ -590,11 +998,11 @@ final class MacHostRuntime: ObservableObject {
                 detail: "\(action.action.rawValue): \(result.success ? "OK" : result.message ?? "failed")"
             )
         case .systemReportRequest(let req):
-            guard box.grantedPermissions.contains(.reportInfo) else { break }
+            guard hostSession(box, allows: .reportInfo) else { break }
             let report = app.systemReportCollector.collect(requestID: req.requestID)
             try? await box.connection.sendJSON(.systemReport, report)
         case .packageInstallReq(let req):
-            guard box.grantedPermissions.contains(.packageInstall) else { break }
+            guard hostSession(box, allows: .packageInstall) else { break }
             let result = await app.packageInstallService.install(req)
             try? await box.connection.sendJSON(.packageInstallResult, result)
             app.auditLog.log(
@@ -608,6 +1016,10 @@ final class MacHostRuntime: ObservableObject {
                 clientTimestamp: p.clientTimestamp,
                 serverTimestamp: Date().timeIntervalSince1970
             ))
+        case .stats(let stats):
+            guard hostSession(box, allows: .observe) else { break }
+            box.transportStats.applyRemoteStats(stats)
+            app.transportStats.applyRemoteStats(stats)
         case .endSession:
             await box.connection.stop()
         default:
@@ -651,22 +1063,30 @@ final class MacHostRuntime: ObservableObject {
 
     private func startAdaptiveBitrateLoop() {
         guard let app else { return }
-        let abr = app.adaptiveBitrate
-        let stats = app.transportStats
-        let xstate: MacCaptureCrossState? = {
-            if #available(macOS 12.3, *) { return app.macCaptureService.xstate }
-            return nil
-        }()
         abrTimer?.invalidate()
         abrTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard self?.adaptiveStreamingEnabled == true else { return }
-                if abr.evaluate(stats: stats) {
-                    if let h264 = xstate?.encoder as? H264FrameEncoder {
-                        h264.updateBitrate(abr.currentBitrate)
-                        h264.updateFrameRate(abr.currentFPS)
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard #available(macOS 12.3, *) else { return }
+                for box in self.hostConnections where box.state == .streaming || box.state == .viewOnly {
+                    if box.adaptiveBitrate.evaluate(stats: box.transportStats) {
+                        app.macCaptureService.updateAdaptiveBitrate(
+                            for: box.id,
+                            bitrate: box.adaptiveBitrate.currentBitrate,
+                            fps: box.adaptiveBitrate.currentFPS
+                        )
                     }
                 }
+            }
+        }
+    }
+
+    private func startShareTargetRefreshLoop() {
+        guard #available(macOS 12.3, *) else { return }
+        shareTargetRefreshTimer?.invalidate()
+        shareTargetRefreshTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.broadcastShareTargetList()
             }
         }
     }
@@ -678,10 +1098,97 @@ final class MacHostRuntime: ObservableObject {
     }
 }
 
+nonisolated private final class HostRealtimeVideoSender: @unchecked Sendable {
+    private struct PendingFrame: Sendable {
+        let meta: VideoFrameMeta
+        let payload: Data
+    }
+
+    private let connection: ScreenQConnection
+    private let lock = NSLock()
+    private var latestFrame: PendingFrame?
+    private var isDraining = false
+    private var droppedFrames = 0
+    private let staleFrameAgeSeconds: TimeInterval = 1.5
+
+    init(connection: ScreenQConnection) {
+        self.connection = connection
+    }
+
+    func submit(meta: VideoFrameMeta, payload: Data) {
+        guard !isStale(meta: meta) else {
+            recordDrop()
+            return
+        }
+
+        let shouldStartDrain: Bool
+        lock.lock()
+        if latestFrame != nil {
+            droppedFrames &+= 1
+        }
+        latestFrame = PendingFrame(meta: meta, payload: payload)
+        shouldStartDrain = !isDraining
+        if shouldStartDrain {
+            isDraining = true
+        }
+        lock.unlock()
+
+        if shouldStartDrain {
+            Task { await drain() }
+        }
+    }
+
+    private func drain() async {
+        while true {
+            guard let frame = takeLatestFrame() else { return }
+            guard !isStale(meta: frame.meta) else {
+                recordDrop()
+                continue
+            }
+            do {
+                try await connection.sendVideoFrame(
+                    meta: frame.meta,
+                    payload: frame.payload,
+                    waitForCompletion: true
+                )
+            } catch {
+                return
+            }
+        }
+    }
+
+    private func takeLatestFrame() -> PendingFrame? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let frame = latestFrame else {
+            isDraining = false
+            return nil
+        }
+        latestFrame = nil
+        return frame
+    }
+
+    private func isStale(meta: VideoFrameMeta) -> Bool {
+        guard let captureWallClockTimestamp = meta.captureWallClockTimestamp else { return false }
+        return Date().timeIntervalSince1970 - captureWallClockTimestamp > staleFrameAgeSeconds
+    }
+
+    private func recordDrop() {
+        lock.lock()
+        droppedFrames &+= 1
+        let count = droppedFrames
+        lock.unlock()
+        if count > 0 && count % 30 == 0 {
+            Logger.shared.debug("Dropped \(count) host video frames before send to keep live latency bounded")
+        }
+    }
+}
+
 @MainActor
 final class HostSessionBox: ObservableObject, Identifiable {
     nonisolated let id = UUID()
     nonisolated let connection: ScreenQConnection
+    fileprivate nonisolated let videoSender: HostRealtimeVideoSender
     @Published var peerName: String = "Pending peer"
     @Published var state: SessionState = .handshake
     @Published var pendingRequest: PairingRequest?
@@ -691,11 +1198,16 @@ final class HostSessionBox: ObservableObject, Identifiable {
     var peerPlatform: PeerPlatform = .unknown
     var peerAppVersion: String = "?"
     var identityFingerprint: String?
-    var grantedPermissions: PermissionSet = .fullAccess
+    var grantedPermissions: PermissionSet = []
     var sessionID: UUID?
+    var isAuxiliaryControlChannel: Bool = false
+    var captureTargetID: String?
+    let transportStats = TransportStats()
+    let adaptiveBitrate = AdaptiveBitrateController()
 
     init(connection: ScreenQConnection) {
         self.connection = connection
+        self.videoSender = HostRealtimeVideoSender(connection: connection)
     }
 }
 #endif

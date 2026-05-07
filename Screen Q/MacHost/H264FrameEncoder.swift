@@ -18,6 +18,39 @@ import CoreMedia
 import CoreVideo
 import QuartzCore
 
+nonisolated private func screenQH264CaptureWallClockTimestamp(forHostTimestamp hostTimestamp: TimeInterval) -> TimeInterval {
+    let nowWall = Date().timeIntervalSince1970
+    let nowHost = CACurrentMediaTime()
+    guard hostTimestamp.isFinite, hostTimestamp > 0, nowHost.isFinite else {
+        return nowWall
+    }
+    let age = nowHost - hostTimestamp
+    guard age.isFinite, age >= 0, age < 60 else {
+        return nowWall
+    }
+    return nowWall - age
+}
+
+nonisolated private final class H264EncodedFrameBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var encodedData: Data?
+    private var encodedIsKeyFrame = false
+
+    func store(data: Data, isKeyFrame: Bool) {
+        lock.lock()
+        encodedData = data
+        encodedIsKeyFrame = isKeyFrame
+        lock.unlock()
+    }
+
+    func snapshot() -> (data: Data, isKeyFrame: Bool)? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let encodedData else { return nil }
+        return (encodedData, encodedIsKeyFrame)
+    }
+}
+
 nonisolated final class H264FrameEncoder: FrameEncoder, @unchecked Sendable {
 
     let encoding: VideoEncoding = .h264
@@ -33,9 +66,6 @@ nonisolated final class H264FrameEncoder: FrameEncoder, @unchecked Sendable {
     private var session: VTCompressionSession?
     private let lock = NSLock()
 
-    // Pending encoded output (set by the VT callback, read by encode())
-    private var pendingData: Data?
-    private var pendingIsKey: Bool = false
     private var forceNextKeyFrame = true
 
     // MARK: - Public API
@@ -100,6 +130,8 @@ nonisolated final class H264FrameEncoder: FrameEncoder, @unchecked Sendable {
         let h = CVPixelBufferGetHeight(pixelBuffer)
 
         lock.lock()
+        defer { lock.unlock() }
+
         // Lazy-create or recreate if resolution changed.
         if session == nil || Int32(w) != width || Int32(h) != height {
             width = Int32(w)
@@ -108,22 +140,21 @@ nonisolated final class H264FrameEncoder: FrameEncoder, @unchecked Sendable {
             createSessionLocked()
         }
         guard let session = self.session else {
-            lock.unlock()
             return nil
         }
         let shouldForceKeyFrame = forceNextKeyFrame
         if forceNextKeyFrame {
             forceNextKeyFrame = false
         }
-        lock.unlock()
 
         // Presentation timestamp
         let pts = CMSampleBufferGetPresentationTimeStamp(sample)
         let duration = CMTime(value: 1, timescale: CMTimeScale(targetFPS))
 
-        // Synchronous encode: we use the callback to capture the output.
-        pendingData = nil
-        pendingIsKey = false
+        // Keep each VT callback's output isolated to this frame so encoder
+        // reconfiguration cannot race shared pending state under load.
+        let encodedFrame = H264EncodedFrameBox()
+        let encodedFrameRefcon = Unmanaged.passRetained(encodedFrame)
 
         let frameProperties: CFDictionary? = shouldForceKeyFrame
             ? ([kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary)
@@ -135,19 +166,25 @@ nonisolated final class H264FrameEncoder: FrameEncoder, @unchecked Sendable {
             presentationTimeStamp: pts,
             duration: duration,
             frameProperties: frameProperties,
-            sourceFrameRefcon: nil,
+            sourceFrameRefcon: encodedFrameRefcon.toOpaque(),
             infoFlagsOut: nil
         )
 
         guard status == noErr else {
+            encodedFrameRefcon.release()
             Logger.shared.warn("VTCompressionSession encode failed: \(status)")
             return nil
         }
 
         // Force synchronous output.
-        VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
+        let completeStatus = VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
+        encodedFrameRefcon.release()
+        guard completeStatus == noErr else {
+            Logger.shared.warn("VTCompressionSession complete failed: \(completeStatus)")
+            return nil
+        }
 
-        guard let encoded = pendingData else { return nil }
+        guard let encoded = encodedFrame.snapshot() else { return nil }
 
         let timestamp = CMTimeGetSeconds(pts).isFinite ? CMTimeGetSeconds(pts) : CACurrentMediaTime()
         let meta = VideoFrameMeta(
@@ -157,10 +194,11 @@ nonisolated final class H264FrameEncoder: FrameEncoder, @unchecked Sendable {
             pixelHeight: h,
             displayID: displayID,
             encoding: .h264,
-            isKeyFrame: pendingIsKey,
-            payloadSize: encoded.count
+            isKeyFrame: encoded.isKeyFrame,
+            payloadSize: encoded.data.count,
+            captureWallClockTimestamp: screenQH264CaptureWallClockTimestamp(forHostTimestamp: timestamp)
         )
-        return (meta, encoded)
+        return (meta, encoded.data)
     }
 
     func reset() {
@@ -182,10 +220,10 @@ nonisolated final class H264FrameEncoder: FrameEncoder, @unchecked Sendable {
 
         var sessionOut: VTCompressionSession?
 
-        let callbackPtr: VTCompressionOutputCallback = { refCon, _, status, flags, sampleBuffer in
-            guard let refCon else { return }
-            let encoder = Unmanaged<H264FrameEncoder>.fromOpaque(refCon).takeUnretainedValue()
-            encoder.handleEncodedFrame(status: status, flags: flags, sampleBuffer: sampleBuffer)
+        let callbackPtr: VTCompressionOutputCallback = { _, sourceFrameRefcon, status, _, sampleBuffer in
+            guard let sourceFrameRefcon else { return }
+            let output = Unmanaged<H264EncodedFrameBox>.fromOpaque(sourceFrameRefcon).takeUnretainedValue()
+            H264FrameEncoder.handleEncodedFrame(status: status, sampleBuffer: sampleBuffer, output: output)
         }
 
         let status = VTCompressionSessionCreate(
@@ -199,7 +237,7 @@ nonisolated final class H264FrameEncoder: FrameEncoder, @unchecked Sendable {
             imageBufferAttributes: nil,
             compressedDataAllocator: nil,
             outputCallback: callbackPtr,
-            refcon: Unmanaged.passUnretained(self).toOpaque(),
+            refcon: nil,
             compressionSessionOut: &sessionOut
         )
 
@@ -220,6 +258,8 @@ nonisolated final class H264FrameEncoder: FrameEncoder, @unchecked Sendable {
                              value: keyFrameIntervalFrames as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering,
                              value: kCFBooleanFalse)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount,
+                             value: 1 as CFNumber)
 
         // Data rate limit: 1.5x average over 1 second.
         let limit: [Int] = [maxBitrate * 3 / 2, 1]
@@ -237,17 +277,16 @@ nonisolated final class H264FrameEncoder: FrameEncoder, @unchecked Sendable {
             VTCompressionSessionInvalidate(session)
         }
         session = nil
-        pendingData = nil
         forceNextKeyFrame = true
     }
 
     // MARK: - Output callback
 
     /// Called by VideoToolbox on the encoder's internal queue.
-    fileprivate func handleEncodedFrame(
+    fileprivate static func handleEncodedFrame(
         status: OSStatus,
-        flags: VTEncodeInfoFlags,
-        sampleBuffer: CMSampleBuffer?
+        sampleBuffer: CMSampleBuffer?,
+        output: H264EncodedFrameBox
     ) {
         guard status == noErr, let sampleBuffer, sampleBuffer.isValid else { return }
         guard let dataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
@@ -266,28 +305,38 @@ nonisolated final class H264FrameEncoder: FrameEncoder, @unchecked Sendable {
         // Convert AVCC length-prefixed NALUs to Annex B (start codes).
         let length = CMBlockBufferGetDataLength(dataBuffer)
         var offset = 0
-        while offset < length {
+        while offset + 4 <= length {
             var naluLength: UInt32 = 0
-            CMBlockBufferCopyDataBytes(dataBuffer, atOffset: offset, dataLength: 4, destination: &naluLength)
+            let lengthStatus = CMBlockBufferCopyDataBytes(dataBuffer, atOffset: offset, dataLength: 4, destination: &naluLength)
+            guard lengthStatus == noErr else { return }
             naluLength = naluLength.bigEndian
             offset += 4
+            let payloadLength = Int(naluLength)
+            guard payloadLength > 0, offset + payloadLength <= length else { return }
 
             // Annex B start code
             outputData.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
 
-            var naluData = Data(count: Int(naluLength))
-            naluData.withUnsafeMutableBytes { buf in
-                CMBlockBufferCopyDataBytes(dataBuffer, atOffset: offset, dataLength: Int(naluLength), destination: buf.baseAddress!)
+            var naluData = Data(count: payloadLength)
+            let copyStatus = naluData.withUnsafeMutableBytes { buf -> OSStatus in
+                guard let baseAddress = buf.baseAddress else { return -1 }
+                return CMBlockBufferCopyDataBytes(
+                    dataBuffer,
+                    atOffset: offset,
+                    dataLength: payloadLength,
+                    destination: baseAddress
+                )
             }
+            guard copyStatus == noErr else { return }
             outputData.append(naluData)
-            offset += Int(naluLength)
+            offset += payloadLength
         }
 
-        pendingData = outputData
-        pendingIsKey = isKey
+        guard !outputData.isEmpty else { return }
+        output.store(data: outputData, isKeyFrame: isKey)
     }
 
-    private func extractParameterSets(_ formatDesc: CMFormatDescription) -> Data {
+    private static func extractParameterSets(_ formatDesc: CMFormatDescription) -> Data {
         var data = Data()
         // SPS
         var spsCount = 0

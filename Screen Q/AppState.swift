@@ -73,6 +73,7 @@ final class AppState: ObservableObject {
     #if os(macOS)
     let macPermissions: MacPermissionsService
     let displaySelection: DisplaySelectionService
+    let captureTargetSelection: AnyObject?
     let macCapture: AnyObject?
     let macInput: MacInputInjectionService
     let bonjourAdvertiser: BonjourAdvertiser
@@ -88,6 +89,8 @@ final class AppState: ObservableObject {
     // Typed accessors for @available services (stored as AnyObject? for compatibility)
     @available(macOS 12.3, *)
     var macCaptureService: MacScreenCaptureService { macCapture as! MacScreenCaptureService }
+    @available(macOS 12.3, *)
+    var captureTargetService: CaptureTargetSelectionService { captureTargetSelection as! CaptureTargetSelectionService }
     @available(macOS 13.0, *)
     var audioCaptureService: AudioCaptureService { audioCapture as! AudioCaptureService }
     #endif
@@ -149,12 +152,17 @@ final class AppState: ObservableObject {
         let display = DisplaySelectionService()
         self.macPermissions = permissions
         self.displaySelection = display
+        let captureTargets: AnyObject?
         if #available(macOS 12.3, *) {
-            self.macCapture = MacScreenCaptureService(displaySelection: display, permissions: permissions)
+            let targets = CaptureTargetSelectionService(displaySelection: display)
+            captureTargets = targets
+            self.macCapture = MacScreenCaptureService(displaySelection: display, captureTargets: targets, permissions: permissions)
         } else {
+            captureTargets = nil
             self.macCapture = nil
         }
-        self.macInput = MacInputInjectionService(displaySelection: display, permissions: permissions)
+        self.captureTargetSelection = captureTargets
+        self.macInput = MacInputInjectionService(displaySelection: display, permissions: permissions, captureTargetSelection: captureTargets)
         self.bonjourAdvertiser = BonjourAdvertiser()
         self.cursorTracker = CursorTracker()
         self.clipboardSync = ClipboardSyncService()
@@ -261,6 +269,15 @@ final class AppState: ObservableObject {
         tailnetCredentialKind = nil
         tailnetDevices = []
         tailnetDiscoveryStatus = TailnetDiscoveryStatus(phase: .signedOut)
+    }
+
+    func wakeMACAddress(forHost host: String, port: UInt16) -> String? {
+        if let saved = savedConnections.wakeMACAddress(host: host, port: port) {
+            return saved
+        }
+        return computerList.computers.first {
+            $0.host == host && $0.port == port
+        }.flatMap { WakeOnLAN.normalizedMACString($0.macAddress) }
     }
 
     // MARK: - Role selection

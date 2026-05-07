@@ -152,6 +152,14 @@ nonisolated final class FrameStreamDecoder {
         return DecodedFrame(header: header, body: body)
     }
 
+    /// Inspect the next frame header without consuming bytes. Used by the
+    /// transport to pause on encrypted post-handshake frames until key material
+    /// has been installed by the app layer.
+    func peekHeader() throws -> ScreenQHeader? {
+        guard buffer.count >= ScreenQProtocol.headerSize else { return nil }
+        return try FrameCodec.decodeHeader(buffer.prefix(ScreenQProtocol.headerSize))
+    }
+
     func reset() { buffer.removeAll(keepingCapacity: false) }
     var bufferedByteCount: Int { buffer.count }
 }

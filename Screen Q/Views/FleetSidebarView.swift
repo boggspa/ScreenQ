@@ -129,6 +129,7 @@ struct FleetSidebarView: View {
     @State private var newHost = ""
     @State private var newPort: String = "38745"
     @State private var newName = ""
+    @State private var newMACAddress = ""
 
     private var addComputerSheet: some View {
         VStack(spacing: 12) {
@@ -136,6 +137,7 @@ struct FleetSidebarView: View {
             TextField("Display name", text: $newName)
             TextField("Host / IP", text: $newHost)
             TextField("Port", text: $newPort)
+            TextField("Wake MAC address (optional)", text: $newMACAddress)
             HStack {
                 Button("Cancel") { showAddComputer = false }
                 Spacer()
@@ -144,11 +146,12 @@ struct FleetSidebarView: View {
                     let entry = ComputerEntry(
                         displayName: newName.isEmpty ? newHost : newName,
                         host: newHost,
-                        port: port
+                        port: port,
+                        macAddress: WakeOnLAN.normalizedMACString(newMACAddress)
                     )
                     store.addComputer(entry)
                     showAddComputer = false
-                    newHost = ""; newPort = "38745"; newName = ""
+                    newHost = ""; newPort = "38745"; newName = ""; newMACAddress = ""
                 }
                 .buttonStyle(.bordered)
                 .disabled(newHost.isEmpty)

@@ -16,19 +16,30 @@ struct ManualConnectView: View {
     @State private var isImportingRDP = false
     @State private var importedRDPProfile: RDPConnectionProfile?
     @State private var importError: String?
-    var onConnect: (String, UInt16, RemoteConnectionProtocol) -> Void
+    @State private var wakeMACText: String = ""
+    var onConnect: (String, UInt16, RemoteConnectionProtocol, String?) -> Void
     var onImportRDP: (RDPConnectionProfile) -> Void
 
     init(
         onConnect: @escaping (String, UInt16, RemoteConnectionProtocol) -> Void,
         onImportRDP: @escaping (RDPConnectionProfile) -> Void = { _ in }
     ) {
-        self.onConnect = onConnect
+        self.onConnect = { host, port, connectionProtocol, _ in
+            onConnect(host, port, connectionProtocol)
+        }
+        self.onImportRDP = onImportRDP
+    }
+
+    init(
+        onConnectWithWake: @escaping (String, UInt16, RemoteConnectionProtocol, String?) -> Void,
+        onImportRDP: @escaping (RDPConnectionProfile) -> Void = { _ in }
+    ) {
+        self.onConnect = onConnectWithWake
         self.onImportRDP = onImportRDP
     }
 
     init(onConnect: @escaping (String, UInt16) -> Void) {
-        self.onConnect = { host, port, _ in onConnect(host, port) }
+        self.onConnect = { host, port, _, _ in onConnect(host, port) }
         self.onImportRDP = { _ in }
     }
 
@@ -81,6 +92,17 @@ struct ManualConnectView: View {
             }
 
             protocolHint
+
+            TextField("Wake MAC address (optional)", text: $wakeMACText)
+                .textFieldStyle(.roundedBorder)
+                #if os(iOS)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled(true)
+                #endif
+
+            Text("Saved with this endpoint for Wake-on-LAN. It requires a Mac/NIC that supports network wake and a LAN broadcast path.")
+                .font(.caption)
+                .foregroundColor(.secondary)
 
             if let importError {
                 Label(importError, systemImage: "exclamationmark.triangle")
@@ -303,6 +325,8 @@ struct ManualConnectView: View {
         let connectionProtocol = selectedProtocol
 
         guard !host.isEmpty else { return }
+        guard validateWakeMAC() else { return }
+        let wakeMAC = WakeOnLAN.normalizedMACString(wakeMACText)
 
         if connectionProtocol.requiresManualConnectProbe {
             isProbing = true
@@ -319,7 +343,7 @@ struct ManualConnectView: View {
                         probeResult = result
                         return
                     }
-                    onConnect(host, port, connectionProtocol)
+                    onConnect(host, port, connectionProtocol, wakeMAC)
                 }
             }
             return
@@ -332,7 +356,21 @@ struct ManualConnectView: View {
             onImportRDP(importedRDPProfile)
             return
         }
-        onConnect(host, port, connectionProtocol)
+        onConnect(host, port, connectionProtocol, wakeMAC)
+    }
+
+    private func validateWakeMAC() -> Bool {
+        let raw = wakeMACText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else {
+            importError = nil
+            return true
+        }
+        guard WakeOnLAN.normalizedMACString(raw) != nil else {
+            importError = "Wake MAC must be 12 hex digits, e.g. AA:BB:CC:DD:EE:FF."
+            return false
+        }
+        importError = nil
+        return true
     }
 
     private func importRDP(_ result: Result<[URL], Error>) {

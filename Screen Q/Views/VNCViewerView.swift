@@ -22,7 +22,11 @@ struct VNCViewerView: View {
     #if os(iOS)
     @StateObject private var iosInputState = VNCIOSInputState()
     @State private var isKeyboardActive = false
-    @State private var viewportNavigationMode = true
+    @State private var touchMode: TouchMode = .directTouch
+    @State private var viewport: ViewportTransform = .identity
+    @State private var lastCanvasSize: CGSize = .zero
+    @State private var zoomHUDScale: CGFloat?
+    @State private var dragFeedback: IOSDragFeedback?
     #endif
 
     init(session: VNCSession, onDisconnect: @escaping () -> Void) {
@@ -44,10 +48,17 @@ struct VNCViewerView: View {
                     streamQuality: $controlPreferences.streamQuality,
                     streamProfile: $controlPreferences.streamProfile,
                     isKeyboardActive: $isKeyboardActive,
-                    viewportNavigationMode: $viewportNavigationMode,
+                    touchMode: $touchMode,
+                    toolbarCondensed: $controlPreferences.toolbarCondensed,
+                    viewport: viewport,
+                    resetViewport: resetViewport,
                     onDisconnect: disconnectAndExit
                 )
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .frame(
+                    maxWidth: .infinity,
+                    maxHeight: .infinity,
+                    alignment: controlPreferences.toolbarCondensed ? .bottomLeading : .bottom
+                )
                 .padding(.horizontal, 10)
                 .padding(.bottom, 10)
 
@@ -131,7 +142,11 @@ struct VNCViewerView: View {
             )
         }
         .onAppear {
+            #if os(macOS)
             session.enableMetalRendering()
+            #else
+            touchMode = controlPreferences.touchMode
+            #endif
             Task { await applyStreamControls() }
         }
         .onReceive(controlPreferences.$streamQuality.removeDuplicates()) { _ in
@@ -140,6 +155,11 @@ struct VNCViewerView: View {
         .onReceive(controlPreferences.$streamProfile.removeDuplicates()) { _ in
             Task { await applyStreamControls() }
         }
+        #if os(iOS)
+        .onChange(of: touchMode) { _, newValue in
+            controlPreferences.touchMode = newValue
+        }
+        #endif
         #if os(iOS)
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
             Task { await session.handleMemoryPressure() }
@@ -250,12 +270,19 @@ struct VNCViewerView: View {
             VNCInputView(session: session)
         }
         #else
-        if let renderer = session.metalRenderer {
-            vncCanvasMetaliOS(renderer: renderer)
-        } else if let image = session.currentImage {
+        if let image = session.currentImage {
             vncCanvasFallbackiOS(image: image)
+        } else if let renderer = session.metalRenderer {
+            vncCanvasMetaliOS(renderer: renderer)
         } else {
-            ProgressView("Waiting for framebuffer…")
+            VStack(spacing: 8) {
+                ProgressView("Waiting for framebuffer…")
+                Text(session.firstFrameTelemetry.statusText)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+            }
         }
         #endif
     }
@@ -266,6 +293,16 @@ struct VNCViewerView: View {
                 .font(.system(.caption, design: .monospaced).weight(.bold))
             Text("\(session.serverWidth)×\(session.serverHeight)")
                 .font(.system(.caption2, design: .monospaced))
+            if let securitySummary = session.firstFrameTelemetry.securitySummary {
+                Text(securitySummary)
+                    .font(.system(.caption2, design: .monospaced))
+            }
+            Text(session.firstFrameTelemetry.statusText)
+                .font(.system(.caption2, design: .monospaced))
+            if session.firstFrameTelemetry.recoveryFullFrameRequests > 0 {
+                Text("Recovery \(session.firstFrameTelemetry.recoveryFullFrameRequests)")
+                    .font(.system(.caption2, design: .monospaced))
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
@@ -278,44 +315,49 @@ struct VNCViewerView: View {
     @ViewBuilder
     private func vncCanvasMetaliOS(renderer: MetalFrameBufferRenderer) -> some View {
         GeometryReader { geo in
-            let imgW = CGFloat(session.viewWidth)
-            let imgH = CGFloat(session.viewHeight)
-            let scale = min(geo.size.width / imgW, geo.size.height / imgH, 1.0)
-            let displayW = imgW * scale
-            let displayH = imgH * scale
-            let offsetX = (geo.size.width - displayW) / 2
-            let offsetY = (geo.size.height - displayH) / 2
+            let regionRect = vncRegionRect(canvasSize: geo.size)
+            let baseRect = vncBaseDrawRect(canvasSize: geo.size)
 
             ZStack {
-                MetalCanvasViewiOS(renderer: renderer) { view in
-                    view.renderFrame()
+                ZStack {
+                    MetalCanvasViewiOS(renderer: renderer, renderRevision: session.renderRevision) { view in
+                        view.renderFrame()
+                    }
+                    .frame(width: max(1, regionRect.width), height: max(1, regionRect.height))
+                    .position(x: regionRect.midX, y: regionRect.midY)
+
+                    VNCCursorOverlayView(
+                        session: session,
+                        serverSize: vncRemotePixelSize,
+                        displayScale: baseRect.width / max(1, vncRemotePixelSize.width)
+                    )
+                    .frame(width: baseRect.width, height: baseRect.height)
+                    .position(x: baseRect.midX, y: baseRect.midY)
                 }
-                .frame(width: displayW, height: displayH)
-                .position(x: offsetX + displayW / 2, y: offsetY + displayH / 2)
+                .frame(width: geo.size.width, height: geo.size.height)
+                .scaleEffect(viewport.scale, anchor: .center)
+                .offset(viewport.offset)
+                .clipped()
 
-                VNCCursorOverlayView(
-                    session: session,
-                    serverSize: CGSize(width: imgW, height: imgH),
-                    displayScale: scale
-                )
-                .frame(width: displayW, height: displayH)
-                .position(x: offsetX + displayW / 2, y: offsetY + displayH / 2)
+                vncTrackpadInput(canvasSize: geo.size)
 
-                VNCIOSTouchInputOverlay(
-                    session: session,
-                    inputState: iosInputState,
-                    serverSize: CGSize(width: imgW, height: imgH),
-                    displayScale: scale,
-                    viewportNavigationMode: viewportNavigationMode
-                )
-                .frame(width: displayW, height: displayH)
-                .position(x: offsetX + displayW / 2, y: offsetY + displayH / 2)
+                if let zoomHUDScale {
+                    zoomHUD(scale: zoomHUDScale)
+                }
+                if let dragFeedback {
+                    dragFeedbackOverlay(dragFeedback)
+                }
             }
             .onAppear {
+                updateCanvas(size: geo.size)
                 Task { await session.updateViewportCanvasSize(geo.size) }
             }
             .onChange(of: geo.size) { _, newSize in
+                updateCanvas(size: newSize)
                 Task { await session.updateViewportCanvasSize(newSize) }
+            }
+            .onChange(of: viewport) { _, newViewport in
+                updateCanvas(size: geo.size, viewport: newViewport)
             }
         }
     }
@@ -323,47 +365,155 @@ struct VNCViewerView: View {
     @ViewBuilder
     private func vncCanvasFallbackiOS(image: CGImage) -> some View {
         GeometryReader { geo in
+            let regionRect = vncRegionRect(canvasSize: geo.size)
+            let baseRect = vncBaseDrawRect(canvasSize: geo.size)
+
             ZStack {
-                let imgW = CGFloat(session.viewWidth)
-                let imgH = CGFloat(session.viewHeight)
-                let scale = min(geo.size.width / imgW, geo.size.height / imgH, 1.0)
-                let displayW = imgW * scale
-                let displayH = imgH * scale
-                let offsetX = (geo.size.width - displayW) / 2
-                let offsetY = (geo.size.height - displayH) / 2
+                ZStack {
+                    Image(decorative: image, scale: 1.0)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: max(1, regionRect.width), height: max(1, regionRect.height))
+                        .position(x: regionRect.midX, y: regionRect.midY)
 
-                Image(decorative: image, scale: 1.0)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: displayW, height: displayH)
-                    .position(x: offsetX + displayW / 2, y: offsetY + displayH / 2)
+                    VNCCursorOverlayView(
+                        session: session,
+                        serverSize: vncRemotePixelSize,
+                        displayScale: baseRect.width / max(1, vncRemotePixelSize.width)
+                    )
+                    .frame(width: baseRect.width, height: baseRect.height)
+                    .position(x: baseRect.midX, y: baseRect.midY)
+                }
+                .frame(width: geo.size.width, height: geo.size.height)
+                .scaleEffect(viewport.scale, anchor: .center)
+                .offset(viewport.offset)
+                .clipped()
 
-                VNCCursorOverlayView(
-                    session: session,
-                    serverSize: CGSize(width: imgW, height: imgH),
-                    displayScale: scale
-                )
-                .frame(width: displayW, height: displayH)
-                .position(x: offsetX + displayW / 2, y: offsetY + displayH / 2)
+                vncTrackpadInput(canvasSize: geo.size)
 
-                VNCIOSTouchInputOverlay(
-                    session: session,
-                    inputState: iosInputState,
-                    serverSize: CGSize(width: imgW, height: imgH),
-                    displayScale: scale,
-                    viewportNavigationMode: viewportNavigationMode
-                )
-                .frame(width: displayW, height: displayH)
-                .position(x: offsetX + displayW / 2, y: offsetY + displayH / 2)
+                if let zoomHUDScale {
+                    zoomHUD(scale: zoomHUDScale)
+                }
+                if let dragFeedback {
+                    dragFeedbackOverlay(dragFeedback)
+                }
             }
             .onAppear {
+                updateCanvas(size: geo.size)
                 Task { await session.updateViewportCanvasSize(geo.size) }
             }
             .onChange(of: geo.size) { _, newSize in
+                updateCanvas(size: newSize)
                 Task { await session.updateViewportCanvasSize(newSize) }
+            }
+            .onChange(of: viewport) { _, newViewport in
+                updateCanvas(size: geo.size, viewport: newViewport)
             }
         }
     }
+
+    @ViewBuilder
+    private func vncTrackpadInput(canvasSize: CGSize) -> some View {
+        TrackpadInputView(
+            inputMapper: session.inputMapper,
+            touchMode: touchMode,
+            canvasSize: canvasSize,
+            remotePixelSize: vncRemotePixelSize,
+            fit: true,
+            viewport: viewport,
+            viewportPanInsets: ViewportPanInsets.zoomedViewerInsets(for: canvasSize, keyboardActive: viewerKeyboardActive),
+            onViewportChange: { newViewport in
+                setViewport(newViewport, canvasSize: canvasSize)
+            },
+            onViewportScaleChange: { scale in
+                zoomHUDScale = scale
+            },
+            onControlsToggle: {},
+            onDragFeedbackChange: { feedback in
+                dragFeedback = feedback
+            }
+        )
+    }
+
+    private var vncRemotePixelSize: CGSize {
+        return CGSize(
+            width: max(1, session.viewWidth),
+            height: max(1, session.viewHeight)
+        )
+    }
+
+    private func vncBaseDrawRect(canvasSize: CGSize) -> CGRect {
+        CanvasGeometry(
+            canvasSize: canvasSize,
+            remotePixelSize: vncRemotePixelSize,
+            fit: true,
+            viewport: .identity
+        ).remoteDrawRect()
+    }
+
+    private func vncRegionRect(canvasSize: CGSize) -> CGRect {
+        vncBaseDrawRect(canvasSize: canvasSize)
+    }
+
+    private func updateCanvas(size: CGSize) {
+        updateCanvas(size: size, viewport: viewport)
+    }
+
+    private func updateCanvas(size: CGSize, viewport: ViewportTransform) {
+        lastCanvasSize = size
+        session.inputMapper.canvas = CanvasGeometry(
+            canvasSize: size,
+            remotePixelSize: vncRemotePixelSize,
+            fit: true,
+            viewport: viewport,
+            viewportPanInsets: ViewportPanInsets.zoomedViewerInsets(for: size, keyboardActive: viewerKeyboardActive)
+        )
+        session.inputMapper.ensurePredictedPointerVisible()
+    }
+
+    private var viewerKeyboardActive: Bool {
+        #if os(iOS)
+        return isKeyboardActive
+        #else
+        return false
+        #endif
+    }
+
+    private func setViewport(_ newViewport: ViewportTransform, canvasSize: CGSize) {
+        viewport = newViewport
+        updateCanvas(size: canvasSize, viewport: newViewport)
+    }
+
+    private func resetViewport() {
+        setViewport(.identity, canvasSize: lastCanvasSize)
+    }
+
+    private func zoomHUD(scale: CGFloat) -> some View {
+        Text("\(Int((scale * 100).rounded()))%")
+            .font(.caption.monospacedDigit().bold())
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.ultraThinMaterial)
+            .clipShape(Capsule())
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .padding(.top, 12)
+            .allowsHitTesting(false)
+    }
+
+    private func dragFeedbackOverlay(_ feedback: IOSDragFeedback) -> some View {
+        let color: Color = feedback.kind == .right ? .orange : .accentColor
+        return ZStack {
+            Circle()
+                .stroke(color, lineWidth: 2)
+                .frame(width: 44, height: 44)
+            Image(systemName: feedback.kind == .right ? "contextualmenu.and.cursorarrow" : "cursorarrow.motionlines")
+                .font(.caption.bold())
+                .foregroundColor(color)
+        }
+        .position(feedback.point)
+        .allowsHitTesting(false)
+    }
+
     #endif
 
     private var statusText: String {
@@ -372,6 +522,9 @@ struct VNCViewerView: View {
         case .authenticating: return "Authenticating…"
         case .reconnecting(let attempt): return "Reconnecting (attempt \(attempt))…"
         case .connected:
+            if session.firstFrameTelemetry.firstFramebufferAt == nil {
+                return "\(session.firstFrameTelemetry.statusText) — \(session.profile.displayName)"
+            }
             if let summary = session.streamViewportSummary {
                 return "Viewport \(summary) — \(session.profile.displayName)"
             }
@@ -1020,18 +1173,54 @@ private struct VNCIOSControlStrip: View {
     @Binding var streamQuality: Double
     @Binding var streamProfile: StreamProfile
     @Binding var isKeyboardActive: Bool
-    @Binding var viewportNavigationMode: Bool
+    @Binding var touchMode: TouchMode
+    @Binding var toolbarCondensed: Bool
+    let viewport: ViewportTransform
+    let resetViewport: () -> Void
     var onDisconnect: () -> Void
 
+    @ViewBuilder
     var body: some View {
+        if toolbarCondensed {
+            condensedBody
+        } else {
+            expandedBody
+        }
+    }
+
+    private var condensedBody: some View {
+        HStack(spacing: 8) {
+            iconButton(systemName: "plus", label: "Expand controls", size: 44) {
+                toolbarCondensed = false
+            }
+            iconButton(systemName: "xmark.circle", label: "Disconnect", tint: .red, size: 44) {
+                onDisconnect()
+            }
+        }
+        .padding(7)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .shadow(color: .black.opacity(0.25), radius: 14, x: 0, y: 6)
+        .fixedSize()
+    }
+
+    private var expandedBody: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                // Primary controls (always visible)
+                iconButton(systemName: "minus", label: "Condense controls", size: 44) {
+                    toolbarCondensed = true
+                }
+
                 iconButton(systemName: isKeyboardActive ? "keyboard.chevron.compact.down" : "keyboard",
                            label: isKeyboardActive ? "Hide keyboard" : "Show keyboard") {
                     isKeyboardActive.toggle()
                 }
-                viewportModeButton
+                touchModeMenu
+                if !viewport.isIdentity {
+                    iconButton(systemName: "minus.magnifyingglass", label: "Reset zoom") {
+                        resetViewport()
+                    }
+                }
 
                 Divider().frame(height: 28)
 
@@ -1056,10 +1245,9 @@ private struct VNCIOSControlStrip: View {
                     quality: $streamQuality,
                     profile: $streamProfile,
                     protocolName: session.profile.displayName,
-                    detail: "Controls VNC request cadence, viewport size, and local framebuffer rendering."
+                    detail: "Controls VNC request cadence, memory-safe stream regions, and local viewport rendering."
                 )
 
-                // Overflow menu for less-used items
                 overflowMenu
 
                 iconButton(systemName: "xmark.circle", label: "Disconnect", tint: .red) {
@@ -1117,7 +1305,7 @@ private struct VNCIOSControlStrip: View {
                     Button {
                         Task { await session.resetStreamViewport() }
                     } label: {
-                        Label("Reset viewport", systemImage: "minus.magnifyingglass")
+                        Label("Reset stream region", systemImage: "rectangle.expand.vertical")
                     }
                 }
                 ForEach(session.displayRegions) { region in
@@ -1257,14 +1445,22 @@ private struct VNCIOSControlStrip: View {
         .accessibilityLabel("Display region")
     }
 
-    private var viewportModeButton: some View {
-        iconButton(
-            systemName: viewportNavigationMode ? "hand.draw.fill" : "scroll",
-            label: viewportNavigationMode ? "Two-finger pan moves the viewport" : "Two-finger pan scrolls the remote screen",
-            tint: viewportNavigationMode ? .accentColor : .primary
-        ) {
-            viewportNavigationMode.toggle()
+    private var touchModeMenu: some View {
+        Menu {
+            ForEach(TouchMode.allCases) { mode in
+                Button {
+                    touchMode = mode
+                } label: {
+                    Label(mode.label, systemImage: mode.icon)
+                }
+            }
+        } label: {
+            Image(systemName: touchMode.icon)
+                .font(.system(size: 17, weight: .semibold))
+                .frame(width: 38, height: 38)
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Touch mode")
     }
 
     private var platformShortcutsMenu: some View {
@@ -1330,13 +1526,15 @@ private struct VNCIOSControlStrip: View {
         systemName: String,
         label: String,
         tint: Color = .primary,
+        size: CGFloat = 38,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(tint)
-                .frame(width: 38, height: 38)
+                .frame(width: size, height: size)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)

@@ -60,6 +60,7 @@ final class MetalCanvasUIView: UIView {
         metalLayer.device = renderer.device
         metalLayer.pixelFormat = .bgra8Unorm
         metalLayer.framebufferOnly = true
+        metalLayer.isOpaque = true
         metalLayer.contentsScale = UIScreen.main.scale
         backgroundColor = .black
     }
@@ -81,10 +82,12 @@ final class MetalCanvasUIView: UIView {
 
 struct MetalCanvasViewiOS: UIViewRepresentable {
     let renderer: MetalFrameBufferRenderer
+    let renderRevision: UInt64
     let onRender: ((MetalCanvasUIView) -> Void)?
 
-    init(renderer: MetalFrameBufferRenderer, onRender: ((MetalCanvasUIView) -> Void)? = nil) {
+    init(renderer: MetalFrameBufferRenderer, renderRevision: UInt64 = 0, onRender: ((MetalCanvasUIView) -> Void)? = nil) {
         self.renderer = renderer
+        self.renderRevision = renderRevision
         self.onRender = onRender
     }
 
@@ -116,6 +119,7 @@ class MetalCanvasNSView: NSView {
         metalLayer.device = renderer.device
         metalLayer.pixelFormat = .bgra8Unorm
         metalLayer.framebufferOnly = true
+        metalLayer.isOpaque = true
         if let screen = NSScreen.main {
             metalLayer.contentsScale = screen.backingScaleFactor
         }
@@ -148,7 +152,7 @@ class MetalCanvasNSView: NSView {
             return (bounds, 1.0)
         }
         let scale = min(bounds.width / CGFloat(size.width),
-                        bounds.height / CGFloat(size.height), 1.0)
+                        bounds.height / CGFloat(size.height))
         let w = CGFloat(size.width) * scale
         let h = CGFloat(size.height) * scale
         let x = (bounds.width - w) / 2

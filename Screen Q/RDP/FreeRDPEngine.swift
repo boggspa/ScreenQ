@@ -53,25 +53,32 @@ final class FreeRDPEngine: RDPEngine {
             sessionHandle = handle
             runtime.setEventCallback(handle, FreeRDPBridgeCallbacks.eventCallback, Unmanaged.passUnretained(self).toOpaque())
 
-            let result = withBridgeConfig(
-                profile: profile,
-                credentials: credentials,
-                trustDecision: trustDecision,
-                trustedCertificateFingerprintSHA256: trustedCertificateFingerprintSHA256
-            ) { config in
-                runtime.connect(handle, config)
-            }
-
-            if result != 0 {
-                let detail = runtime.lastErrorMessage(handle) ?? "The FreeRDP bridge refused to start the RDP session."
-                cleanupBridgeSession()
-                continuation.finish(throwing: RDPEngineError.connectionFailed(detail))
-            }
-
             let engine = self
             continuation.onTermination = { _ in
                 Task { @MainActor [weak engine] in
                     engine?.cleanupBridgeSession()
+                }
+            }
+
+            // Dispatch the potentially-blocking TLS/NLA connect off the main
+            // thread so the UI stays responsive during handshake.
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = withBridgeConfig(
+                    profile: profile,
+                    credentials: credentials,
+                    trustDecision: trustDecision,
+                    trustedCertificateFingerprintSHA256: trustedCertificateFingerprintSHA256
+                ) { config in
+                    runtime.connect(handle, config)
+                }
+
+                if result != 0 {
+                    let detail = runtime.lastErrorMessage(handle) ?? "The FreeRDP bridge refused to start the RDP session."
+                    Logger.shared.error("FreeRDPEngine.connect: bridge reported error: \(detail)")
+                    Task { @MainActor [weak engine] in
+                        engine?.cleanupBridgeSession()
+                    }
+                    continuation.finish(throwing: RDPEngineError.connectionFailed(detail))
                 }
             }
         }
@@ -117,6 +124,7 @@ final class FreeRDPEngine: RDPEngine {
     }
 
     fileprivate func fail(_ error: RDPEngineError) {
+        Logger.shared.error("FreeRDPEngine.fail: \(error.localizedDescription)")
         cleanupBridgeSession()
         streamContinuation?.finish(throwing: error)
         streamContinuation = nil
@@ -277,17 +285,25 @@ private extension PointerButton {
 
 private enum FreeRDPBridgeCallbacks {
     static let eventCallback: SQFreeRDPEventCallback = { context, rawEvent in
-        guard let context, let rawEvent else { return }
+        guard let context, let rawEvent else {
+            Logger.shared.warn("FreeRDPBridge callback called with nil context or event")
+            return
+        }
         let event = rawEvent.assumingMemoryBound(to: SQFreeRDPEvent.self).pointee
         let mapped = FreeRDPBridgeEventMapper.map(event)
         let engine = Unmanaged<FreeRDPEngine>.fromOpaque(context).takeUnretainedValue()
 
-        Task { @MainActor in
-            switch mapped {
-            case .event(let event):
-                engine.receive(event)
-            case .failure(let error):
-                engine.fail(error)
+        // Hop to the main queue via Dispatch (not Task { @MainActor }) so that
+        // high-frequency frame events are delivered reliably without relying
+        // on Swift concurrency's main-actor scheduler.
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                switch mapped {
+                case .event(let event):
+                    engine.receive(event)
+                case .failure(let error):
+                    engine.fail(error)
+                }
             }
         }
     }

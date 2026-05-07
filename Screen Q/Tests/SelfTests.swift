@@ -27,6 +27,7 @@ enum SelfTests {
         results.append(testJSONFrameRoundTrip())
         results.append(testVideoFrameRoundTrip())
         results.append(testStreamDecoderPartialFeed())
+        results.append(testStreamDecoderPeekHeaderDoesNotConsume())
         results.append(testStreamDecoderRejectsBadMagic())
         results.append(testCoordinateMappingFitLetterbox())
         results.append(testCoordinateMappingFill())
@@ -35,8 +36,10 @@ enum SelfTests {
         results.append(testCoordinateMappingRelativeDelta())
         results.append(testViewportZoomKeepsAnchorStable())
         results.append(testViewportVisibleRect())
+        results.append(testViewportPanInsetsAllowZoomOverscroll())
         results.append(testNormalisedClamping())
         results.append(testRemoteInputEventCodableRoundTrip())
+        results.append(testRemoteInputMessageCodableCompatibility())
         results.append(testRemoteConnectionProtocolDefaults())
         results.append(testTailnetDeviceProtocolRecommendation())
         results.append(testTailscaleOAuthTokenRequestBody())
@@ -48,11 +51,13 @@ enum SelfTests {
         results.append(testSavedConnectionProtocolResolution())
         results.append(testViewerControlPreferenceScope())
         results.append(testSessionStateRoutingFlags())
+        results.append(testHostSessionPrivilegedStateGate())
         results.append(testTrustedPeerLegacyPolicyDecode())
         results.append(testTrustedPeerPolicyUpdatePersistence())
         results.append(testNetworkTrustScopeClassification())
         results.append(testVNCRemoteSecurityStatus())
         results.append(testRFBSecurityNegotiationPolicy())
+        results.append(testBigUIntModPow())
         results.append(testRFBClientEncodingPreference())
         results.append(testVNCDisplayRegionOptions())
         results.append(testRFBDecoderRejectsOversizedRect())
@@ -148,6 +153,34 @@ enum SelfTests {
             return ok("Stream decoder accepts byte-by-byte feed")
         } catch {
             return fail("Partial feed", "\(error)")
+        }
+    }
+
+    private static func testStreamDecoderPeekHeaderDoesNotConsume() -> Result {
+        do {
+            let msg = PingMessage(clientTimestamp: 789.012)
+            let bytes = try FrameCodec.encodeJSONMessage(type: .ping, sequence: 9, message: msg)
+            let decoder = FrameStreamDecoder()
+            decoder.feed(bytes.prefix(ScreenQProtocol.headerSize))
+            guard let header = try decoder.peekHeader() else {
+                return fail("Peek header", "no header produced")
+            }
+            guard header.type == .ping, header.sequence == 9 else {
+                return fail("Peek header", "unexpected header")
+            }
+            guard try decoder.nextFrame() == nil else {
+                return fail("Peek header", "partial body should not produce a frame")
+            }
+            decoder.feed(bytes.dropFirst(ScreenQProtocol.headerSize))
+            guard let frame = try decoder.nextFrame() else {
+                return fail("Peek header", "header peek consumed the frame")
+            }
+            guard frame.header.type == .ping, frame.header.sequence == 9 else {
+                return fail("Peek header", "wrong frame after peek")
+            }
+            return ok("Stream decoder peeks without consuming")
+        } catch {
+            return fail("Peek header", "\(error)")
         }
     }
 
@@ -300,6 +333,31 @@ enum SelfTests {
         return ok("Viewport visible rect tracks local zoom")
     }
 
+    private static func testViewportPanInsetsAllowZoomOverscroll() -> Result {
+        let zoomed = ViewportTransform(scale: 2, offset: .zero)
+        let baseGeometry = CanvasGeometry(
+            canvasSize: CGSize(width: 1000, height: 1000),
+            remotePixelSize: CGSize(width: 1000, height: 1000),
+            fit: true
+        )
+        let paddedGeometry = CanvasGeometry(
+            canvasSize: CGSize(width: 1000, height: 1000),
+            remotePixelSize: CGSize(width: 1000, height: 1000),
+            fit: true,
+            viewportPanInsets: ViewportPanInsets(bottom: 200)
+        )
+
+        let baseClamped = zoomed.translated(by: CGSize(width: 0, height: -900), in: baseGeometry)
+        let paddedClamped = zoomed.translated(by: CGSize(width: 0, height: -900), in: paddedGeometry)
+        guard abs(baseClamped.offset.height + 500) < 0.001 else {
+            return fail("Viewport overscroll padding", "base clamp changed unexpectedly: \(baseClamped.offset)")
+        }
+        guard abs(paddedClamped.offset.height + 700) < 0.001 else {
+            return fail("Viewport overscroll padding", "bottom inset did not extend clamp: \(paddedClamped.offset)")
+        }
+        return ok("Viewport zoom overscroll uses pan insets")
+    }
+
     private static func testNormalisedClamping() -> Result {
         let p = NormalisedPoint(x: -1, y: 5)
         if p.x != 0 || p.y != 1 {
@@ -328,6 +386,31 @@ enum SelfTests {
             return ok("RemoteInputEvent codable round-trip")
         } catch {
             return fail("InputEvent round-trip", "\(error)")
+        }
+    }
+
+    private static func testRemoteInputMessageCodableCompatibility() -> Result {
+        let original = RemoteInputEvent.pointerMove(NormalisedPoint(x: 0.2, y: 0.8), modifiers: [.shift])
+        do {
+            let envelope = RemoteInputMessage(event: original, sentAt: 100, sequence: 7)
+            let envelopeData = try JSONEncoder().encode(envelope)
+            let restoredEnvelope = try JSONDecoder().decode(RemoteInputMessage.self, from: envelopeData)
+            guard restoredEnvelope.event == original,
+                  restoredEnvelope.sentAt == 100,
+                  restoredEnvelope.sequence == 7 else {
+                return fail("InputMessage compatibility", "envelope did not preserve metadata")
+            }
+
+            let legacyData = try JSONEncoder().encode(original)
+            let restoredLegacy = try JSONDecoder().decode(RemoteInputMessage.self, from: legacyData)
+            guard restoredLegacy.event == original,
+                  restoredLegacy.sentAt == nil,
+                  restoredLegacy.sequence == nil else {
+                return fail("InputMessage compatibility", "legacy input event did not decode")
+            }
+            return ok("RemoteInputMessage preserves metadata and legacy input")
+        } catch {
+            return fail("InputMessage compatibility", "\(error)")
         }
     }
 
@@ -675,6 +758,44 @@ enum SelfTests {
         return ok("Session states expose active/input flags")
     }
 
+    private static func testHostSessionPrivilegedStateGate() -> Result {
+        let blocked: [SessionState] = [
+            .idle,
+            .advertising,
+            .browsing,
+            .connecting(host: "mac.local"),
+            .handshake,
+            .awaitingPairingCode,
+            .awaitingHostApproval,
+            .ended(reason: "done"),
+            .failed(reason: "boom")
+        ]
+        for state in blocked where state.allowsPrivilegedHostMessages {
+            return fail("Host session privileged state gate", "\(state) should not allow privileged host messages")
+        }
+
+        let allowed: [SessionState] = [
+            .approved,
+            .streaming,
+            .viewOnly
+        ]
+        for state in allowed where !state.allowsPrivilegedHostMessages {
+            return fail("Host session privileged state gate", "\(state) should allow approved host messages")
+        }
+
+        let pendingPermissions: PermissionSet = []
+        guard !pendingPermissions.contains(.clipboard),
+              !pendingPermissions.contains(.fileTransfer),
+              !pendingPermissions.contains(.remoteCommand),
+              !pendingPermissions.contains(.systemActions),
+              !pendingPermissions.contains(.packageInstall),
+              !pendingPermissions.contains(.reportInfo) else {
+            return fail("Host session privileged state gate", "pending permissions should not grant privileged capabilities")
+        }
+
+        return ok("Host sessions gate privileged messages on approval state")
+    }
+
     private static func testTrustedPeerLegacyPolicyDecode() -> Result {
         let peerID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
         let date = Date(timeIntervalSinceReferenceDate: 12345)
@@ -801,11 +922,20 @@ enum SelfTests {
 
         let macChoice = RFBSecurityNegotiationPolicy.chooseSecurityType(
             offered: offered,
+            hasUsername: true,
+            preference: .macAccountFirst
+        )
+        guard macChoice == RFBSecurityType.appleDH.rawValue else {
+            return fail("RFB security negotiation", "Mac Screen Sharing should prefer direct Apple DH when offered")
+        }
+
+        let macWithoutUsername = RFBSecurityNegotiationPolicy.chooseSecurityType(
+            offered: offered,
             hasUsername: false,
             preference: .macAccountFirst
         )
-        guard macChoice == RFBSecurityType.appleScreenSharing.rawValue else {
-            return fail("RFB security negotiation", "Mac Screen Sharing should prefer Apple's type 33 wrapper")
+        guard macWithoutUsername == RFBSecurityType.vncAuth.rawValue else {
+            return fail("RFB security negotiation", "without account credentials, negotiation should avoid Apple DH")
         }
 
         let macInnerChoice = RFBSecurityNegotiationPolicy.chooseAppleWrappedSecurityType(
@@ -817,13 +947,27 @@ enum SelfTests {
             return fail("RFB security negotiation", "Apple wrapper should prefer the supported DH account method before unsupported modern methods")
         }
 
+        let wrappedModernWithVNC = RFBSecurityNegotiationPolicy.chooseAppleWrappedSecurityType(
+            offered: [
+                RFBSecurityType.appleScreenSharing.rawValue,
+                RFBSecurityType.appleModern36.rawValue,
+                RFBSecurityType.appleModern35.rawValue,
+                RFBSecurityType.vncAuth.rawValue
+            ],
+            hasUsername: true,
+            preference: .macAccountFirst
+        )
+        guard wrappedModernWithVNC == RFBSecurityType.vncAuth.rawValue else {
+            return fail("RFB security negotiation", "Apple wrapper should choose VNC fallback before unsupported modern Apple auth")
+        }
+
         let genericWithUsername = RFBSecurityNegotiationPolicy.chooseSecurityType(
             offered: offered,
             hasUsername: true,
             preference: .vncPasswordFirst
         )
-        guard genericWithUsername == RFBSecurityType.appleScreenSharing.rawValue else {
-            return fail("RFB security negotiation", "supplying a username should prefer Apple's type 33 wrapper before VNC auth")
+        guard genericWithUsername == RFBSecurityType.appleDH.rawValue else {
+            return fail("RFB security negotiation", "supplying a username should prefer direct Apple DH before the type 33 wrapper")
         }
 
         let genericPasswordOnly = RFBSecurityNegotiationPolicy.chooseSecurityType(
@@ -857,7 +1001,38 @@ enum SelfTests {
             return fail("RFB security negotiation", "modern-only Apple auth should fail fast on the advertised modern type")
         }
 
-        return ok("RFB security negotiation prefers Apple Screen Sharing auth when appropriate")
+        let modernOnlyReport = RFBSecurityReport(
+            mode: .appleModern36,
+            offeredModes: [.appleScreenSharing, .appleModern36, .appleModern35]
+        )
+        guard modernOnlyReport.requiresUnsupportedModernAppleAuth,
+              modernOnlyReport.unsupportedModernAppleModes == [.appleModern36, .appleModern35] else {
+            return fail("RFB security negotiation", "modern-only Apple auth should be reported as unsupported")
+        }
+
+        let modernWithFallbackReport = RFBSecurityReport(
+            mode: .vncAuth,
+            offeredModes: [.appleScreenSharing, .appleModern36, .appleModern35, .vncAuth]
+        )
+        guard !modernWithFallbackReport.requiresUnsupportedModernAppleAuth else {
+            return fail("RFB security negotiation", "modern Apple auth should not block when VNC fallback is available")
+        }
+
+        return ok("RFB security negotiation prefers direct Apple DH when appropriate")
+    }
+
+    private static func testBigUIntModPow() -> Result {
+        let oddModulus = BigUInt.modpow(BigUInt(4), BigUInt(13), BigUInt(497))
+        guard oddModulus == BigUInt(445) else {
+            return fail("BigUInt modular exponentiation", "4^13 mod 497 produced \(oddModulus.toData(size: 2) as NSData)")
+        }
+
+        let evenModulus = BigUInt.modpow(BigUInt(7), BigUInt(5), BigUInt(100))
+        guard evenModulus == BigUInt(7) else {
+            return fail("BigUInt modular exponentiation", "even-modulus fallback returned the wrong result")
+        }
+
+        return ok("BigUInt modular exponentiation")
     }
 
     private static func testRFBClientEncodingPreference() -> Result {

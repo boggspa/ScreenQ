@@ -31,6 +31,19 @@ nonisolated protocol FrameEncoder: AnyObject, Sendable {
     func reset()
 }
 
+nonisolated private func screenQCaptureWallClockTimestamp(forHostTimestamp hostTimestamp: TimeInterval) -> TimeInterval {
+    let nowWall = Date().timeIntervalSince1970
+    let nowHost = CACurrentMediaTime()
+    guard hostTimestamp.isFinite, hostTimestamp > 0, nowHost.isFinite else {
+        return nowWall
+    }
+    let age = nowHost - hostTimestamp
+    guard age.isFinite, age >= 0, age < 60 else {
+        return nowWall
+    }
+    return nowWall - age
+}
+
 /// Settings driving capture and encoding.
 struct CaptureSettings: Equatable, Sendable {
     var fps: Int = 30
@@ -46,11 +59,55 @@ struct CaptureSettings: Equatable, Sendable {
 /// and the SCStream output callback queue. `nonisolated` so it doesn't
 /// inherit MainActor isolation from the surrounding class.
 nonisolated final class MacCaptureCrossState: @unchecked Sendable {
-    var encoder: FrameEncoder = H264FrameEncoder()
     var sequence: UInt64 = 0
     var displayID: CGDirectDisplayID = 0
+    private let encoderLock = NSLock()
     private let sinkLock = NSLock()
+    private let regionLock = NSLock()
+    private var activeEncoder: FrameEncoder = H264FrameEncoder()
+    private var encoderFailureCount = 0
+    private var encoderFallbackScheduled = false
     private var frameSinks: [UUID: @Sendable (VideoFrameMeta, Data) -> Void] = [:]
+    private var frameRegion: VideoFrameRegion?
+
+    var encoder: FrameEncoder {
+        get {
+            encoderLock.lock()
+            defer { encoderLock.unlock() }
+            return activeEncoder
+        }
+        set {
+            encoderLock.lock()
+            activeEncoder = newValue
+            encoderFailureCount = 0
+            encoderFallbackScheduled = false
+            encoderLock.unlock()
+        }
+    }
+
+    func recordEncoderSuccess() {
+        encoderLock.lock()
+        encoderFailureCount = 0
+        encoderLock.unlock()
+    }
+
+    func shouldFallbackAfterEncoderFailure(threshold: Int) -> Bool {
+        encoderLock.lock()
+        defer { encoderLock.unlock() }
+        encoderFailureCount += 1
+        guard encoderFailureCount >= threshold, !encoderFallbackScheduled else {
+            return false
+        }
+        encoderFallbackScheduled = true
+        return true
+    }
+
+    func resetEncoderFailures() {
+        encoderLock.lock()
+        encoderFailureCount = 0
+        encoderFallbackScheduled = false
+        encoderLock.unlock()
+    }
 
     func addFrameSink(id: UUID, _ sink: @escaping @Sendable (VideoFrameMeta, Data) -> Void) {
         sinkLock.lock()
@@ -68,6 +125,19 @@ nonisolated final class MacCaptureCrossState: @unchecked Sendable {
         sinkLock.lock()
         frameSinks.removeAll()
         sinkLock.unlock()
+    }
+
+    func setFrameRegion(_ region: VideoFrameRegion?) {
+        regionLock.lock()
+        frameRegion = region
+        regionLock.unlock()
+    }
+
+    func activeFrameRegion() -> VideoFrameRegion? {
+        regionLock.lock()
+        let region = frameRegion
+        regionLock.unlock()
+        return region
     }
 
     func emitFrame(_ meta: VideoFrameMeta, _ payload: Data) {
@@ -151,15 +221,17 @@ nonisolated final class AllDisplaysFrameCompositor: @unchecked Sendable {
         guard let data = context.jpegRepresentation(of: composite.cropped(to: targetRect), colorSpace: colorspace, options: options) else {
             return nil
         }
+        let captureTimestamp = CACurrentMediaTime()
         let meta = VideoFrameMeta(
             sequence: sequence,
-            captureTimestamp: CACurrentMediaTime(),
+            captureTimestamp: captureTimestamp,
             pixelWidth: outputWidth,
             pixelHeight: outputHeight,
             displayID: displayID,
             encoding: .jpeg,
             isKeyFrame: true,
-            payloadSize: data.count
+            payloadSize: data.count,
+            captureWallClockTimestamp: screenQCaptureWallClockTimestamp(forHostTimestamp: captureTimestamp)
         )
         return (meta, data)
     }
@@ -191,16 +263,12 @@ nonisolated final class AllDisplaysSCStreamOutput: NSObject, SCStreamOutput {
 
 @MainActor
 @available(macOS 12.3, *)
-final class MacScreenCaptureService: NSObject, ObservableObject {
-
-    @Published private(set) var isCapturing: Bool = false
-    @Published var settings = CaptureSettings()
-
-    private let displaySelection: DisplaySelectionService
+private final class MacCapturePipeline: NSObject, SCStreamOutput, SCStreamDelegate {
+    private let subscriberID: UUID
+    private let captureTargets: CaptureTargetSelectionService
     private let permissions: MacPermissionsService
-    private let outputQueue = DispatchQueue(label: "com.screenq.capture-output", qos: .userInitiated)
+    private let outputQueue: DispatchQueue
 
-    // Crossed by the nonisolated SCStreamOutput callback. Held nonisolated.
     nonisolated let xstate = MacCaptureCrossState()
 
     private var stream: SCStream?
@@ -208,11 +276,19 @@ final class MacScreenCaptureService: NSObject, ObservableObject {
     private var allDisplayOutputs: [AllDisplaysSCStreamOutput] = []
     private var allDisplayCompositeTimer: DispatchSourceTimer?
     private var activeFormat: VideoFormat?
+    private var activeStreamConfiguration: ActiveStreamConfiguration?
     private var activeDisplayGeometry: ActiveDisplayGeometry?
-    private var formatSinks: [UUID: (VideoFormat) async -> Void] = [:]
     private var currentStreamProfile = StreamQualityPreference().nativeProfile
-    private var viewerViewportScale: CGFloat = 1.0
+    private var viewerViewport: ViewerViewportMessage?
+    private var pendingViewportConfigurationTask: Task<Void, Never>?
+    private var isApplyingActiveStreamConfiguration = false
+    private var activeStreamConfigurationUpdateQueued = false
+    private var isCapturing = false
     private var isAllDisplaysCaptureActive = false
+    private var targetID: String?
+    private var settings: CaptureSettings
+    private var formatSink: ((VideoFormat) async -> Void)?
+    private var frameSink: (@Sendable (VideoFrameMeta, Data) -> Void)?
 
     private struct ActiveDisplayGeometry {
         let displayID: CGDirectDisplayID
@@ -221,29 +297,70 @@ final class MacScreenCaptureService: NSObject, ObservableObject {
         let pointWidth: Double
         let pointHeight: Double
         let scaleFactor: Double
+        let sourceRect: CGRect?
     }
 
-    init(displaySelection: DisplaySelectionService, permissions: MacPermissionsService) {
-        self.displaySelection = displaySelection
+    private struct CapturePlan {
+        let outputWidth: Int
+        let outputHeight: Int
+        let sourceRect: CGRect?
+        let region: VideoFrameRegion?
+    }
+
+    private struct ActiveStreamConfiguration: Equatable {
+        let outputWidth: Int
+        let outputHeight: Int
+        let sourceRect: CGRect?
+        let fps: Int
+        let encoding: VideoEncoding
+    }
+
+    init(
+        subscriberID: UUID,
+        captureTargets: CaptureTargetSelectionService,
+        permissions: MacPermissionsService,
+        defaultSettings: CaptureSettings
+    ) {
+        self.subscriberID = subscriberID
+        self.captureTargets = captureTargets
         self.permissions = permissions
+        self.settings = defaultSettings
+        self.outputQueue = DispatchQueue(label: "com.screenq.capture-output.\(subscriberID.uuidString)", qos: .userInitiated)
         super.init()
+        settings.scale = effectiveCaptureScale(for: currentStreamProfile)
+        settings.preferH264 = currentStreamProfile.codecPreference != .jpeg
+    }
+
+    var activeTargetID: String? {
+        targetID ?? captureTargets.activeTargetID()
+    }
+
+    var activeDisplayID: CGDirectDisplayID? {
+        captureTargets.displayID(forTargetID: activeTargetID)
+    }
+
+    var activeInputConstraint: CaptureInputConstraint? {
+        captureTargets.inputConstraint(forTargetID: activeTargetID)
     }
 
     func start(
-        subscriberID: UUID,
+        targetID requestedTargetID: String?,
         onFormat: @escaping (VideoFormat) async -> Void,
         onFrame: @escaping @Sendable (VideoFrameMeta, Data) -> Void
     ) async throws {
+        formatSink = onFormat
+        frameSink = onFrame
+
         if isCapturing {
-            formatSinks[subscriberID] = onFormat
             if let activeFormat {
                 await onFormat(activeFormat)
             }
             xstate.addFrameSink(id: subscriberID, onFrame)
             requestKeyFrame()
-            Logger.shared.info("ScreenCaptureKit already running; added/rebound frame sink")
+            Logger.shared.info("ScreenCaptureKit pipeline already running for subscriber \(subscriberID)")
             return
         }
+
         permissions.refresh()
         guard permissions.screenRecordingGranted else {
             throw NSError(
@@ -252,72 +369,42 @@ final class MacScreenCaptureService: NSObject, ObservableObject {
             )
         }
 
-        if displaySelection.isAllDisplaysSelected {
-            try await startAllDisplaysCapture(
-                subscriberID: subscriberID,
-                onFormat: onFormat,
-                onFrame: onFrame
-            )
+        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+        captureTargets.refresh(using: content)
+
+        let resolvedTargetID = requestedTargetID ?? captureTargets.activeTargetID()
+        targetID = resolvedTargetID
+
+        if captureTargets.isAllDisplaysTarget(resolvedTargetID) {
+            try await startAllDisplaysCapture(content: content, onFormat: onFormat, onFrame: onFrame)
             return
         }
 
-        guard let display = await chooseSCDisplay() else {
-            throw NSError(
-                domain: "ScreenQ.Capture", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "No shareable display"]
-            )
-        }
+        let target = try captureTargets.resolvedTarget(id: resolvedTargetID, in: content)
+        targetID = target.id
 
-        let bundleID = Bundle.main.bundleIdentifier ?? ""
-        var excludedApps: [SCRunningApplication] = []
-        if let content = try? await SCShareableContent.current {
-            excludedApps = content.applications.filter { $0.bundleIdentifier == bundleID }
-        }
-
-        let filter = SCContentFilter(display: display, excludingApplications: excludedApps, exceptingWindows: [])
-
-        let config = makeStreamConfiguration(
-            sourcePixelWidth: display.width,
-            sourcePixelHeight: display.height
-        )
-
-        // Choose encoder based on settings.
-        if settings.preferH264 {
-            let h264 = H264FrameEncoder()
-            h264.configure(width: config.width, height: config.height,
-                           fps: settings.fps, bitrate: settings.h264Bitrate)
-            xstate.encoder = h264
-        } else {
-            let jpeg = JPEGFrameEncoder()
-            jpeg.setQuality(settings.jpegQuality)
-            xstate.encoder = jpeg
-        }
-
-        // Compute the actual backing scale factor for this display.
-        let nativeScaleFactor: Double = {
-            if let screen = NSScreen.screens.first(where: { screen in
-                guard let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else { return false }
-                return screenNumber == display.displayID
-            }) {
-                return Double(screen.backingScaleFactor)
-            }
-            return 1.0
-        }()
+        settings.scale = effectiveCaptureScale(for: currentStreamProfile)
+        settings.preferH264 = currentStreamProfile.codecPreference != .jpeg
 
         let geometry = ActiveDisplayGeometry(
-            displayID: display.displayID,
-            pixelWidth: display.width,
-            pixelHeight: display.height,
-            pointWidth: Double(display.frame.width),
-            pointHeight: Double(display.frame.height),
-            scaleFactor: nativeScaleFactor
+            displayID: target.displayID,
+            pixelWidth: target.pixelWidth,
+            pixelHeight: target.pixelHeight,
+            pointWidth: target.pointWidth,
+            pointHeight: target.pointHeight,
+            scaleFactor: target.scaleFactor,
+            sourceRect: target.sourceRect
         )
-        let format = videoFormat(for: geometry, config: config)
+        let plan = capturePlan(for: geometry)
+        let config = makeStreamConfiguration(for: plan)
+        configureEncoder(for: config)
+        let format = videoFormat(for: geometry)
 
-        let stream = SCStream(filter: filter, configuration: config, delegate: self)
+        let stream = SCStream(filter: target.filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: outputQueue)
         xstate.removeAllFrameSinks()
-        xstate.displayID = display.displayID
+        xstate.displayID = target.displayID
+        xstate.setFrameRegion(plan.region)
         xstate.encoder.reset()
         xstate.sequence = 0
 
@@ -326,28 +413,23 @@ final class MacScreenCaptureService: NSObject, ObservableObject {
         self.isCapturing = true
         self.isAllDisplaysCaptureActive = false
         self.activeDisplayGeometry = geometry
+        self.activeStreamConfiguration = activeConfiguration(for: plan)
         self.activeFormat = format
-        self.formatSinks[subscriberID] = onFormat
+        await updateActiveStreamConfigurationIfNeeded()
 
-        await onFormat(format)
+        await onFormat(activeFormat ?? format)
         xstate.addFrameSink(id: subscriberID, onFrame)
         requestKeyFrame()
-        Logger.shared.info("ScreenCaptureKit started: \(config.width)x\(config.height) @ \(self.settings.fps)fps")
+        Logger.shared.info("ScreenCaptureKit pipeline started for subscriber \(subscriberID): \(config.width)x\(config.height) @ \(settings.fps)fps target=\(target.id)")
     }
 
-    func removeSubscriber(_ id: UUID) {
-        xstate.removeFrameSink(id: id)
-        formatSinks.removeValue(forKey: id)
-    }
-
-    func requestKeyFrame() {
-        if let h264 = xstate.encoder as? H264FrameEncoder {
-            h264.forceKeyFrame()
-        }
-    }
-
-    func applyStreamQuality(_ preference: StreamQualityPreference) {
-        applyStreamQuality(preference.nativeMessage)
+    func restart(
+        targetID requestedTargetID: String?,
+        onFormat: @escaping (VideoFormat) async -> Void,
+        onFrame: @escaping @Sendable (VideoFrameMeta, Data) -> Void
+    ) async throws {
+        await stop()
+        try await start(targetID: requestedTargetID, onFormat: onFormat, onFrame: onFrame)
     }
 
     func applyStreamQuality(_ message: StreamQualityMessage) {
@@ -356,13 +438,11 @@ final class MacScreenCaptureService: NSObject, ObservableObject {
         settings.jpegQuality = CGFloat(max(0.1, min(1.0, message.jpegQuality)))
         settings.h264Bitrate = max(500_000, min(30_000_000, message.targetBitrate))
         settings.fps = max(5, min(60, message.targetFPS))
-        if !profile.adaptive {
-            viewerViewportScale = 1.0
+        if !profile.adaptive || !profile.usesViewportAwareDetail {
+            viewerViewport = nil
         }
         settings.scale = effectiveCaptureScale(for: profile)
-        if !isCapturing {
-            settings.preferH264 = profile.codecPreference != .jpeg
-        }
+        settings.preferH264 = profile.codecPreference != .jpeg
         if let h264 = xstate.encoder as? H264FrameEncoder {
             h264.updateBitrate(settings.h264Bitrate)
             h264.updateFrameRate(settings.fps)
@@ -375,115 +455,33 @@ final class MacScreenCaptureService: NSObject, ObservableObject {
     }
 
     func applyViewerViewport(_ viewport: ViewerViewportMessage, adaptiveEnabled: Bool) {
-        if adaptiveEnabled && currentStreamProfile.adaptive {
-            viewerViewportScale = CGFloat(max(1.0, min(5.0, viewport.zoomScale)))
+        if adaptiveEnabled && currentStreamProfile.adaptive && currentStreamProfile.usesViewportAwareDetail {
+            if let current = viewerViewport,
+               viewport.timestamp.isFinite,
+               current.timestamp.isFinite,
+               viewport.timestamp < current.timestamp {
+                return
+            }
+            viewerViewport = viewport
         } else {
-            viewerViewportScale = 1.0
+            viewerViewport = nil
         }
-
-        let nextScale = effectiveCaptureScale(for: currentStreamProfile)
-        guard abs(settings.scale - nextScale) >= 0.02 else { return }
-        settings.scale = nextScale
         scheduleActiveStreamConfigurationUpdate()
     }
 
-    private func captureScale(for policy: StreamScalePolicy) -> CGFloat {
-        switch policy {
-        case .native:
-            return 1.0
-        case .viewerMatched:
-            return 0.85
-        case .balancedDownscale:
-            return 0.7
-        case .bandwidthSaver:
-            return 0.5
-        }
-    }
-
-    private func effectiveCaptureScale(for profile: StreamProfile) -> CGFloat {
-        let baseScale = captureScale(for: profile.scalePolicy)
-        guard profile.adaptive else { return baseScale }
-        return max(0.25, min(1.0, baseScale * max(1.0, viewerViewportScale)))
-    }
-
-    private func makeStreamConfiguration(
-        sourcePixelWidth: Int,
-        sourcePixelHeight: Int
-    ) -> SCStreamConfiguration {
-        let config = SCStreamConfiguration()
-        let scale = max(0.25, min(1.0, settings.scale))
-        config.width = max(160, Int((Double(sourcePixelWidth) * Double(scale)).rounded()))
-        config.height = max(120, Int((Double(sourcePixelHeight) * Double(scale)).rounded()))
-        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(1, settings.fps)))
-        config.queueDepth = 4
-        config.showsCursor = settings.showCursor
-        config.pixelFormat = kCVPixelFormatType_32BGRA
-        if #available(macOS 13.0, *) {
-            config.capturesAudio = settings.captureAudio
-        }
-        return config
-    }
-
-    private func videoFormat(
-        for geometry: ActiveDisplayGeometry,
-        config: SCStreamConfiguration
-    ) -> VideoFormat {
-        VideoFormat(
-            pixelWidth: config.width,
-            pixelHeight: config.height,
-            pointWidth: geometry.pointWidth,
-            pointHeight: geometry.pointHeight,
-            displayID: geometry.displayID,
-            scaleFactor: geometry.scaleFactor,
-            encoding: xstate.encoder.encoding,
-            targetFPS: settings.fps
-        )
-    }
-
-    private func scheduleActiveStreamConfigurationUpdate() {
-        guard isCapturing, !isAllDisplaysCaptureActive else { return }
-        Task { @MainActor [weak self] in
-            await self?.updateActiveStreamConfigurationIfNeeded()
-        }
-    }
-
-    private func updateActiveStreamConfigurationIfNeeded() async {
-        guard isCapturing,
-              !isAllDisplaysCaptureActive,
-              let stream,
-              let geometry = activeDisplayGeometry else {
-            return
-        }
-
-        let config = makeStreamConfiguration(
-            sourcePixelWidth: geometry.pixelWidth,
-            sourcePixelHeight: geometry.pixelHeight
-        )
-        if activeFormat?.pixelWidth == config.width,
-           activeFormat?.pixelHeight == config.height,
-           activeFormat?.targetFPS == settings.fps {
-            return
-        }
-
-        do {
-            try await stream.updateConfiguration(config)
-            let format = videoFormat(for: geometry, config: config)
-            activeFormat = format
-            await notifyFormatSinks(format)
-            requestKeyFrame()
-            Logger.shared.info("ScreenCaptureKit updated: \(config.width)x\(config.height) @ \(settings.fps)fps")
-        } catch {
-            Logger.shared.warn("ScreenCaptureKit updateConfiguration failed: \(error.localizedDescription)")
-        }
-    }
-
-    private func notifyFormatSinks(_ format: VideoFormat) async {
-        for sink in formatSinks.values {
-            await sink(format)
+    func updateAdaptiveBitrate(bitrate: Int, fps: Int) {
+        guard currentStreamProfile.adaptive else { return }
+        if let h264 = xstate.encoder as? H264FrameEncoder {
+            h264.updateBitrate(bitrate)
+            h264.updateFrameRate(fps)
         }
     }
 
     func stop() async {
+        pendingViewportConfigurationTask?.cancel()
+        pendingViewportConfigurationTask = nil
+        activeStreamConfigurationUpdateQueued = false
+        isApplyingActiveStreamConfiguration = false
         allDisplayCompositeTimer?.cancel()
         allDisplayCompositeTimer = nil
         for stream in allDisplayStreams {
@@ -505,21 +503,276 @@ final class MacScreenCaptureService: NSObject, ObservableObject {
         }
         stream = nil
         activeFormat = nil
+        activeStreamConfiguration = nil
         activeDisplayGeometry = nil
-        formatSinks.removeAll()
+        viewerViewport = nil
+        formatSink = nil
+        frameSink = nil
         isAllDisplaysCaptureActive = false
         xstate.removeAllFrameSinks()
+        xstate.setFrameRegion(nil)
         xstate.encoder.reset()
         isCapturing = false
-        Logger.shared.info("ScreenCaptureKit stopped")
+        Logger.shared.info("ScreenCaptureKit pipeline stopped for subscriber \(subscriberID)")
+    }
+
+    private func requestKeyFrame() {
+        if let h264 = xstate.encoder as? H264FrameEncoder {
+            h264.forceKeyFrame()
+        }
+    }
+
+    private func captureScale(for policy: StreamScalePolicy) -> CGFloat {
+        switch policy {
+        case .native:
+            return 1.0
+        case .viewerMatched:
+            return 0.85
+        case .balancedDownscale:
+            return 0.7
+        case .bandwidthSaver:
+            return 0.5
+        }
+    }
+
+    private func effectiveCaptureScale(for profile: StreamProfile) -> CGFloat {
+        captureScale(for: profile.scalePolicy)
+    }
+
+    private func fullCanvasPixelSize(for geometry: ActiveDisplayGeometry) -> (width: Int, height: Int) {
+        let scale = max(0.25, min(1.0, effectiveCaptureScale(for: currentStreamProfile)))
+        return (
+            max(160, Int((Double(geometry.pixelWidth) * Double(scale)).rounded())),
+            max(120, Int((Double(geometry.pixelHeight) * Double(scale)).rounded()))
+        )
+    }
+
+    private func capturePlan(for geometry: ActiveDisplayGeometry) -> CapturePlan {
+        let fullSize = fullCanvasPixelSize(for: geometry)
+        guard let viewport = viewerViewport,
+              currentStreamProfile.adaptive,
+              currentStreamProfile.usesViewportAwareDetail,
+              viewport.adaptiveEnabled,
+              viewport.zoomScale >= 1.08,
+              viewport.visibleRect.width < 0.98 || viewport.visibleRect.height < 0.98 else {
+            return CapturePlan(
+                outputWidth: fullSize.width,
+                outputHeight: fullSize.height,
+                sourceRect: geometry.sourceRect,
+                region: nil
+            )
+        }
+
+        let baseOrigin = geometry.sourceRect?.origin ?? .zero
+        let paddedRect = paddedViewportRect(viewport.visibleRect)
+        let sourceRect = CGRect(
+            x: baseOrigin.x + paddedRect.x * geometry.pointWidth,
+            y: baseOrigin.y + paddedRect.y * geometry.pointHeight,
+            width: max(1, paddedRect.width * geometry.pointWidth),
+            height: max(1, paddedRect.height * geometry.pointHeight)
+        )
+
+        let region = VideoFrameRegion(
+            x: Int((paddedRect.x * Double(fullSize.width)).rounded(.down)),
+            y: Int((paddedRect.y * Double(fullSize.height)).rounded(.down)),
+            width: max(1, Int((paddedRect.width * Double(fullSize.width)).rounded(.up))),
+            height: max(1, Int((paddedRect.height * Double(fullSize.height)).rounded(.up))),
+            fullWidth: fullSize.width,
+            fullHeight: fullSize.height
+        )
+
+        let visibleWidth = max(0.01, viewport.visibleRect.width)
+        let visibleHeight = max(0.01, viewport.visibleRect.height)
+        let paddedCanvasWidth = Double(max(1, viewport.canvasPixelWidth)) * paddedRect.width / visibleWidth
+        let paddedCanvasHeight = Double(max(1, viewport.canvasPixelHeight)) * paddedRect.height / visibleHeight
+        let nativeWidth = Double(geometry.pixelWidth) * paddedRect.width
+        let nativeHeight = Double(geometry.pixelHeight) * paddedRect.height
+        var outputWidth = max(160, Int(min(nativeWidth, paddedCanvasWidth * 1.15).rounded(.up)))
+        var outputHeight = max(120, Int(min(nativeHeight, paddedCanvasHeight * 1.15).rounded(.up)))
+
+        let maxPixels = 5_000_000.0
+        let pixelCount = Double(outputWidth * outputHeight)
+        if pixelCount > maxPixels {
+            let ratio = sqrt(maxPixels / pixelCount)
+            outputWidth = max(160, Int((Double(outputWidth) * ratio).rounded(.down)))
+            outputHeight = max(120, Int((Double(outputHeight) * ratio).rounded(.down)))
+        }
+
+        return CapturePlan(
+            outputWidth: outputWidth,
+            outputHeight: outputHeight,
+            sourceRect: sourceRect,
+            region: region
+        )
+    }
+
+    private func paddedViewportRect(_ rect: NormalisedRect) -> NormalisedRect {
+        let padX = max(0.025, rect.width * 0.18)
+        let padY = max(0.025, rect.height * 0.18)
+        return NormalisedRect(
+            x: rect.x - padX,
+            y: rect.y - padY,
+            width: rect.width + padX * 2,
+            height: rect.height + padY * 2
+        )
+    }
+
+    private func makeStreamConfiguration(for plan: CapturePlan) -> SCStreamConfiguration {
+        let config = SCStreamConfiguration()
+        config.width = plan.outputWidth
+        config.height = plan.outputHeight
+        if let sourceRect = plan.sourceRect {
+            config.sourceRect = sourceRect
+        }
+        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(1, settings.fps)))
+        config.queueDepth = 2
+        config.showsCursor = settings.showCursor
+        config.pixelFormat = kCVPixelFormatType_32BGRA
+        if #available(macOS 13.0, *) {
+            config.capturesAudio = settings.captureAudio
+        }
+        return config
+    }
+
+    private func activeConfiguration(for plan: CapturePlan) -> ActiveStreamConfiguration {
+        ActiveStreamConfiguration(
+            outputWidth: plan.outputWidth,
+            outputHeight: plan.outputHeight,
+            sourceRect: plan.sourceRect,
+            fps: settings.fps,
+            encoding: desiredEncoding
+        )
+    }
+
+    private var desiredEncoding: VideoEncoding {
+        settings.preferH264 ? .h264 : .jpeg
+    }
+
+    private func configureEncoder(for config: SCStreamConfiguration) {
+        if settings.preferH264 {
+            let h264 = (xstate.encoder as? H264FrameEncoder) ?? H264FrameEncoder()
+            h264.configure(
+                width: config.width,
+                height: config.height,
+                fps: settings.fps,
+                bitrate: settings.h264Bitrate
+            )
+            xstate.encoder = h264
+        } else {
+            let jpeg = (xstate.encoder as? JPEGFrameEncoder) ?? JPEGFrameEncoder()
+            jpeg.setQuality(settings.jpegQuality)
+            xstate.encoder = jpeg
+        }
+    }
+
+    private func videoFormat(for geometry: ActiveDisplayGeometry) -> VideoFormat {
+        let fullSize = fullCanvasPixelSize(for: geometry)
+        return VideoFormat(
+            pixelWidth: fullSize.width,
+            pixelHeight: fullSize.height,
+            pointWidth: geometry.pointWidth,
+            pointHeight: geometry.pointHeight,
+            displayID: geometry.displayID,
+            scaleFactor: geometry.scaleFactor,
+            encoding: desiredEncoding,
+            targetFPS: settings.fps
+        )
+    }
+
+    private func scheduleActiveStreamConfigurationUpdate() {
+        guard isCapturing, !isAllDisplaysCaptureActive else { return }
+        pendingViewportConfigurationTask?.cancel()
+        let debounceNanoseconds: UInt64 = viewerViewport == nil ? 0 : 120_000_000
+        pendingViewportConfigurationTask = Task { @MainActor [weak self] in
+            if debounceNanoseconds > 0 {
+                do {
+                    try await Task.sleep(nanoseconds: debounceNanoseconds)
+                } catch {
+                    return
+                }
+            }
+            guard !Task.isCancelled else { return }
+            await self?.runActiveStreamConfigurationUpdateLoop()
+        }
+    }
+
+    private func runActiveStreamConfigurationUpdateLoop() async {
+        guard isCapturing, !isAllDisplaysCaptureActive else { return }
+        if isApplyingActiveStreamConfiguration {
+            activeStreamConfigurationUpdateQueued = true
+            return
+        }
+
+        isApplyingActiveStreamConfiguration = true
+        defer { isApplyingActiveStreamConfiguration = false }
+
+        repeat {
+            activeStreamConfigurationUpdateQueued = false
+            await updateActiveStreamConfigurationIfNeeded()
+        } while activeStreamConfigurationUpdateQueued && isCapturing && !isAllDisplaysCaptureActive
+    }
+
+    private func fallbackToJPEGAfterEncoderFailures() {
+        guard isCapturing, !isAllDisplaysCaptureActive, settings.preferH264 else { return }
+        settings.preferH264 = false
+        currentStreamProfile.codecPreference = .jpeg
+        let jpeg = JPEGFrameEncoder()
+        jpeg.setQuality(settings.jpegQuality)
+        xstate.encoder = jpeg
+        xstate.resetEncoderFailures()
+        Logger.shared.warn("H.264 encoder failed repeatedly; falling back to JPEG for subscriber \(subscriberID)")
+        scheduleActiveStreamConfigurationUpdate()
+    }
+
+    private func updateActiveStreamConfigurationIfNeeded() async {
+        guard isCapturing,
+              !isAllDisplaysCaptureActive,
+              let stream,
+              let geometry = activeDisplayGeometry else {
+            return
+        }
+
+        let plan = capturePlan(for: geometry)
+        let config = makeStreamConfiguration(for: plan)
+        let nextConfiguration = activeConfiguration(for: plan)
+        let nextFormat = videoFormat(for: geometry)
+        let needsStreamUpdate = activeStreamConfiguration != nextConfiguration
+        let needsEncoderUpdate = activeStreamConfiguration?.encoding != nextConfiguration.encoding ||
+            activeStreamConfiguration?.outputWidth != nextConfiguration.outputWidth ||
+            activeStreamConfiguration?.outputHeight != nextConfiguration.outputHeight
+        let needsFormatUpdate = activeFormat != nextFormat
+        if !needsStreamUpdate && !needsEncoderUpdate && !needsFormatUpdate {
+            xstate.setFrameRegion(plan.region)
+            return
+        }
+
+        do {
+            if needsStreamUpdate {
+                try await stream.updateConfiguration(config)
+            }
+            if needsEncoderUpdate {
+                configureEncoder(for: config)
+            }
+            activeStreamConfiguration = nextConfiguration
+            xstate.setFrameRegion(plan.region)
+            if needsFormatUpdate {
+                activeFormat = nextFormat
+                if let formatSink {
+                    await formatSink(nextFormat)
+                }
+            }
+            requestKeyFrame()
+            Logger.shared.info("ScreenCaptureKit pipeline updated for subscriber \(subscriberID): \(config.width)x\(config.height) @ \(settings.fps)fps\(plan.region == nil ? "" : " viewport")")
+        } catch {
+            Logger.shared.warn("ScreenCaptureKit updateConfiguration failed for subscriber \(subscriberID): \(error.localizedDescription)")
+        }
     }
 
     private func startAllDisplaysCapture(
-        subscriberID: UUID,
+        content: SCShareableContent,
         onFormat: @escaping (VideoFormat) async -> Void,
         onFrame: @escaping @Sendable (VideoFrameMeta, Data) -> Void
     ) async throws {
-        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
         let displays = content.displays
         guard displays.count > 1 else {
             throw NSError(
@@ -587,6 +840,7 @@ final class MacScreenCaptureService: NSObject, ObservableObject {
         xstate.encoder = jpeg
         xstate.removeAllFrameSinks()
         xstate.displayID = allDisplaysID
+        xstate.setFrameRegion(nil)
         xstate.encoder.reset()
         xstate.sequence = 0
 
@@ -620,42 +874,22 @@ final class MacScreenCaptureService: NSObject, ObservableObject {
         isCapturing = true
         isAllDisplaysCaptureActive = true
         activeDisplayGeometry = nil
+        activeStreamConfiguration = nil
         activeFormat = format
-        formatSinks[subscriberID] = onFormat
+        targetID = CaptureTargetSelectionService.allDisplaysTargetID
 
         await onFormat(format)
         xstate.addFrameSink(id: subscriberID, onFrame)
         timer.resume()
-        Logger.shared.info("ScreenCaptureKit all-displays started: \(format.pixelWidth)x\(format.pixelHeight) @ \(fps)fps")
+        Logger.shared.info("ScreenCaptureKit all-displays pipeline started for subscriber \(subscriberID): \(format.pixelWidth)x\(format.pixelHeight) @ \(fps)fps")
     }
 
-    private func chooseSCDisplay() async -> SCDisplay? {
-        do {
-            let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
-            if let id = displaySelection.selectedDisplayID,
-               let match = content.displays.first(where: { $0.displayID == id }) {
-                return match
-            }
-            return content.displays.first
-        } catch {
-            Logger.shared.error("SCShareableContent: \(error.localizedDescription)")
-            return nil
-        }
-    }
-}
-
-@available(macOS 12.3, *)
-extension MacScreenCaptureService: SCStreamDelegate {
     nonisolated func stream(_ stream: SCStream, didStopWithError error: Error) {
-        Logger.shared.error("SCStream stopped: \(error.localizedDescription)")
+        Logger.shared.error("SCStream stopped for subscriber \(subscriberID): \(error.localizedDescription)")
         Task { @MainActor [weak self] in
             self?.isCapturing = false
         }
     }
-}
-
-@available(macOS 12.3, *)
-extension MacScreenCaptureService: SCStreamOutput {
 
     nonisolated func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen else { return }
@@ -672,8 +906,162 @@ extension MacScreenCaptureService: SCStreamOutput {
         state.sequence &+= 1
         let seq = state.sequence
         let did = state.displayID
-        guard let result = state.encoder.encode(sampleBuffer, sequence: seq, displayID: did) else { return }
-        state.emitFrame(result.0, result.1)
+        let encoder = state.encoder
+        guard let result = encoder.encode(sampleBuffer, sequence: seq, displayID: did) else {
+            if encoder is H264FrameEncoder, state.shouldFallbackAfterEncoderFailure(threshold: 12) {
+                Task { @MainActor [weak self] in
+                    self?.fallbackToJPEGAfterEncoderFailures()
+                }
+            }
+            return
+        }
+        state.recordEncoderSuccess()
+        let meta = result.0.withRegion(state.activeFrameRegion())
+        state.emitFrame(meta, result.1)
+    }
+}
+
+@MainActor
+@available(macOS 12.3, *)
+final class MacScreenCaptureService: NSObject, ObservableObject {
+
+    @Published private(set) var isCapturing: Bool = false
+    @Published var settings = CaptureSettings()
+
+    private let captureTargets: CaptureTargetSelectionService
+    private let permissions: MacPermissionsService
+    private var pipelines: [UUID: MacCapturePipeline] = [:]
+
+    init(
+        displaySelection: DisplaySelectionService,
+        captureTargets: CaptureTargetSelectionService,
+        permissions: MacPermissionsService
+    ) {
+        self.captureTargets = captureTargets
+        self.permissions = permissions
+        super.init()
+    }
+
+    func start(
+        subscriberID: UUID,
+        targetID: String? = nil,
+        onFormat: @escaping (VideoFormat) async -> Void,
+        onFrame: @escaping @Sendable (VideoFrameMeta, Data) -> Void
+    ) async throws {
+        let pipeline = pipeline(for: subscriberID)
+        try await pipeline.start(targetID: targetID, onFormat: onFormat, onFrame: onFrame)
+        updateCaptureState()
+    }
+
+    func restartSubscriber(
+        _ subscriberID: UUID,
+        targetID: String?,
+        onFormat: @escaping (VideoFormat) async -> Void,
+        onFrame: @escaping @Sendable (VideoFrameMeta, Data) -> Void
+    ) async throws {
+        let pipeline = pipeline(for: subscriberID)
+        try await pipeline.restart(targetID: targetID, onFormat: onFormat, onFrame: onFrame)
+        updateCaptureState()
+    }
+
+    func removeSubscriber(_ id: UUID) async {
+        guard let pipeline = pipelines.removeValue(forKey: id) else { return }
+        await pipeline.stop()
+        updateCaptureState()
+    }
+
+    func stop() async {
+        let activePipelines = Array(pipelines.values)
+        pipelines.removeAll()
+        for pipeline in activePipelines {
+            await pipeline.stop()
+        }
+        updateCaptureState()
+    }
+
+    func applyStreamQuality(_ preference: StreamQualityPreference) {
+        applyStreamQuality(preference.nativeMessage)
+    }
+
+    func applyStreamQuality(_ message: StreamQualityMessage) {
+        settings.jpegQuality = CGFloat(max(0.1, min(1.0, message.jpegQuality)))
+        settings.h264Bitrate = max(500_000, min(30_000_000, message.targetBitrate))
+        settings.fps = max(5, min(60, message.targetFPS))
+        settings.scale = captureScale(for: message.profile.scalePolicy)
+        settings.preferH264 = message.profile.codecPreference != .jpeg
+        pipelines.values.forEach { $0.applyStreamQuality(message) }
+    }
+
+    func applyStreamQuality(for subscriberID: UUID, _ message: StreamQualityMessage) {
+        settings.jpegQuality = CGFloat(max(0.1, min(1.0, message.jpegQuality)))
+        settings.h264Bitrate = max(500_000, min(30_000_000, message.targetBitrate))
+        settings.fps = max(5, min(60, message.targetFPS))
+        settings.scale = captureScale(for: message.profile.scalePolicy)
+        settings.preferH264 = message.profile.codecPreference != .jpeg
+        pipelines[subscriberID]?.applyStreamQuality(message)
+    }
+
+    func applyViewerViewport(_ viewport: ViewerViewportMessage, adaptiveEnabled: Bool) {
+        pipelines.values.forEach {
+            $0.applyViewerViewport(viewport, adaptiveEnabled: adaptiveEnabled)
+        }
+    }
+
+    func applyViewerViewport(for subscriberID: UUID, _ viewport: ViewerViewportMessage, adaptiveEnabled: Bool) {
+        pipelines[subscriberID]?.applyViewerViewport(viewport, adaptiveEnabled: adaptiveEnabled)
+    }
+
+    func updateAdaptiveBitrate(bitrate: Int, fps: Int) {
+        pipelines.values.forEach {
+            $0.updateAdaptiveBitrate(bitrate: bitrate, fps: fps)
+        }
+    }
+
+    func updateAdaptiveBitrate(for subscriberID: UUID, bitrate: Int, fps: Int) {
+        pipelines[subscriberID]?.updateAdaptiveBitrate(bitrate: bitrate, fps: fps)
+    }
+
+    func activeTargetID(for subscriberID: UUID) -> String? {
+        pipelines[subscriberID]?.activeTargetID ?? captureTargets.activeTargetID()
+    }
+
+    func activeDisplayID(for subscriberID: UUID) -> CGDirectDisplayID? {
+        pipelines[subscriberID]?.activeDisplayID ?? captureTargets.displayID(forTargetID: nil)
+    }
+
+    func activeInputConstraint(for subscriberID: UUID) -> CaptureInputConstraint? {
+        pipelines[subscriberID]?.activeInputConstraint ?? captureTargets.inputConstraint(forTargetID: nil)
+    }
+
+    private func pipeline(for subscriberID: UUID) -> MacCapturePipeline {
+        if let pipeline = pipelines[subscriberID] {
+            return pipeline
+        }
+        let pipeline = MacCapturePipeline(
+            subscriberID: subscriberID,
+            captureTargets: captureTargets,
+            permissions: permissions,
+            defaultSettings: settings
+        )
+        pipelines[subscriberID] = pipeline
+        return pipeline
+    }
+
+    private func updateCaptureState() {
+        isCapturing = !pipelines.isEmpty
+    }
+
+    private func captureScale(for policy: StreamScalePolicy) -> CGFloat {
+        switch policy {
+        case .native:
+            return 1.0
+        case .viewerMatched:
+            return 0.85
+        case .balancedDownscale:
+            return 0.7
+        case .bandwidthSaver:
+            return 0.5
+        }
     }
 }
 
@@ -707,7 +1095,8 @@ nonisolated final class JPEGFrameEncoder: FrameEncoder, @unchecked Sendable {
             displayID: displayID,
             encoding: .jpeg,
             isKeyFrame: true,
-            payloadSize: data.count
+            payloadSize: data.count,
+            captureWallClockTimestamp: screenQCaptureWallClockTimestamp(forHostTimestamp: timestamp)
         )
         return (meta, data)
     }

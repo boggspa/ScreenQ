@@ -22,18 +22,41 @@ import Combine
 @MainActor
 final class MacInputInjectionService: ObservableObject {
 
-    @Published var enabled: Bool = false
-    @Published var viewOnly: Bool = false
+    @Published var enabled: Bool = false {
+        didSet {
+            if oldValue && !enabled {
+                resetTransientState()
+            }
+        }
+    }
+    @Published var viewOnly: Bool = false {
+        didSet {
+            if viewOnly {
+                resetTransientState()
+            }
+        }
+    }
 
     private let displaySelection: DisplaySelectionService
     private let permissions: MacPermissionsService
+    private let captureTargetSelection: AnyObject?
 
     private var lastPointerSendTime: TimeInterval = 0
     private let pointerThrottleSeconds: TimeInterval = 1.0 / 240.0
+    private var lastActivatedProcessID: pid_t?
+    private var lastActivationTime: TimeInterval = 0
+    private var activePointerButtons: Set<PointerButton> = []
+    private var activeKeys: Set<KeyCode> = []
+    private var lastPointerLocation: CGPoint?
 
-    init(displaySelection: DisplaySelectionService, permissions: MacPermissionsService) {
+    init(
+        displaySelection: DisplaySelectionService,
+        permissions: MacPermissionsService,
+        captureTargetSelection: AnyObject? = nil
+    ) {
         self.displaySelection = displaySelection
         self.permissions = permissions
+        self.captureTargetSelection = captureTargetSelection
     }
 
     /// True only if every gate is open: enabled, not view-only, accessibility,
@@ -43,24 +66,48 @@ final class MacInputInjectionService: ObservableObject {
         return enabled && !viewOnly && permissions.accessibilityGranted && currentDisplayBounds() != nil
     }
 
-    func handle(_ event: RemoteInputEvent) {
-        guard canInject else { return }
+    func handle(
+        _ event: RemoteInputEvent,
+        displayID: CGDirectDisplayID? = nil,
+        inputConstraint: CaptureInputConstraint? = nil
+    ) {
+        guard canInject(displayID: displayID, inputConstraint: inputConstraint) else { return }
         switch event {
         case .pointerMove(let p, let mods):
-            postPointer(p, type: .mouseMoved, button: .left, isDown: nil, modifiers: mods)
+            postPointer(p, type: .mouseMoved, button: .left, isDown: nil, modifiers: mods, displayID: displayID, inputConstraint: inputConstraint)
         case .pointerDown(let p, let b, let mods):
-            postPointer(p, type: cgType(for: b, isDown: true), button: b, isDown: true, modifiers: mods)
+            postPointer(p, type: cgType(for: b, isDown: true), button: b, isDown: true, modifiers: mods, displayID: displayID, inputConstraint: inputConstraint)
         case .pointerUp(let p, let b, let mods):
-            postPointer(p, type: cgType(for: b, isDown: false), button: b, isDown: false, modifiers: mods)
-        case .scroll(let dx, let dy, _, let mods):
+            postPointer(p, type: cgType(for: b, isDown: false), button: b, isDown: false, modifiers: mods, displayID: displayID, inputConstraint: inputConstraint)
+        case .scroll(let dx, let dy, let point, let mods):
+            guard screenPoint(from: point, displayID: displayID, inputConstraint: inputConstraint) != nil else { return }
             postScroll(dx: dx, dy: dy, modifiers: mods)
         case .keyDown(let key, let mods):
+            activateTargetApplicationIfNeeded(inputConstraint: inputConstraint)
             postKey(key, modifiers: mods, isDown: true)
         case .keyUp(let key, let mods):
+            activateTargetApplicationIfNeeded(inputConstraint: inputConstraint)
             postKey(key, modifiers: mods, isDown: false)
         case .textInput(let text):
+            activateTargetApplicationIfNeeded(inputConstraint: inputConstraint)
             postText(text)
         }
+    }
+
+    func resetTransientState() {
+        let point = lastPointerLocation ?? NSEvent.mouseLocation
+        for button in activePointerButtons {
+            postPointerRelease(button: button, at: point)
+        }
+        activePointerButtons.removeAll()
+
+        for key in activeKeys {
+            postKeyRelease(key)
+        }
+        activeKeys.removeAll()
+        lastPointerSendTime = 0
+        lastActivatedProcessID = nil
+        lastActivationTime = 0
     }
 
     // MARK: - Geometry
@@ -69,11 +116,75 @@ final class MacInputInjectionService: ObservableObject {
         displaySelection.selectedCGBounds()
     }
 
-    private func screenPoint(from normalised: NormalisedPoint) -> CGPoint? {
-        guard let bounds = currentDisplayBounds() else { return nil }
-        let x = bounds.origin.x + bounds.size.width  * CGFloat(normalised.x)
-        let y = bounds.origin.y + bounds.size.height * CGFloat(normalised.y)
-        return CGPoint(x: x, y: y)
+    private func currentDisplayBounds(displayID: CGDirectDisplayID?) -> CGRect? {
+        guard let displayID else { return currentDisplayBounds() }
+        if displayID == DisplaySelectionService.allDisplaysID {
+            return DisplaySelectionService.cgDisplayBoundsUnion()
+        }
+        return CGDisplayBounds(displayID)
+    }
+
+    private func canInject(displayID: CGDirectDisplayID?, inputConstraint: CaptureInputConstraint?) -> Bool {
+        permissions.refresh()
+        return enabled &&
+            !viewOnly &&
+            permissions.accessibilityGranted &&
+            (inputConstraint?.mappingFrame != nil || currentDisplayBounds(displayID: displayID) != nil)
+    }
+
+    private func screenPoint(
+        from normalised: NormalisedPoint,
+        displayID: CGDirectDisplayID? = nil,
+        inputConstraint: CaptureInputConstraint? = nil
+    ) -> CGPoint? {
+        let constraint = inputConstraint ?? activeInputConstraint()
+        let point: CGPoint
+
+        if let frame = constraint?.mappingFrame {
+            point = self.point(in: frame, from: normalised)
+        } else {
+            guard let bounds = currentDisplayBounds(displayID: displayID) else { return nil }
+            let x = bounds.origin.x + bounds.size.width  * CGFloat(normalised.x)
+            let y = bounds.origin.y + bounds.size.height * CGFloat(normalised.y)
+            point = CGPoint(x: x, y: y)
+        }
+
+        if let constraint,
+           !constraint.allowedFrames.isEmpty,
+           !constraint.allowedFrames.contains(where: { $0.contains(point) }) {
+            return nil
+        }
+        return point
+    }
+
+    private func point(in frame: CGRect, from normalised: NormalisedPoint) -> CGPoint {
+        CGPoint(
+            x: frame.origin.x + frame.size.width * CGFloat(normalised.x),
+            y: frame.origin.y + frame.size.height * CGFloat(normalised.y)
+        )
+    }
+
+    private func activeInputConstraint() -> CaptureInputConstraint? {
+        guard #available(macOS 12.3, *),
+              let service = captureTargetSelection as? CaptureTargetSelectionService else {
+            return nil
+        }
+        return service.activeInputConstraint()
+    }
+
+    private func activateTargetApplicationIfNeeded(inputConstraint: CaptureInputConstraint? = nil) {
+        guard let pid = (inputConstraint ?? activeInputConstraint())?.processID else { return }
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+            lastActivatedProcessID = pid
+            return
+        }
+        let now = Date().timeIntervalSince1970
+        if lastActivatedProcessID == pid, now - lastActivationTime < 0.75 {
+            return
+        }
+        lastActivatedProcessID = pid
+        lastActivationTime = now
+        NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps])
     }
 
     // MARK: - Mouse
@@ -99,22 +210,42 @@ final class MacInputInjectionService: ObservableObject {
         type: CGEventType,
         button: PointerButton,
         isDown: Bool?,
-        modifiers: KeyModifiers
+        modifiers: KeyModifiers,
+        displayID: CGDirectDisplayID? = nil,
+        inputConstraint: CaptureInputConstraint? = nil
     ) {
         let now = Date().timeIntervalSince1970
         if type == .mouseMoved {
             if now - lastPointerSendTime < pointerThrottleSeconds { return }
             lastPointerSendTime = now
         }
-        guard let pt = screenPoint(from: p) else { return }
-        let event = CGEvent(
+        guard let pt = screenPoint(from: p, displayID: displayID, inputConstraint: inputConstraint) else { return }
+        guard let event = CGEvent(
             mouseEventSource: nil,
             mouseType: type,
             mouseCursorPosition: pt,
             mouseButton: cgButton(for: button)
-        )
-        event?.flags = cgFlags(for: modifiers)
-        event?.post(tap: .cghidEventTap)
+        ) else { return }
+        event.flags = cgFlags(for: modifiers)
+        event.post(tap: .cghidEventTap)
+        lastPointerLocation = pt
+        if let isDown {
+            if isDown {
+                activePointerButtons.insert(button)
+            } else {
+                activePointerButtons.remove(button)
+            }
+        }
+    }
+
+    private func postPointerRelease(button: PointerButton, at point: CGPoint) {
+        guard let event = CGEvent(
+            mouseEventSource: nil,
+            mouseType: cgType(for: button, isDown: false),
+            mouseCursorPosition: point,
+            mouseButton: cgButton(for: button)
+        ) else { return }
+        event.post(tap: .cghidEventTap)
     }
 
     private func postScroll(dx: Double, dy: Double, modifiers: KeyModifiers) {
@@ -136,6 +267,17 @@ final class MacInputInjectionService: ObservableObject {
         guard let kc = keyCodeForLogicalKey(key) else { return }
         guard let event = CGEvent(keyboardEventSource: nil, virtualKey: kc, keyDown: isDown) else { return }
         event.flags = cgFlags(for: modifiers)
+        event.post(tap: .cghidEventTap)
+        if isDown {
+            activeKeys.insert(key)
+        } else {
+            activeKeys.remove(key)
+        }
+    }
+
+    private func postKeyRelease(_ key: KeyCode) {
+        guard let kc = keyCodeForLogicalKey(key) else { return }
+        guard let event = CGEvent(keyboardEventSource: nil, virtualKey: kc, keyDown: false) else { return }
         event.post(tap: .cghidEventTap)
     }
 

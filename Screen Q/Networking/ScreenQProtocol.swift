@@ -96,7 +96,14 @@ nonisolated enum MessageType: UInt16, Codable, Sendable {
     case streamQuality    = 59
     case error             = 60
     case viewerViewport    = 61
+    case shareTargetList   = 62
+    case shareTargetSwitch = 63
     case endSession        = 99
+}
+
+nonisolated enum ScreenQConnectionChannel: String, Codable, Hashable, Sendable {
+    case primary
+    case control
 }
 
 nonisolated struct ScreenQHeader: Sendable, Equatable {
@@ -118,6 +125,10 @@ nonisolated struct HelloMessage: Codable, Sendable {
     var platform: PeerPlatform
     var appVersion: String
     var capabilities: Capabilities
+    /// Primary sessions carry nil/primary. A secondary control channel carries
+    /// `.control` plus the approved sessionID it wants to attach to.
+    var channel: ScreenQConnectionChannel? = nil
+    var sessionID: UUID? = nil
     /// Caller's ephemeral X25519 public key (raw 32 bytes, base64), if encryption negotiated.
     var ephemeralPublicKey: String?
     /// Long-lived signing identity public key (raw base64). Used only for
@@ -195,6 +206,8 @@ nonisolated struct StatsMessage: Codable, Sendable {
     var bytesPerSecond: Double
     var droppedFrames: Int
     var roundTripMillis: Double
+    var frameLatencyMillis: Double? = nil
+    var peakFrameLatencyMillis: Double? = nil
 }
 
 nonisolated struct EndSessionMessage: Codable, Sendable {
@@ -257,9 +270,38 @@ nonisolated struct DisplaySwitchMessage: Codable, Sendable {
     var displayID: UInt32
 }
 
+// MARK: - Share targets
+
+nonisolated enum ShareTargetKind: String, Codable, Sendable, Hashable {
+    case allDisplays
+    case display
+    case application
+    case window
+}
+
+nonisolated struct ShareTargetInfo: Codable, Sendable, Identifiable, Hashable {
+    var id: String
+    var kind: ShareTargetKind
+    var name: String
+    var detail: String?
+    var displayID: UInt32?
+    var pixelWidth: Int
+    var pixelHeight: Int
+}
+
+nonisolated struct ShareTargetListMessage: Codable, Sendable, Hashable {
+    var targets: [ShareTargetInfo]
+    var activeTargetID: String?
+}
+
+nonisolated struct ShareTargetSwitchMessage: Codable, Sendable, Hashable {
+    var targetID: String
+}
+
 /// Viewer-side local viewport hint for native Screen Q adaptive streaming.
-/// The host keeps input coordinates mapped to the full display; this is only
-/// used to choose a sharper capture scale when the viewer zooms in.
+/// The host keeps input coordinates mapped to the full display. When
+/// viewport-aware detail is enabled, this can drive cropped high-detail region
+/// frames while the viewer continues to render them in full-display space.
 nonisolated struct ViewerViewportMessage: Codable, Hashable, Sendable {
     var displayID: UInt32?
     var zoomScale: Double

@@ -67,6 +67,7 @@ final class RDPSession: ObservableObject {
     }
 
     func connect() async {
+        Logger.shared.info("RDP connect() start host=\(profile.host):\(profile.port)")
         eventTask?.cancel()
         inputMapper.isControlEnabled = false
         currentImage = nil
@@ -76,11 +77,12 @@ final class RDPSession: ObservableObject {
         securityStatus = .rdpPreflight(scope: profile.networkScope)
         refreshTrustedCertificateState()
 
-        let probe = await ConnectivityProbe.probe(host: profile.host, port: profile.port, timeoutSeconds: 5)
-        guard probe.succeeded else {
-            phase = .failed(reason: rdpProbeMessage(for: probe))
-            return
-        }
+        // NOTE: We intentionally skip the pre-connect TCP probe for RDP.
+        // FreeRDP performs its own TCP/TLS connection with a proper timeout
+        // and surfaces reachability failures through the engine event stream.
+        // The bare NWConnection probe was observed to hang indefinitely
+        // against some Tailscale CGNAT addresses on iOS where the path never
+        // reaches a terminal state.
 
         let engine = RDPEngineFactory.makeEngine()
         self.engine = engine
@@ -199,7 +201,12 @@ final class RDPSession: ObservableObject {
         refreshTrustedCertificateState()
     }
 
-    func updateCanvas(size: CGSize, fit: Bool? = nil, viewport: ViewportTransform = .identity) {
+    func updateCanvas(
+        size: CGSize,
+        fit: Bool? = nil,
+        viewport: ViewportTransform = .identity,
+        viewportPanInsets: ViewportPanInsets = .zero
+    ) {
         let remoteSize = CGSize(
             width: remoteWidth > 0 ? remoteWidth : 1920,
             height: remoteHeight > 0 ? remoteHeight : 1080
@@ -208,7 +215,8 @@ final class RDPSession: ObservableObject {
             canvasSize: size,
             remotePixelSize: remoteSize,
             fit: fit ?? fitMode,
-            viewport: viewport
+            viewport: viewport,
+            viewportPanInsets: viewportPanInsets
         )
     }
 
@@ -241,13 +249,18 @@ final class RDPSession: ObservableObject {
         )
 
         eventTask?.cancel()
-        eventTask = Task { @MainActor [weak self] in
+        // Iterate the engine event stream on a detached task rather than the
+        // main actor. Iterating AsyncThrowingStream while @MainActor-isolated
+        // can pin the main executor on iOS under load. We hop back to the
+        // main actor per-event to mutate session state.
+        eventTask = Task.detached { [weak self] in
             do {
                 for try await event in stream {
-                    self?.handleEngineEvent(event)
+                    await self?.handleEngineEvent(event)
                 }
             } catch {
-                self?.handleEngineError(error)
+                Logger.shared.error("RDP event stream threw: \(error.localizedDescription)")
+                await self?.handleEngineError(error)
             }
         }
     }

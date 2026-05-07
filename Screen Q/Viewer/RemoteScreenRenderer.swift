@@ -27,11 +27,26 @@ import AppKit
 @MainActor
 final class RemoteScreenRenderer: ObservableObject {
 
+    struct RegionFrame: Equatable {
+        let image: CGImage
+        let region: VideoFrameRegion
+        let sequence: UInt64
+
+        static func == (lhs: RegionFrame, rhs: RegionFrame) -> Bool {
+            lhs.sequence == rhs.sequence && lhs.region == rhs.region
+        }
+    }
+
     @Published private(set) var currentImage: CGImage?
+    @Published private(set) var currentRegionFrame: RegionFrame?
     @Published private(set) var format: VideoFormat?
 
     private var lastSequence: UInt64 = 0
     private var h264Decoder: H264Decoder?
+
+    var hasRenderableFrame: Bool {
+        currentImage != nil || currentRegionFrame != nil
+    }
 
     func updateFormat(_ format: VideoFormat) {
         self.format = format
@@ -45,7 +60,7 @@ final class RemoteScreenRenderer: ObservableObject {
 
     /// Feed a freshly received frame. We drop frames whose sequence is older
     /// than the latest one we've already presented.
-    func ingest(meta: VideoFrameMeta, payload: Data, stats: TransportStats?) {
+    func ingest(meta: VideoFrameMeta, payload: Data, stats: TransportStats?, frameLatencyMillis: Double? = nil) {
         if meta.sequence <= lastSequence {
             stats?.recordDropped()
             return
@@ -54,16 +69,16 @@ final class RemoteScreenRenderer: ObservableObject {
         switch meta.encoding {
         case .jpeg:
             if let image = decodeJPEG(payload) {
-                currentImage = image
-                stats?.recordFrame(byteCount: payload.count)
+                publish(image: image, meta: meta)
+                stats?.recordFrame(byteCount: payload.count, latencyMillis: frameLatencyMillis)
             } else {
                 Logger.shared.warn("JPEG decode failed for seq \(meta.sequence), \(payload.count) bytes")
                 stats?.recordDropped()
             }
         case .h264:
             if let decoder = h264Decoder, let image = decoder.decode(payload) {
-                currentImage = image
-                stats?.recordFrame(byteCount: payload.count)
+                publish(image: image, meta: meta)
+                stats?.recordFrame(byteCount: payload.count, latencyMillis: frameLatencyMillis)
             } else {
                 if h264Decoder == nil {
                     Logger.shared.warn("H.264 frame \(meta.sequence) dropped: no decoder (missing videoFormat?)")
@@ -77,9 +92,19 @@ final class RemoteScreenRenderer: ObservableObject {
 
     func reset() {
         currentImage = nil
+        currentRegionFrame = nil
         format = nil
         lastSequence = 0
         h264Decoder = nil
+    }
+
+    private func publish(image: CGImage, meta: VideoFrameMeta) {
+        if let region = meta.region, !region.coversFullFrame {
+            currentRegionFrame = RegionFrame(image: image, region: region, sequence: meta.sequence)
+        } else {
+            currentImage = image
+            currentRegionFrame = nil
+        }
     }
 
     private func decodeJPEG(_ data: Data) -> CGImage? {

@@ -3,7 +3,7 @@
 //  Screen Q
 //
 //  A compact real-time sparkline view that visualises bandwidth, frame rate,
-//  and round-trip latency. Shown in the viewer's stats overlay.
+//  frame delay, and round-trip latency. Shown in the viewer's stats overlay.
 //
 
 import SwiftUI
@@ -16,6 +16,7 @@ final class PerformanceHistory: ObservableObject {
         let timestamp: Date
         let fps: Double
         let bandwidthBps: Double
+        let frameDelayMs: Double
         let rttMs: Double
     }
 
@@ -27,6 +28,7 @@ final class PerformanceHistory: ObservableObject {
             timestamp: Date(),
             fps: stats.fps,
             bandwidthBps: stats.bytesPerSecond,
+            frameDelayMs: stats.frameLatencyMillis,
             rttMs: stats.roundTripMillis
         )
         samples.append(sample)
@@ -44,7 +46,8 @@ struct PerformanceGraphView: View {
     enum Metric: String, CaseIterable {
         case bandwidth = "Bandwidth"
         case fps = "FPS"
-        case rtt = "Latency"
+        case delay = "Delay"
+        case rtt = "RTT"
     }
 
     var body: some View {
@@ -96,6 +99,7 @@ struct PerformanceGraphView: View {
         switch selectedMetric {
         case .bandwidth: return sample.bandwidthBps
         case .fps: return sample.fps
+        case .delay: return sample.frameDelayMs
         case .rtt: return sample.rttMs
         }
     }
@@ -104,6 +108,7 @@ struct PerformanceGraphView: View {
         switch selectedMetric {
         case .bandwidth: return ByteFormatting.bitsPerSecond(sample.bandwidthBps)
         case .fps: return String(format: "%.0f fps", sample.fps)
+        case .delay: return String(format: "%.0f ms", sample.frameDelayMs)
         case .rtt: return String(format: "%.0f ms", sample.rttMs)
         }
     }
@@ -112,6 +117,7 @@ struct PerformanceGraphView: View {
         switch selectedMetric {
         case .bandwidth: return .blue
         case .fps: return .green
+        case .delay: return .orange
         case .rtt: return .orange
         }
     }
