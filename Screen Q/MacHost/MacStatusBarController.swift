@@ -32,14 +32,20 @@ final class MacStatusBarController: NSObject, ObservableObject {
     private let minPopoverHeight: CGFloat = 480
     private let maxPopoverHeight: CGFloat = 720
 
-    // Defaults key reserved for the future user-configurable shortcut.
-    // For now the controller always observes ⌘⇧Q regardless of stored value.
-    // TODO: make user-configurable in Settings → Hosting (Phase 4 shipped a static label).
-    private static let menuBarShortcutDefaultsKey = "ScreenQ.Hosting.MenuBarShortcut"
+    /// Source of truth for the user-configurable global shortcut. The
+    /// controller subscribes to `$current` so changes from Settings →
+    /// Hosting automatically re-install monitors without a relaunch.
+    private let shortcutManager = GlobalShortcutManager.shared
 
     override init() {
         super.init()
         installShortcutMonitors()
+        shortcutManager.$current
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.reinstallShortcutMonitors()
+            }
+            .store(in: &cancellables)
     }
 
     deinit {
@@ -218,19 +224,28 @@ final class MacStatusBarController: NSObject, ObservableObject {
         return max(minPopoverHeight, min(maxPopoverHeight, total))
     }
 
-    // MARK: Global shortcut (⌘⇧Q)
+    // MARK: Global shortcut
     //
     // The global monitor fires when Screen Q is not the frontmost app —
     // requires Accessibility permission (already prompted via PermissionsView).
     // The local monitor fires when Screen Q is frontmost and consumes the
     // event so it does not propagate to the focused window.
-    // TODO: make user-configurable in Settings → Hosting (Phase 4 shipped a static label).
+    //
+    // The active shortcut is selected by the user via Settings → Hosting
+    // (`GlobalShortcutManager.shared`). Changes are picked up live via the
+    // Combine subscription set up in `init()`.
     private func installShortcutMonitors() {
+        // Skip installing monitors when the user has disabled the shortcut.
+        guard shortcutManager.isEnabled else { return }
+
         let mask: NSEvent.EventTypeMask = .keyDown
         globalShortcutMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
             // Global handlers fire on a background thread; hop to main.
             guard let self else { return }
-            if Self.matchesMenuBarShortcut(event) {
+            let isMatch = MainActor.assumeIsolated {
+                self.shortcutManager.matches(event)
+            }
+            if isMatch {
                 Task { @MainActor [weak self] in
                     self?.toggleMenuBarPopover()
                 }
@@ -238,7 +253,7 @@ final class MacStatusBarController: NSObject, ObservableObject {
         }
         localShortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
             guard let self else { return event }
-            if Self.matchesMenuBarShortcut(event) {
+            if self.shortcutManager.matches(event) {
                 self.toggleMenuBarPopover()
                 return nil   // consume so it does not reach the focused view
             }
@@ -246,12 +261,16 @@ final class MacStatusBarController: NSObject, ObservableObject {
         }
     }
 
-    private static func matchesMenuBarShortcut(_ event: NSEvent) -> Bool {
-        // Match strictly: only ⌘ and ⇧ may be active among the device-independent flags.
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let required: NSEvent.ModifierFlags = [.command, .shift]
-        guard flags == required else { return false }
-        return event.keyCode == 12   // 'Q'
+    private func reinstallShortcutMonitors() {
+        if let monitor = globalShortcutMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalShortcutMonitor = nil
+        }
+        if let monitor = localShortcutMonitor {
+            NSEvent.removeMonitor(monitor)
+            localShortcutMonitor = nil
+        }
+        installShortcutMonitors()
     }
 
     private func connectSaved(_ saved: SavedConnection, app: AppState) {

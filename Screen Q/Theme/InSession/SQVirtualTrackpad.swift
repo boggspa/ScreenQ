@@ -2,14 +2,17 @@
 //  SQVirtualTrackpad.swift
 //  Screen Q  ·  Theme / In-Session
 //
-//  iOS-only relative-pointer surface. Renders a translucent rectangle
-//  with a small "Trackpad" badge and captures gesture deltas that the
-//  call-site translates into cursor movement, scroll, and click events.
+//  EXPERIMENTAL — branded SwiftUI trackpad surface. NOT the production
+//  trackpad path; the live trackpad mode used by the viewers is
+//  `Screen Q/Viewer/TrackpadInputView.swift` (UIKit-backed, integrated
+//  with `InputMappingService` and the viewport math).
 //
-//  This is a v1 stub — enough to be drop-in usable for any viewer that
-//  wants a trackpad mode without re-writing gesture plumbing. Full
-//  acceleration tuning, momentum scrolling, and per-finger physics
-//  belong in a follow-up.
+//  This file is kept as a forward-looking primitive for design
+//  experiments — e.g. a future Settings preview, an onboarding demo,
+//  or a tablet-side alternative interaction surface. Adopt with care:
+//  it does NOT route through `InputMappingService`, so absolute-vs-
+//  relative pointer translation, hover, and gesture continuity have to
+//  be replicated by the call site.
 //
 //  Sensitivity scaling:
 //    - .precise → 0.5

@@ -97,9 +97,17 @@ struct HomeView: View {
                 selectedRole: app.selectedRole,
                 onSelect: { role in requestRoleSelection(role) }
             )
+        } else if #available(macOS 12.0, *) {
+            // macOS 12-13 path — uses @FocusState (12+) plus a scoped
+            // NSEvent monitor for arrow / return / space keys. Mirrors
+            // the macOS 14+ MacRoleGrid behaviour without onKeyPress.
+            MacRoleGridLegacy(
+                columns: gridColumns,
+                selectedRole: app.selectedRole,
+                onSelect: { role in requestRoleSelection(role) }
+            )
         } else {
-            // TODO: full keyboard focus management requires macOS 14+ (onKeyPress).
-            // On macOS 11.5-13, cards remain mouse-driven only.
+            // macOS 11.5: no focus management available — cards stay mouse-only.
             LazyVGrid(columns: gridColumns, spacing: 16) {
                 ForEach(DeviceRole.primaryRoles) { role in
                     Button {
@@ -375,6 +383,81 @@ struct HomeView: View {
 }
 
 #if os(macOS)
+@available(macOS 12.0, *)
+private struct MacRoleGridLegacy: View {
+    let columns: [GridItem]
+    let selectedRole: DeviceRole?
+    let onSelect: (DeviceRole) -> Void
+
+    @FocusState private var focusedRole: DeviceRole?
+    @State private var keyMonitor: Any?
+
+    var body: some View {
+        LazyVGrid(columns: columns, spacing: 16) {
+            ForEach(DeviceRole.primaryRoles) { role in
+                Button {
+                    onSelect(role)
+                } label: {
+                    RoleCard(role: role, isSelected: selectedRole == role)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: ScreenQTheme.cardCornerRadius, style: .continuous)
+                                .strokeBorder(
+                                    focusedRole == role ? ScreenQTheme.cosmicCyan : Color.clear,
+                                    lineWidth: focusedRole == role ? 2.5 : 0
+                                )
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(!role.isSupportedOnCurrentPlatform)
+                .opacity(role.isSupportedOnCurrentPlatform ? 1 : 0.55)
+                .focusable(role.isSupportedOnCurrentPlatform)
+                .focused($focusedRole, equals: role)
+            }
+        }
+        .onAppear { installMonitor() }
+        .onDisappear { removeMonitor() }
+    }
+
+    private func installMonitor() {
+        if focusedRole == nil {
+            focusedRole = selectedRole ?? DeviceRole.primaryRoles.first { $0.isSupportedOnCurrentPlatform }
+        }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            // Only intercept while a role card actually owns focus — otherwise
+            // typing into text fields / other views works normally.
+            guard let current = focusedRole else { return event }
+            switch event.keyCode {
+            case 36, 76, 49:                          // Return, Enter, Space
+                onSelect(current)
+                return nil
+            case 123, 126:                            // Left, Up
+                moveFocus(from: current, delta: -1)
+                return nil
+            case 124, 125:                            // Right, Down
+                moveFocus(from: current, delta: 1)
+                return nil
+            default:
+                return event
+            }
+        }
+    }
+
+    private func removeMonitor() {
+        if let m = keyMonitor {
+            NSEvent.removeMonitor(m)
+            keyMonitor = nil
+        }
+    }
+
+    private func moveFocus(from current: DeviceRole, delta: Int) {
+        let supported = DeviceRole.primaryRoles.filter { $0.isSupportedOnCurrentPlatform }
+        guard !supported.isEmpty,
+              let idx = supported.firstIndex(of: current) else { return }
+        let next = (idx + delta + supported.count) % supported.count
+        focusedRole = supported[next]
+    }
+}
+
 @available(macOS 14.0, *)
 private struct MacRoleGrid: View {
     let columns: [GridItem]

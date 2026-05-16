@@ -124,6 +124,12 @@ final class MacHostRuntime: ObservableObject {
             app.session = .advertising
             app.macPermissions.markLocalNetworkAttempted()
             await refreshListeningInfo()
+
+            // Auto-activate Curtain Mode when the user has opted in via
+            // Settings → Hosting → Privacy → "Curtain Mode default".
+            if UserDefaults.standard.bool(forKey: "ScreenQ.Hosting.CurtainModeDefault") {
+                app.curtainMode.activate()
+            }
         } catch {
             app.lastError = error.localizedDescription
             Logger.shared.error("startHosting failed: \(error.localizedDescription)")
@@ -142,6 +148,8 @@ final class MacHostRuntime: ObservableObject {
         app.clipboardSync.stop()
         if #available(macOS 13.0, *) { app.audioCaptureService.stop() }
         app.macInput.resetTransientState()
+        // Safe even when not active — CurtainMode no-ops if currently inactive.
+        app.curtainMode.deactivate()
         abrTimer?.invalidate()
         abrTimer = nil
         shareTargetRefreshTimer?.invalidate()

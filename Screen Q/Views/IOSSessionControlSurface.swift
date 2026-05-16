@@ -37,7 +37,7 @@ struct IOSSessionControlSurface: View {
 
     var body: some View {
         GeometryReader { proxy in
-            ZStack {
+            ZStack(alignment: .topLeading) {
                 if controlsVisible {
                     if usesFloatingToolbar(in: proxy.size) {
                         floatingToolbar(in: proxy.size)
@@ -48,6 +48,25 @@ struct IOSSessionControlSurface: View {
                     revealButton
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                         .padding(12)
+                }
+
+                if showStats && preferences.floatingStatsHUDEnabled {
+                    SQStatsHUD(
+                        stats: SQStatsHUD.Stats(
+                            fps: session.stats.fps > 0 ? session.stats.fps : nil,
+                            kbps: session.stats.bytesPerSecond > 0
+                                ? session.stats.bytesPerSecond * 8.0 / 1000.0
+                                : nil,
+                            rttMs: session.stats.roundTripMillis > 0 ? session.stats.roundTripMillis : nil,
+                            bytesIn: UInt64(max(0, session.stats.totalBytes)),
+                            bytesOut: nil
+                        ),
+                        isCollapsed: $preferences.statsHUDCollapsed,
+                        anchor: $preferences.statsHUDAnchor
+                    )
+                    .padding(.top, 56)
+                    .padding(.leading, 16)
+                    .transition(.opacity)
                 }
             }
         }

@@ -644,20 +644,18 @@ struct VNCViewerView: View {
     }
 
     private func disconnectAndExit() {
-        if let stats = currentSummaryStats() {
-            summaryStats = stats
-            Task {
-                if recorder.isRecording { recorder.stop() }
-                await session.disconnect()
-            }
-            return
-        }
         Task {
-            if recorder.isRecording {
-                recorder.stop()
+            if recorder.isRecording { recorder.stop() }
+            await session.sampleByteCounters()
+            await MainActor.run {
+                if let stats = currentSummaryStats() {
+                    summaryStats = stats
+                }
             }
             await session.disconnect()
-            onDisconnect()
+            if summaryStats == nil {
+                await MainActor.run { onDisconnect() }
+            }
         }
     }
 
@@ -690,8 +688,8 @@ struct VNCViewerView: View {
         let hostLabel = session.serverName.isEmpty ? session.peerLabel : session.serverName
         return SessionSummarySheet.Stats(
             duration: duration,
-            bytesIn: 0,
-            bytesOut: 0,
+            bytesIn: session.lastBytesIn,
+            bytesOut: session.lastBytesOut,
             averageRTT: nil,
             peakFPS: peak,
             protocolName: protocolLabel,

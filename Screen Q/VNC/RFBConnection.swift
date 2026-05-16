@@ -34,6 +34,12 @@ actor RFBConnection {
     private let connection: NWConnection
     private var buffer = Data()
     private(set) var isOpen = false
+
+    /// Total bytes received from the server since `connect(...)`. Surfaces
+    /// in `SessionSummarySheet` on disconnect.
+    private(set) var bytesIn: UInt64 = 0
+    /// Total bytes sent to the server since `connect(...)`.
+    private(set) var bytesOut: UInt64 = 0
     private let tightDecodeState = RFBEncodingDecoder.TightDecodeState()
     private let zrleDecodeState = RFBEncodingDecoder.ZRLEDecodeState()
     private(set) var pendingCursorShape: CursorShape?
@@ -795,10 +801,11 @@ actor RFBConnection {
                 else { cont.resume() }
             })
         }
+        bytesOut &+= UInt64(data.count)
     }
 
     private func receiveChunk(timeout: (stage: String, seconds: TimeInterval)?) async throws -> Data {
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
+        let chunk: Data = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
             let gate = OneShotContinuation(cont)
             let timeoutItem = timeout.map { timeout in
                 DispatchWorkItem { [connection] in
@@ -822,6 +829,8 @@ actor RFBConnection {
                 }
             }
         }
+        bytesIn &+= UInt64(chunk.count)
+        return chunk
     }
 }
 

@@ -58,6 +58,86 @@ struct CaptureSettings: Equatable, Sendable {
 /// Mutable state shared between the main actor (which configures capture)
 /// and the SCStream output callback queue. `nonisolated` so it doesn't
 /// inherit MainActor isolation from the surrounding class.
+/// Throttled CGImage publisher for the host-side "viewers see this" preview
+/// tile. Lives nonisolated so SCStream delegate methods can feed it directly
+/// from their background queue; emits CGImages back to the owning service
+/// (which then publishes on the MainActor for SwiftUI).
+nonisolated final class MacCapturePreviewBridge: @unchecked Sendable {
+
+    private let lock = NSLock()
+    private var lastEmittedAt: Date = .distantPast
+    private var pendingEmit = false
+    private let interval: TimeInterval
+    private let targetWidth: CGFloat
+    private let ciContext: CIContext
+
+    /// Set by the owning service on MainActor; called whenever a new
+    /// throttled preview frame is ready. Closure is invoked on a background
+    /// queue — implementer should hop to MainActor before touching UI state.
+    var onEmit: (@Sendable (CGImage) -> Void)?
+
+    init(interval: TimeInterval = 0.5, targetWidth: CGFloat = 720) {
+        self.interval = interval
+        self.targetWidth = targetWidth
+        self.ciContext = CIContext(options: nil)
+    }
+
+    /// Feed a sample buffer. The bridge throttles itself and only converts /
+    /// emits at the configured interval.
+    func ingest(_ sampleBuffer: CMSampleBuffer) {
+        lock.lock()
+        let now = Date()
+        let dt = now.timeIntervalSince(lastEmittedAt)
+        if pendingEmit || dt < interval {
+            lock.unlock()
+            return
+        }
+        lastEmittedAt = now
+        pendingEmit = true
+        let callback = onEmit
+        lock.unlock()
+
+        guard let callback else {
+            clearPending()
+            return
+        }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            clearPending()
+            return
+        }
+        let ciImage = CIImage(cvImageBuffer: pixelBuffer)
+        let extent = ciImage.extent
+        guard extent.width > 0, extent.height > 0 else {
+            clearPending()
+            return
+        }
+        let scale = min(1.0, targetWidth / max(1, extent.width))
+        let scaled = scale < 1.0
+            ? ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            : ciImage
+        guard let cgImage = ciContext.createCGImage(scaled, from: scaled.extent) else {
+            clearPending()
+            return
+        }
+        callback(cgImage)
+        clearPending()
+    }
+
+    /// Force the next ingest to emit immediately (e.g. after capture restart).
+    func reset() {
+        lock.lock()
+        lastEmittedAt = .distantPast
+        pendingEmit = false
+        lock.unlock()
+    }
+
+    private func clearPending() {
+        lock.lock()
+        pendingEmit = false
+        lock.unlock()
+    }
+}
+
 nonisolated final class MacCaptureCrossState: @unchecked Sendable {
     var sequence: UInt64 = 0
     var displayID: CGDirectDisplayID = 0
@@ -270,6 +350,7 @@ private final class MacCapturePipeline: NSObject, SCStreamOutput, SCStreamDelega
     private let outputQueue: DispatchQueue
 
     nonisolated let xstate = MacCaptureCrossState()
+    nonisolated let previewBridge: MacCapturePreviewBridge
 
     private var stream: SCStream?
     private var allDisplayStreams: [SCStream] = []
@@ -319,12 +400,14 @@ private final class MacCapturePipeline: NSObject, SCStreamOutput, SCStreamDelega
         subscriberID: UUID,
         captureTargets: CaptureTargetSelectionService,
         permissions: MacPermissionsService,
-        defaultSettings: CaptureSettings
+        defaultSettings: CaptureSettings,
+        previewBridge: MacCapturePreviewBridge
     ) {
         self.subscriberID = subscriberID
         self.captureTargets = captureTargets
         self.permissions = permissions
         self.settings = defaultSettings
+        self.previewBridge = previewBridge
         self.outputQueue = DispatchQueue(label: "com.screenq.capture-output.\(subscriberID.uuidString)", qos: .userInitiated)
         super.init()
         settings.scale = effectiveCaptureScale(for: currentStreamProfile)
@@ -902,6 +985,8 @@ private final class MacCapturePipeline: NSObject, SCStreamOutput, SCStreamDelega
             return
         }
 
+        previewBridge.ingest(sampleBuffer)
+
         let state = xstate
         state.sequence &+= 1
         let seq = state.sequence
@@ -928,9 +1013,15 @@ final class MacScreenCaptureService: NSObject, ObservableObject {
     @Published private(set) var isCapturing: Bool = false
     @Published var settings = CaptureSettings()
 
+    /// Throttled (~2 fps) downscaled CGImage of the current capture, used by
+    /// `HostMacView`'s "Viewers see this" preview tile. `nil` when not
+    /// actively sharing or before the first frame has been encoded.
+    @Published private(set) var previewCGImage: CGImage?
+
     private let captureTargets: CaptureTargetSelectionService
     private let permissions: MacPermissionsService
     private var pipelines: [UUID: MacCapturePipeline] = [:]
+    private let previewBridge = MacCapturePreviewBridge()
 
     init(
         displaySelection: DisplaySelectionService,
@@ -940,6 +1031,11 @@ final class MacScreenCaptureService: NSObject, ObservableObject {
         self.captureTargets = captureTargets
         self.permissions = permissions
         super.init()
+        previewBridge.onEmit = { [weak self] cgImage in
+            Task { @MainActor [weak self] in
+                self?.previewCGImage = cgImage
+            }
+        }
     }
 
     func start(
@@ -1041,14 +1137,20 @@ final class MacScreenCaptureService: NSObject, ObservableObject {
             subscriberID: subscriberID,
             captureTargets: captureTargets,
             permissions: permissions,
-            defaultSettings: settings
+            defaultSettings: settings,
+            previewBridge: previewBridge
         )
         pipelines[subscriberID] = pipeline
         return pipeline
     }
 
     private func updateCaptureState() {
-        isCapturing = !pipelines.isEmpty
+        let nowCapturing = !pipelines.isEmpty
+        isCapturing = nowCapturing
+        if !nowCapturing {
+            previewBridge.reset()
+            previewCGImage = nil
+        }
     }
 
     private func captureScale(for policy: StreamScalePolicy) -> CGFloat {

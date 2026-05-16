@@ -134,6 +134,7 @@ final class AppState: ObservableObject {
     let systemReportCollector: SystemReportCollector
     let packageInstallService: PackageInstallService
     let macHost: MacHostRuntime
+    let curtainMode = CurtainMode()
 
     // Typed accessors for @available services (stored as AnyObject? for compatibility)
     @available(macOS 12.3, *)

@@ -292,19 +292,16 @@ struct SettingsScene: View {
 
                 Divider().opacity(0.4)
 
+                #if os(macOS)
+                LaunchAtLoginSettingsRow()
+                #else
                 SQSettingsRow(
                     icon: "power",
                     iconTint: ScreenQTheme.cosmicAmber,
                     title: "Launch at login",
-                    subtitle: "Auto-start Screen Q after sign-in. (Stub — login-item registration ships later.)"
-                ) {
-                    Toggle("", isOn: $launchAtLogin)
-                        .labelsHidden()
-                        .onChange(of: launchAtLogin) { _ in
-                            SQHaptics.tap()
-                            // TODO: wire to SMAppService / SMLoginItem.
-                        }
-                }
+                    subtitle: "macOS-only feature."
+                )
+                #endif
             }
 
             SQSettingsSection("Privacy") {
@@ -312,7 +309,7 @@ struct SettingsScene: View {
                     icon: "eye.slash",
                     iconTint: ScreenQTheme.cosmicViolet,
                     title: "Curtain Mode default",
-                    subtitle: "Hide what's on screen from local onlookers while a remote session is active."
+                    subtitle: "Blank the host display automatically when sharing starts. Hides remote activity from anyone physically present."
                 ) {
                     Toggle("", isOn: $curtainModeDefault)
                         .labelsHidden()
@@ -323,15 +320,9 @@ struct SettingsScene: View {
             }
 
             SQSettingsSection("Shortcuts") {
-                SQSettingsRow(
-                    icon: "command.square",
-                    iconTint: ScreenQTheme.cosmicCyan,
-                    title: "Menu-bar shortcut",
-                    subtitle: "Global shortcut to surface the Screen Q window from anywhere."
-                ) {
-                    // TODO: wire to GlobalShortcutManager.
-                    SQSettingsDetail(value: "⌘⇧Q")
-                }
+                #if os(macOS)
+                MenuBarShortcutSettingsRow()
+                #endif
             }
         }
     }
@@ -606,6 +597,16 @@ private struct ToolbarGesturesSettings: View {
         )
     }
 
+    private var floatingStatsHUDBinding: Binding<Bool> {
+        Binding(
+            get: { prefs.floatingStatsHUDEnabled },
+            set: { newValue in
+                SQHaptics.tap()
+                prefs.floatingStatsHUDEnabled = newValue
+            }
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
 
@@ -695,18 +696,12 @@ private struct ToolbarGesturesSettings: View {
             SQSettingsSection("Stats HUD", subtitle: "On-screen latency and bitrate readout.") {
                 SQSettingsRow(
                     icon: "chart.bar.doc.horizontal",
-                    iconTint: ScreenQTheme.cosmicCyan,
-                    title: "Anchor",
-                    subtitle: "Corner where the HUD appears in-session."
+                    iconTint: ScreenQTheme.cosmicMint,
+                    title: "Floating HUD",
+                    subtitle: "Show a draggable chip with FPS, bitrate, and RTT inside the viewer."
                 ) {
-                    Picker("Anchor", selection: statsAnchorBinding) {
-                        ForEach(StatsHUDAnchor.allCases) { anchor in
-                            Text(anchor.label).tag(anchor)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .frame(maxWidth: 180)
+                    Toggle("", isOn: floatingStatsHUDBinding)
+                        .labelsHidden()
                 }
 
                 Divider().opacity(0.4)
@@ -722,6 +717,28 @@ private struct ToolbarGesturesSettings: View {
                         .onChange(of: statsHUDCollapsed) { _ in
                             SQHaptics.tap()
                         }
+                }
+
+                Divider().opacity(0.4)
+
+                SQSettingsRow(
+                    icon: "rectangle.dashed",
+                    iconTint: ScreenQTheme.cosmicCyan,
+                    title: "Reset HUD position",
+                    subtitle: "Move the floating chip back to its starting corner."
+                ) {
+                    Button {
+                        SQHaptics.bump()
+                        prefs.statsHUDAnchor = .zero
+                    } label: {
+                        Text("Reset")
+                            .font(.sqCallout)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 6)
+                            .foregroundColor(.white)
+                            .background(Capsule().fill(ScreenQTheme.cosmicCyan))
+                    }
+                    .buttonStyle(.plain)
                 }
             }
 
@@ -749,6 +766,83 @@ private struct ToolbarGesturesSettings: View {
         }
     }
 }
+
+// MARK: - Launch-at-login (SMAppService)
+
+#if os(macOS)
+/// Row binding the launch-at-login toggle to `LaunchAtLoginService`.
+/// macOS 13+ uses real SMAppService registration; older OS shows the
+/// toggle disabled with a "Requires macOS 13+" note.
+private struct LaunchAtLoginSettingsRow: View {
+
+    @ObservedObject private var service = LaunchAtLoginService.shared
+
+    var body: some View {
+        SQSettingsRow(
+            icon: "power",
+            iconTint: ScreenQTheme.cosmicAmber,
+            title: "Launch at login",
+            subtitle: LaunchAtLoginService.isSupported
+                ? "Auto-start Screen Q after sign-in."
+                : "Requires macOS 13 or later."
+        ) {
+            HStack(spacing: 8) {
+                SQPill(text: service.statusText,
+                       status: service.isEnabled ? .healthy : .muted,
+                       compact: true)
+                Toggle("", isOn: launchBinding)
+                    .labelsHidden()
+                    .disabled(!LaunchAtLoginService.isSupported)
+            }
+        }
+        .onAppear { service.refresh() }
+    }
+
+    private var launchBinding: Binding<Bool> {
+        Binding(
+            get: { service.isEnabled },
+            set: { newValue in
+                SQHaptics.tap()
+                _ = service.setEnabled(newValue)
+            }
+        )
+    }
+}
+#endif
+
+// MARK: - Menu bar shortcut picker
+
+#if os(macOS)
+/// Row binding the menu-bar global shortcut to `GlobalShortcutManager`'s
+/// shared instance. Lives in `Settings → Hosting → Shortcuts`.
+private struct MenuBarShortcutSettingsRow: View {
+
+    @ObservedObject private var manager = GlobalShortcutManager.shared
+
+    var body: some View {
+        SQSettingsRow(
+            icon: "command.square",
+            iconTint: ScreenQTheme.cosmicCyan,
+            title: "Menu-bar shortcut",
+            subtitle: manager.isEnabled
+                ? "Global shortcut to surface the Screen Q popover from anywhere."
+                : "Shortcut disabled. Pick a combination to enable."
+        ) {
+            Picker("", selection: $manager.current) {
+                ForEach(GlobalShortcutManager.Preset.allCases) { preset in
+                    Text(preset.displayName).tag(preset)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(maxWidth: 160)
+            .onChange(of: manager.current) { _ in
+                SQHaptics.tap()
+            }
+        }
+    }
+}
+#endif
 
 /// Lightweight anchor enum for the in-session stats HUD. Mirrors the values
 /// Phase 3 ships against `ViewerControlPreferences.statsHUDAnchor`.

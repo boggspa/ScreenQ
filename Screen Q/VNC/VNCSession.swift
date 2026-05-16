@@ -268,6 +268,13 @@ final class VNCSession: ObservableObject {
     @Published private(set) var streamQualityPreference = StreamQualityPreference()
     @Published private(set) var streamProfile = StreamQualityPreference().nativeProfile
     @Published private(set) var firstFrameTelemetry = VNCFirstFrameTelemetry()
+
+    /// Last-sampled byte counters from the underlying `RFBConnection`. Updated
+    /// throughout the session via `sampleByteCounters()` and frozen on
+    /// `disconnect()` so `SessionSummarySheet` can read them after the
+    /// connection itself has been torn down.
+    @Published private(set) var lastBytesIn: UInt64 = 0
+    @Published private(set) var lastBytesOut: UInt64 = 0
     let inputMapper = InputMappingService()
     let recorder = SessionRecorder()
 
@@ -490,6 +497,17 @@ final class VNCSession: ObservableObject {
         startConnecting()
     }
 
+    /// Fetch the live byte counters from the underlying RFB actor and update
+    /// the published cache. Safe to call repeatedly (e.g. before showing the
+    /// disconnect summary sheet so the in-flight totals are accurate).
+    func sampleByteCounters() async {
+        guard let c = connection else { return }
+        let inB = await c.bytesIn
+        let outB = await c.bytesOut
+        lastBytesIn = inB
+        lastBytesOut = outB
+    }
+
     func disconnect() async {
         guard !isDisconnecting else {
             phase = .ended(reason: "Disconnected")
@@ -509,6 +527,12 @@ final class VNCSession: ObservableObject {
         stopClipboardSync()
         cursorHideTimer?.invalidate()
         cursorHideTimer = nil
+        // Sample byte counters from the actor before nilling the connection
+        // so the post-disconnect summary sheet can read them.
+        if let c = connection {
+            lastBytesIn = await c.bytesIn
+            lastBytesOut = await c.bytesOut
+        }
         await connection?.disconnect()
         connection = nil
         needsPassword = false

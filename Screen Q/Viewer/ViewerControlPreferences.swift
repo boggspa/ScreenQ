@@ -217,6 +217,13 @@ final class ViewerControlPreferences: ObservableObject {
         didSet { defaults.set(statsHUDCollapsed, forKey: keys.statsHUDCollapsed) }
     }
 
+    /// When true the iOS native viewer overlays the floating `SQStatsHUD`
+    /// chip in addition to (or instead of) the inline status bar. Disabled
+    /// by default so existing behaviour is preserved.
+    @Published var floatingStatsHUDEnabled: Bool {
+        didSet { defaults.set(floatingStatsHUDEnabled, forKey: keys.floatingStatsHUDEnabled) }
+    }
+
     private let defaults: UserDefaults
     private let keys: PreferenceKeys
 
@@ -263,6 +270,10 @@ final class ViewerControlPreferences: ObservableObject {
         statsHUDCollapsed = defaults.bool(
             forKey: keys.statsHUDCollapsed,
             fallbackKey: PreferenceKeys.global.statsHUDCollapsed
+        ) ?? false
+        floatingStatsHUDEnabled = defaults.bool(
+            forKey: keys.floatingStatsHUDEnabled,
+            fallbackKey: PreferenceKeys.global.floatingStatsHUDEnabled
         ) ?? false
     }
 
@@ -335,6 +346,7 @@ final class ViewerControlPreferences: ObservableObject {
         let statsHUDAnchorX: String
         let statsHUDAnchorY: String
         let statsHUDCollapsed: String
+        let floatingStatsHUDEnabled: String
 
         init(scope: ViewerControlPreferenceScope?) {
             if let scope {
@@ -364,6 +376,7 @@ final class ViewerControlPreferences: ObservableObject {
             statsHUDAnchorX            = "\(prefix).statsHUDAnchorX"
             statsHUDAnchorY            = "\(prefix).statsHUDAnchorY"
             statsHUDCollapsed          = "\(prefix).statsHUDCollapsed"
+            floatingStatsHUDEnabled    = "\(prefix).floatingStatsHUDEnabled"
         }
     }
 }

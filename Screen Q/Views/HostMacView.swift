@@ -342,42 +342,18 @@ private struct HostMacContent: View {
     }
 
     /// Live preview tile shown while hosting so the host can confirm at
-    /// a glance what viewers are seeing. The capture frame isn't currently
-    /// published from `MacScreenCaptureService` (frames go straight to
-    /// per-viewer encoders), so this surface stays in its "waiting" state
-    /// until a future wiring change exposes the latest CGImage to the UI.
-    /// TODO: wire to MacScreenCaptureService.currentFrame once a
-    /// host-side thumbnail publisher exists.
+    /// a glance what viewers are seeing. Consumes the throttled (~2 fps)
+    /// CGImage published by `MacScreenCaptureService.previewCGImage` on
+    /// macOS 12.3+. Falls back to a "waiting" state until the first frame
+    /// arrives or when running on macOS 11.5 / 12.0 / 12.2 (no
+    /// ScreenCaptureKit).
+    @ViewBuilder
     private var viewerPreviewTile: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                SQSectionHeader("Viewers see this", subtitle: "Live thumbnail")
-                Spacer()
-            }
-            Group {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color.primary.opacity(0.06))
-                        .frame(height: 200)
-                    VStack(spacing: 8) {
-                        ScreenQActivityTrail(tint: ScreenQTheme.cosmicCyan)
-                        Text("Waiting for first frame…")
-                            .font(.sqCallout)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
-                )
-            }
-            Text("Updates a few times a second once viewers connect.")
-                .font(.sqCaption)
-                .foregroundColor(.secondary)
+        if #available(macOS 12.3, *) {
+            ViewerPreviewTile(captureService: app.macCaptureService)
+        } else {
+            ViewerPreviewTileFallback()
         }
-        .screenQCard(tint: ScreenQTheme.cosmicCyan)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Live preview of what viewers see")
     }
 
     private var connectInfoCard: some View {
@@ -910,6 +886,113 @@ private struct HostPermissionsBanner: View {
         // For Accessibility-only cases we still want a clear secondary
         // path to Settings.
         !showsRelaunch && primaryStatus != .notRequested
+    }
+}
+
+// MARK: - Viewer preview tile
+
+/// Live preview that reads `MacScreenCaptureService.previewCGImage` once
+/// macOS 12.3 is available. Sub-view so the @ObservedObject re-render path
+/// stays clean across the availability gate.
+@available(macOS 12.3, *)
+private struct ViewerPreviewTile: View {
+    @ObservedObject var captureService: MacScreenCaptureService
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                SQSectionHeader("Viewers see this",
+                                subtitle: captureService.previewCGImage == nil ? "Live thumbnail" : "Updates ~2× per second")
+                Spacer()
+                if captureService.previewCGImage != nil {
+                    SQPill(text: "Live", status: .healthy, compact: true)
+                }
+            }
+
+            preview
+
+            Text(footer)
+                .font(.sqCaption)
+                .foregroundColor(.secondary)
+        }
+        .screenQCard(tint: ScreenQTheme.cosmicCyan)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Live preview of what viewers see")
+    }
+
+    @ViewBuilder
+    private var preview: some View {
+        if let cg = captureService.previewCGImage {
+            Image(decorative: cg, scale: 1, orientation: .up)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(maxHeight: 240)
+                .frame(maxWidth: .infinity)
+                .background(Color.black)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
+                )
+                .animation(.easeInOut(duration: 0.15), value: cg)
+        } else {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.primary.opacity(0.06))
+                    .frame(height: 200)
+                VStack(spacing: 8) {
+                    ScreenQActivityTrail(tint: ScreenQTheme.cosmicCyan)
+                    Text("Waiting for first frame…")
+                        .font(.sqCallout)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
+            )
+        }
+    }
+
+    private var footer: String {
+        captureService.previewCGImage == nil
+            ? "Starts updating once viewers connect."
+            : "Downscaled and throttled — for monitoring only."
+    }
+}
+
+/// Pre-12.3 fallback that mirrors the chrome but never receives frames.
+private struct ViewerPreviewTileFallback: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                SQSectionHeader("Viewers see this", subtitle: "Live thumbnail")
+                Spacer()
+            }
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.primary.opacity(0.06))
+                    .frame(height: 200)
+                VStack(spacing: 8) {
+                    ScreenQActivityTrail(tint: ScreenQTheme.cosmicCyan)
+                    Text("Live preview needs macOS 12.3 or later")
+                        .font(.sqCallout)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(.horizontal, 24)
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
+            )
+            Text("ScreenCaptureKit-powered previews require a newer macOS.")
+                .font(.sqCaption)
+                .foregroundColor(.secondary)
+        }
+        .screenQCard(tint: ScreenQTheme.cosmicCyan)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Live preview unavailable on this macOS version")
     }
 }
 #endif
