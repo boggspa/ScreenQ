@@ -16,16 +16,25 @@ struct IOSScreenShareView: View {
     @EnvironmentObject private var app: AppState
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                disclaimerCard
-                visibilityCard
-                pickerCard
-                stepsCard
+        ZStack {
+            ScreenQTheme.heroBackground.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    heroCard
+                    disclaimerCard
+                    visibilityCard
+                    pickerCard
+                    stepsCard
+                    if !app.replayKitModel.hasExtensionConfigured {
+                        broadcastExtensionEmptyState
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 8)
+                .padding(.bottom, 32)
+                .frame(maxWidth: 720, alignment: .leading)
+                .frame(maxWidth: .infinity)
             }
-            .padding(20)
-            .frame(maxWidth: 720, alignment: .leading)
-            .frame(maxWidth: .infinity)
         }
         .navigationTitle("Share this iPhone or iPad")
         .onAppear {
@@ -33,123 +42,167 @@ struct IOSScreenShareView: View {
         }
     }
 
+    private var heroCard: some View {
+        HStack(alignment: .top, spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [ScreenQTheme.cosmicAmber, ScreenQTheme.cosmicRose],
+                            startPoint: .topLeading,
+                            endPoint:   .bottomTrailing
+                        )
+                    )
+                Image(systemName: "iphone.gen3.radiowaves.left.and.right")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundColor(.white)
+            }
+            .frame(width: 48, height: 48)
+            .shadow(color: ScreenQTheme.cosmicAmber.opacity(0.45), radius: 8, x: 0, y: 4)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Broadcast this screen")
+                    .font(.sqHeadline)
+                Text(app.iosPresenceAdvertising
+                     ? "Discoverable as \(app.localDeviceName) on this network."
+                     : "Preparing local-network visibility…")
+                    .font(.sqCallout)
+                    .foregroundColor(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .screenQCard()
+    }
+
     private var disclaimerCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             Label(BroadcastInstructions.viewOnlyTitle, systemImage: "exclamationmark.shield")
-                .font(.title3.bold())
+                .font(.sqHeadline)
+                .foregroundColor(ScreenQTheme.cosmicAmber)
             Text(BroadcastInstructions.viewOnlyBody)
+                .font(.sqCallout)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(.background.secondary)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(.separator, lineWidth: 0.5)
-        )
+        .screenQCard(tint: ScreenQTheme.cosmicAmber)
     }
 
     private var visibilityCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Label("Nearby visibility", systemImage: app.iosPresenceAdvertising ? "checkmark.circle.fill" : "antenna.radiowaves.left.and.right")
-                    .font(.title3.bold())
-                    .foregroundColor(app.iosPresenceAdvertising ? .green : .secondary)
+                Label(
+                    "Nearby visibility",
+                    systemImage: app.iosPresenceAdvertising ? "checkmark.circle.fill" : "antenna.radiowaves.left.and.right"
+                )
+                .font(.sqHeadline)
+                .foregroundColor(app.iosPresenceAdvertising ? ScreenQTheme.cosmicMint : .secondary)
                 Spacer()
                 Button("Refresh") {
+                    SQHaptics.tap()
                     Task { await app.startIOSPresenceAdvertising() }
                 }
                 .buttonStyle(.bordered)
+                .controlSize(.small)
             }
 
             if let error = app.iosPresenceError {
                 Text(error)
-                    .font(.subheadline)
-                    .foregroundColor(.red)
+                    .font(.sqCallout)
+                    .foregroundColor(ScreenQTheme.cosmicRose)
             } else {
                 Text(app.iosPresenceAdvertising
                      ? "\(app.localDeviceName) is visible to Screen Q viewers on this local network as a view-only ReplayKit-capable device."
                      : "Screen Q is preparing local-network visibility for this device.")
-                    .font(.subheadline)
+                    .font(.sqCallout)
                     .foregroundColor(.secondary)
             }
 
             Label("Remote control is unavailable on iOS and iPadOS; viewers can watch and guide.", systemImage: "eye")
-                .font(.caption)
+                .font(.sqCaption)
                 .foregroundColor(.secondary)
         }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(.background.secondary)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(.separator, lineWidth: 0.5)
-        )
+        .screenQCard()
     }
 
     private var pickerCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             Text("Start a broadcast")
-                .font(.title3).bold()
+                .font(.sqHeadline)
             HStack(alignment: .center, spacing: 16) {
-                BroadcastPicker(
-                    preferredExtensionBundleID: app.replayKitModel.broadcastExtensionBundleID
-                )
-                .frame(width: 60, height: 60)
-                .background(
-                    Circle().fill(.background.tertiary)
-                )
+                ZStack {
+                    Circle()
+                        .strokeBorder(
+                            LinearGradient(
+                                colors: [
+                                    ScreenQTheme.cosmicCyan.opacity(0.85),
+                                    ScreenQTheme.cosmicViolet.opacity(0.55)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint:   .bottomTrailing
+                            ),
+                            lineWidth: 1.5
+                        )
+                    BroadcastPicker(
+                        preferredExtensionBundleID: app.replayKitModel.broadcastExtensionBundleID
+                    )
+                    .frame(width: 60, height: 60)
+                    .simultaneousGesture(
+                        TapGesture().onEnded { SQHaptics.bump() }
+                    )
+                }
+                .frame(width: 72, height: 72)
+                .screenQCard(tint: ScreenQTheme.cosmicCyan, padding: 8)
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 6) {
                     Text(app.replayKitModel.hasExtensionConfigured
                          ? "Tap the broadcast button and choose Screen Q Broadcast to start Apple's capture flow."
                          : "No Screen Q broadcast extension is wired into this build yet. The picker still opens — choose any installed broadcast extension you trust to test the flow.")
-                        .font(.subheadline)
+                        .font(.sqCallout)
+                        .fixedSize(horizontal: false, vertical: true)
                     Text("This path is view-only. Control stays unavailable on iOS and iPadOS.")
-                        .font(.caption)
+                        .font(.sqCaption)
                         .foregroundColor(.secondary)
                 }
             }
         }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(.background.secondary)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(.separator, lineWidth: 0.5)
-        )
+        .screenQCard()
     }
 
     private var stepsCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Steps").font(.title3).bold()
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Steps").font(.sqHeadline)
             ForEach(Array(BroadcastInstructions.broadcastSteps.enumerated()), id: \.offset) { idx, step in
-                HStack(alignment: .firstTextBaseline) {
-                    Text("\(idx + 1).").bold().monospacedDigit()
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text("\(idx + 1)")
+                        .font(.sqCaption)
+                        .foregroundColor(.white)
+                        .frame(width: 24, height: 24)
+                        .background(
+                            Circle().fill(ScreenQTheme.cosmicCyan)
+                        )
                     Text(step)
+                        .font(.sqCallout)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(.background.secondary)
+        .screenQCard()
+    }
+
+    private var broadcastExtensionEmptyState: some View {
+        SQEmptyState(
+            icon: "antenna.radiowaves.left.and.right.slash",
+            title: "Broadcast extension not installed",
+            message: "Re-install Screen Q from the App Store so iOS can share this screen.",
+            tint: ScreenQTheme.cosmicAmber,
+            primary: .init("Get help", systemImage: "questionmark.circle") {
+                SQHaptics.tap()
+                if let url = URL(string: "https://screenq.app/help/broadcast-extension") {
+                    UIApplication.shared.open(url)
+                }
+            }
         )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(.separator, lineWidth: 0.5)
-        )
+        .screenQCard()
     }
 }
 #endif

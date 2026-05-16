@@ -41,6 +41,10 @@ struct ConnectionHubView: View {
     @State private var quickConnectText = ""
     @State private var quickConnectProtocol: RemoteConnectionProtocol = .screenQ
     @State private var quickConnectError: String?
+    @State private var isRescanning = false
+    #if os(iOS)
+    @State private var showQRScanner = false
+    #endif
 
     var body: some View {
         ScrollView {
@@ -156,21 +160,34 @@ struct ConnectionHubView: View {
             quickConnectFAB.padding(20),
             alignment: .bottomTrailing
         )
+        .sheet(isPresented: $showQRScanner) {
+            QRScanSheet(
+                onResult: { url in
+                    showQRScanner = false
+                    app.handleExternalURL(url)
+                },
+                onCancel: { showQRScanner = false }
+            )
+        }
         #endif
     }
 
     // MARK: - Hero header
 
     private var heroHeader: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 14) {
+                #if os(iOS)
+                ScreenQBrandMark(size: 48)
+                #endif
                 VStack(alignment: .leading, spacing: 4) {
                     Text(timeOfDayGreeting)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.sqCaption)
                         .foregroundColor(.secondary)
                         .textCase(.uppercase)
                     Text("Pick a screen.")
-                        .font(.system(size: 38, weight: .bold, design: .rounded))
+                        .font(.sqDisplay)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer()
                 #if os(macOS)
@@ -178,25 +195,30 @@ struct ConnectionHubView: View {
                     showManualSheet = true
                 } label: {
                     Label("New Connection", systemImage: "plus.circle.fill")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.sqHeadline)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 9)
                         .background(
-                            Capsule().fill(Color.accentColor.opacity(0.18))
+                            Capsule().fill(ScreenQTheme.cosmicCyan.opacity(0.18))
                         )
                         .overlay(
-                            Capsule().stroke(Color.accentColor.opacity(0.45), lineWidth: 1)
+                            Capsule().stroke(ScreenQTheme.cosmicCyan.opacity(0.45), lineWidth: 1)
                         )
-                        .foregroundColor(.accentColor)
+                        .foregroundColor(ScreenQTheme.cosmicCyan)
                 }
                 .buttonStyle(.plain)
                 #endif
             }
-            HStack(spacing: 8) {
-                Circle().fill(networkStatusColor).frame(width: 7, height: 7)
-                Text(networkStatusText)
-                    .font(.footnote)
-                    .foregroundColor(.secondary)
+            HStack(spacing: 10) {
+                HStack(spacing: 8) {
+                    LiveStatusDot(color: networkStatus.tint, active: app.browserStatus.isBrowsing)
+                    Text(networkStatusText)
+                        .font(.sqCallout)
+                        .foregroundColor(.secondary)
+                }
+                Spacer(minLength: 0)
+                SQPill(text: networkStatusPillText, status: networkStatus)
+                SQPill(text: "End-to-end encrypted", status: .healthy)
             }
         }
     }
@@ -228,15 +250,33 @@ struct ConnectionHubView: View {
 
     private var savedSection: some View {
         let bookmarks = app.savedConnections.connections.filter(\.isBookmark)
-        return Group {
-            if !bookmarks.isEmpty {
-                sectionContainer(
-                    title: "Saved",
-                    count: bookmarks.count,
-                    symbol: "star.fill"
-                ) {
-                    cardGrid(bookmarks, large: true)
-                }
+        return sectionContainer(
+            title: "Saved",
+            count: bookmarks.isEmpty ? nil : bookmarks.count,
+            symbol: "star.fill"
+        ) {
+            if bookmarks.isEmpty {
+                SQEmptyState(
+                    icon: "rectangle.connected.to.line.below",
+                    title: "No saved connections yet",
+                    message: "Connect to a Mac, PC, or Tailscale device and save it for one-tap access.",
+                    tint: ScreenQTheme.cosmicCyan,
+                    primary: .init("Quick Connect", systemImage: "bolt.fill") {
+                        SQHaptics.tap()
+                        showManualSheet = true
+                    },
+                    secondary: .init("Scan nearby", systemImage: "antenna.radiowaves.left.and.right") {
+                        SQHaptics.tap()
+                        isRescanning = true
+                        Task {
+                            await app.bonjourBrowser.start()
+                            await MainActor.run { isRescanning = false }
+                        }
+                    }
+                )
+                .screenQCard(tint: ScreenQTheme.cosmicCyan)
+            } else {
+                cardGrid(bookmarks, large: true)
             }
         }
     }
@@ -252,9 +292,14 @@ struct ConnectionHubView: View {
         ) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 10) {
+                    #if os(iOS)
+                    qrScanButton
+                    #endif
+
                     Menu {
                         ForEach(RemoteConnectionProtocol.allCases, id: \.self) { connectionProtocol in
                             Button {
+                                SQHaptics.tap()
                                 quickConnectProtocol = connectionProtocol
                             } label: {
                                 Label(connectionProtocol.displayName, systemImage: connectionProtocol.systemImage)
@@ -275,6 +320,7 @@ struct ConnectionHubView: View {
                         #endif
 
                     Button {
+                        SQHaptics.tap()
                         connectQuickLink(saveFirst: false)
                     } label: {
                         Label("Connect", systemImage: "play.fill")
@@ -283,6 +329,7 @@ struct ConnectionHubView: View {
                     .disabled(quickConnectText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                     Button {
+                        SQHaptics.tap()
                         connectQuickLink(saveFirst: true)
                     } label: {
                         Label("Save", systemImage: "star")
@@ -291,10 +338,23 @@ struct ConnectionHubView: View {
                     .disabled(quickConnectText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
 
+                if let reachability = reachabilityPill {
+                    HStack(spacing: 6) {
+                        SQPill(text: reachability.text, status: reachability.status, compact: true)
+                        Spacer(minLength: 0)
+                    }
+                }
+
                 if let quickConnectError {
-                    Label(quickConnectError, systemImage: "exclamationmark.triangle")
-                        .font(.caption)
-                        .foregroundColor(.orange)
+                    SQErrorRecovery(
+                        title: "Couldn't connect",
+                        message: quickConnectError,
+                        retryTitle: "Try again",
+                        onRetry: {
+                            SQHaptics.tap()
+                            connectQuickLink(saveFirst: false)
+                        }
+                    )
                 }
 
                 let quickLinks = app.savedConnections.connections.filter(\.isBookmark).prefix(8)
@@ -303,10 +363,11 @@ struct ConnectionHubView: View {
                         HStack(spacing: 8) {
                             ForEach(Array(quickLinks)) { saved in
                                 Button {
+                                    SQHaptics.tap()
                                     copyQuickLink(saved.quickConnectURLString)
                                 } label: {
                                     Label(saved.quickConnectURLString, systemImage: "link")
-                                        .font(.caption)
+                                        .font(.sqCaption)
                                         .lineLimit(1)
                                 }
                                 .buttonStyle(.bordered)
@@ -335,13 +396,14 @@ struct ConnectionHubView: View {
 
     private var importRDPButton: some View {
         Button {
+            SQHaptics.tap()
             showManualSheet = true
         } label: {
             Label("New / Import", systemImage: "plus")
-                .font(.caption.weight(.semibold))
+                .font(.sqCaption)
         }
         .buttonStyle(.plain)
-        .foregroundColor(.accentColor)
+        .foregroundColor(ScreenQTheme.cosmicCyan)
     }
 
     // MARK: - Recents
@@ -363,45 +425,84 @@ struct ConnectionHubView: View {
     }
 
     private var clearRecentsButton: some View {
-        Button("Clear") {
+        Button {
+            SQHaptics.bump()
             app.savedConnections.clearRecents()
+        } label: {
+            Text("Clear all")
+                .font(.sqCaption)
+                .foregroundColor(ScreenQTheme.cosmicRose)
         }
-        .font(.caption)
-        .foregroundColor(.red)
+        .buttonStyle(.plain)
     }
 
     // MARK: - Nearby
 
     private var nearbySection: some View {
-        sectionContainer(
+        let total = app.discoveredHosts.count + app.discoveredRFBHosts.count
+        return sectionContainer(
             title: "Nearby",
-            count: app.discoveredHosts.count + app.discoveredRFBHosts.count,
+            count: total,
             symbol: "antenna.radiowaves.left.and.right",
             trailing: AnyView(rescanButton)
         ) {
-            DiscoveryView(
-                onSelect: onConnectDiscovered,
-                onSelectRFB: onConnectRFB,
-                onSelectTailnet: onConnectTailnet,
-                showsTailnet: false,
-                onDetails: { host, connectionProtocol in
-                    selectedNearbyHost = NearbyHostDetail(host: host, connectionProtocol: connectionProtocol)
+            Group {
+                if total == 0 && !isRescanning {
+                    SQEmptyState(
+                        icon: "wifi.exclamationmark",
+                        title: "No Macs found on this network",
+                        message: "Make sure both devices are on the same Wi-Fi.",
+                        tint: ScreenQTheme.cosmicTeal,
+                        primary: .init("Rescan", systemImage: "arrow.clockwise") {
+                            SQHaptics.tap()
+                            isRescanning = true
+                            Task {
+                                await app.bonjourBrowser.start()
+                                await MainActor.run { isRescanning = false }
+                            }
+                        },
+                        compact: true
+                    )
+                    .screenQCard(tint: ScreenQTheme.cosmicTeal)
+                } else {
+                    DiscoveryView(
+                        onSelect: onConnectDiscovered,
+                        onSelectRFB: onConnectRFB,
+                        onSelectTailnet: onConnectTailnet,
+                        showsTailnet: false,
+                        onDetails: { host, connectionProtocol in
+                            selectedNearbyHost = NearbyHostDetail(host: host, connectionProtocol: connectionProtocol)
+                        }
+                    )
+                    .padding(16)
+                    .background(panelBackground)
+                }
+            }
+            .overlay(
+                Group {
+                    if isRescanning {
+                        SQLoadingScrim(title: "Scanning…", subtitle: "Listening on your local network", tint: .white)
+                            .clipShape(RoundedRectangle(cornerRadius: ScreenQTheme.cardCornerRadius, style: .continuous))
+                    }
                 }
             )
-            .padding(16)
-            .background(panelBackground)
         }
     }
 
     private var rescanButton: some View {
         Button {
-            Task { await app.bonjourBrowser.start() }
+            SQHaptics.tap()
+            isRescanning = true
+            Task {
+                await app.bonjourBrowser.start()
+                await MainActor.run { isRescanning = false }
+            }
         } label: {
             Label("Rescan", systemImage: "arrow.clockwise")
-                .font(.caption.weight(.semibold))
+                .font(.sqCaption)
         }
         .buttonStyle(.plain)
-        .foregroundColor(.accentColor)
+        .foregroundColor(ScreenQTheme.cosmicCyan)
     }
 
     // MARK: - Tailnet
@@ -413,23 +514,31 @@ struct ConnectionHubView: View {
             symbol: "lock.shield",
             trailing: AnyView(tailnetRefreshButton)
         ) {
-            VStack(alignment: .leading, spacing: 10) {
-                if !app.tailnetAuthConfigured {
-                    HStack {
-                        Label("Connect Tailscale credentials to list remote devices.", systemImage: "key")
-                            .font(.footnote)
-                            .foregroundColor(.secondary)
-                        Spacer()
-                        Button("Configure") { showTailnetSetupSheet = true }
-                            .buttonStyle(.bordered)
-                    }
-                } else if app.tailnetDevices.isEmpty {
+            if !app.tailnetAuthConfigured {
+                SQEmptyState(
+                    icon: "network",
+                    title: "Tailscale not configured",
+                    message: "Connect across networks with end-to-end encryption.",
+                    tint: ScreenQTheme.cosmicMint,
+                    primary: .init("Set up Tailscale", systemImage: "arrow.right") {
+                        SQHaptics.tap()
+                        showTailnetSetupSheet = true
+                    },
+                    compact: true
+                )
+                .screenQCard(tint: ScreenQTheme.cosmicMint)
+            } else if app.tailnetDevices.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
                     Label(app.tailnetDiscoveryStatus.summary, systemImage: "magnifyingglass")
-                        .font(.footnote)
+                        .font(.sqCallout)
                         .foregroundColor(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.vertical, 8)
-                } else {
+                }
+                .padding(16)
+                .background(panelBackground)
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
                     LazyVStack(alignment: .leading, spacing: 8) {
                         ForEach(app.tailnetDevices) { device in
                             TailnetLibraryRow(device: device) { connectionProtocol in
@@ -442,37 +551,40 @@ struct ConnectionHubView: View {
                         }
                     }
                 }
+                .padding(16)
+                .background(panelBackground)
             }
-            .padding(16)
-            .background(panelBackground)
         }
     }
 
     private var tailnetRefreshButton: some View {
         Button {
+            SQHaptics.tap()
             Task { await app.refreshTailnetDevices() }
         } label: {
             Label("Refresh", systemImage: "arrow.clockwise")
-                .font(.caption.weight(.semibold))
+                .font(.sqCaption)
         }
         .buttonStyle(.plain)
-        .foregroundColor(.accentColor)
+        .foregroundColor(ScreenQTheme.cosmicCyan)
     }
 
     private var tailnetSetupSheet: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("Tailnet")
-                    .font(.title3.bold())
+                    .font(.sqTitle)
                 Spacer()
                 Button {
+                    SQHaptics.tap()
                     showTailnetSetupSheet = false
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.title3)
+                        .font(.sqTitle)
                         .foregroundColor(.secondary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Close")
             }
             .padding(20)
             Divider()
@@ -501,14 +613,18 @@ struct ConnectionHubView: View {
         ) {
             Group {
                 if app.computerList.groups.isEmpty {
-                    HStack {
-                        Label("Create groups for clients, sites, labs, or environments.", systemImage: "folder.badge.plus")
-                            .font(.footnote)
-                            .foregroundColor(.secondary)
-                        Spacer()
-                    }
-                    .padding(16)
-                    .background(panelBackground)
+                    SQEmptyState(
+                        icon: "folder.badge.plus",
+                        title: "No groups yet",
+                        message: "Create groups for clients, sites, labs, or environments.",
+                        tint: ScreenQTheme.cosmicViolet,
+                        primary: .init("Add group", systemImage: "plus") {
+                            SQHaptics.tap()
+                            editingGroup = ConnectionGroupEditorDraft()
+                        },
+                        compact: true
+                    )
+                    .screenQCard(tint: ScreenQTheme.cosmicViolet)
                 } else {
                     LazyVStack(alignment: .leading, spacing: 10) {
                         ForEach(app.computerList.groups.sorted { $0.sortOrder < $1.sortOrder }) { group in
@@ -539,29 +655,32 @@ struct ConnectionHubView: View {
 
     private var newGroupButton: some View {
         Button {
+            SQHaptics.tap()
             editingGroup = ConnectionGroupEditorDraft()
         } label: {
-            Label("New Group", systemImage: "folder.badge.plus")
-                .font(.caption.weight(.semibold))
+            Label("Add group", systemImage: "folder.badge.plus")
+                .font(.sqCaption)
         }
         .buttonStyle(.plain)
-        .foregroundColor(.accentColor)
+        .foregroundColor(ScreenQTheme.cosmicCyan)
     }
 
     private var manualConnectSheet: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("New Connection")
-                    .font(.title3.bold())
+                    .font(.sqTitle)
                 Spacer()
                 Button {
+                    SQHaptics.tap()
                     showManualSheet = false
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.title3)
+                        .font(.sqTitle)
                         .foregroundColor(.secondary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Close")
             }
             .padding(20)
             Divider()
@@ -589,62 +708,152 @@ struct ConnectionHubView: View {
     #if os(iOS)
     private var quickConnectFAB: some View {
         Button {
+            SQHaptics.tap()
             showManualSheet = true
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "plus.circle.fill")
                     .font(.system(size: 20, weight: .bold))
+                    .accessibilityHidden(true)
                 Text("Connect")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(.sqHeadline)
             }
             .foregroundColor(.white)
             .padding(.horizontal, 20)
             .padding(.vertical, 14)
             .background(
-                Capsule().fill(LinearGradient(
-                    colors: [Color.accentColor, Color.accentColor.opacity(0.78)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ))
+                Capsule().fill(ScreenQTheme.accent(ScreenQTheme.cosmicCyan))
             )
-            .shadow(color: Color.accentColor.opacity(0.45), radius: 16, x: 0, y: 6)
+            .shadow(color: ScreenQTheme.cosmicCyan.opacity(0.45), radius: 16, x: 0, y: 6)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("New connection")
+    }
+
+    private var qrScanButton: some View {
+        Button {
+            SQHaptics.tap()
+            showQRScanner = true
+        } label: {
+            Image(systemName: "qrcode.viewfinder")
+                .font(.system(size: 17, weight: .semibold))
+                .frame(width: 38, height: 38)
+                .foregroundColor(ScreenQTheme.cosmicCyan)
+                .background(Circle().fill(ScreenQTheme.cosmicCyan.opacity(0.15)))
+                .overlay(
+                    Circle().stroke(ScreenQTheme.cosmicCyan.opacity(0.45), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Scan QR code")
     }
     #endif
+
+    // MARK: - Reachability hint (Quick Connect)
+
+    private struct ReachabilityHint {
+        let text: String
+        let status: SQStatus
+    }
+
+    private var reachabilityPill: ReachabilityHint? {
+        let trimmed = quickConnectText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty else { return nil }
+
+        let candidates = app.discoveredHosts + app.discoveredRFBHosts
+        let match = candidates.first { host in
+            let displayName = host.displayName.lowercased()
+            if displayName == trimmed { return true }
+            // Bonjour names commonly arrive with a ".local" suffix in DNS.
+            if displayName + ".local" == trimmed { return true }
+            if displayName == trimmed.replacingOccurrences(of: ".local", with: "") { return true }
+            if host.endpointDescription.lowercased().contains(trimmed) { return true }
+            return false
+        }
+        guard let match else { return nil }
+        return ReachabilityHint(
+            text: "On this network — \(match.displayName)",
+            status: .info
+        )
+    }
 
     // MARK: - Footer
 
     private var infoFooter: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
             iCloudSyncFooterRow
-            Label("Bonjour discovers devices on your local network.", systemImage: "network")
-            Label("Tailscale or a VPN lets you reach devices remotely.", systemImage: "lock.shield")
+            VStack(alignment: .leading, spacing: 6) {
+                Label("Bonjour discovers devices on your local network.", systemImage: "network")
+                Label("Tailscale or a VPN lets you reach devices remotely.", systemImage: "lock.shield")
+            }
+            .font(.sqCaption)
+            .foregroundColor(.secondary)
+            .opacity(0.85)
         }
-        .font(.caption)
-        .foregroundColor(.secondary)
-        .opacity(0.85)
     }
 
     private var iCloudSyncFooterRow: some View {
-        HStack(spacing: 10) {
-            Label(iCloudSyncSummary, systemImage: iCloudSyncSystemImage)
-                .foregroundColor(iCloudSyncTint)
-                .lineLimit(1)
-            Spacer()
-            Button {
-                app.iCloudSync.syncNow(markPreferencesChanged: true)
-            } label: {
-                Image(systemName: "arrow.triangle.2.circlepath")
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                SQPill(text: iCloudSyncPillText, status: iCloudSyncStatus)
+                Spacer(minLength: 0)
+                if let lastSync = iCloudSyncLastSyncText {
+                    Text(lastSync)
+                        .font(.sqCaption)
+                        .foregroundColor(.secondary)
+                }
             }
-            .buttonStyle(.plain)
-            .disabled(!app.iCloudSync.isEnabled || app.iCloudSync.status.phase == .syncing)
-            Toggle("iCloud Sync", isOn: iCloudSyncEnabledBinding)
-                #if os(macOS)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                #endif
+            HStack(spacing: 10) {
+                Button {
+                    SQHaptics.tap()
+                    app.iCloudSync.syncNow(markPreferencesChanged: true)
+                } label: {
+                    Label("Refresh", systemImage: "arrow.triangle.2.circlepath")
+                        .font(.sqCaption)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .foregroundColor(.primary)
+                        .background(
+                            Capsule().strokeBorder(Color.primary.opacity(0.18), lineWidth: 0.75)
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(!app.iCloudSync.isEnabled || app.iCloudSync.status.phase == .syncing)
+                Spacer(minLength: 0)
+                Toggle("iCloud Sync", isOn: iCloudSyncEnabledBinding)
+                    .font(.sqCallout)
+                    #if os(macOS)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    #endif
+            }
         }
+        .padding(14)
+        .screenQGlass()
+    }
+
+    private var iCloudSyncStatus: SQStatus {
+        switch app.iCloudSync.status.phase {
+        case .idle: return .healthy
+        case .syncing: return .info
+        case .disabled, .unavailable: return .muted
+        case .error: return .error
+        }
+    }
+
+    private var iCloudSyncPillText: String {
+        switch app.iCloudSync.status.phase {
+        case .idle: return "Synced"
+        case .syncing: return "Syncing…"
+        case .disabled: return "iCloud sync off"
+        case .unavailable: return "iCloud unavailable"
+        case .error: return "Sync error"
+        }
+    }
+
+    private var iCloudSyncLastSyncText: String? {
+        guard let date = app.iCloudSync.status.lastSyncedAt else { return nil }
+        return "Last synced \(RelativeDateTimeFormatter.screenQShort.localizedString(for: date, relativeTo: Date()))"
     }
 
     private var iCloudSyncEnabledBinding: Binding<Bool> {
@@ -652,53 +861,6 @@ struct ConnectionHubView: View {
             get: { app.iCloudSync.isEnabled },
             set: { app.iCloudSync.isEnabled = $0 }
         )
-    }
-
-    private var iCloudSyncSummary: String {
-        let status = app.iCloudSync.status
-        switch status.phase {
-        case .idle:
-            if let date = status.lastSyncedAt {
-                return "iCloud sync: \(RelativeDateTimeFormatter.screenQShort.localizedString(for: date, relativeTo: Date()))"
-            }
-            return "iCloud sync is ready."
-        case .syncing:
-            return status.message
-        case .unavailable:
-            return status.message
-        case .disabled:
-            return "iCloud sync is off."
-        case .error:
-            return status.message
-        }
-    }
-
-    private var iCloudSyncSystemImage: String {
-        switch app.iCloudSync.status.phase {
-        case .idle:
-            return "icloud"
-        case .syncing:
-            return "icloud.and.arrow.up"
-        case .unavailable:
-            return "icloud.slash"
-        case .disabled:
-            return "icloud.slash"
-        case .error:
-            return "exclamationmark.icloud"
-        }
-    }
-
-    private var iCloudSyncTint: Color {
-        switch app.iCloudSync.status.phase {
-        case .idle:
-            return .secondary
-        case .syncing:
-            return .accentColor
-        case .unavailable, .disabled:
-            return .secondary
-        case .error:
-            return .orange
-        }
     }
 
     // MARK: - Section container helper
@@ -712,16 +874,18 @@ struct ConnectionHubView: View {
         @ViewBuilder content: () -> Content
     ) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center, spacing: 8) {
+            HStack(alignment: .center, spacing: 10) {
                 Image(systemName: symbol)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.accentColor)
+                    .foregroundColor(ScreenQTheme.cosmicCyan)
                     .frame(width: 18)
+                    .accessibilityHidden(true)
                 Text(title)
-                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    .font(.sqHeadline)
+                    .foregroundColor(.primary)
                 if let count, count > 0 {
                     Text("\(count)")
-                        .font(.caption.weight(.semibold))
+                        .font(.sqCaption)
                         .padding(.horizontal, 7)
                         .padding(.vertical, 2)
                         .background(Color.primary.opacity(0.08))
@@ -923,9 +1087,8 @@ struct ConnectionHubView: View {
         }
     }
 
-    private var networkStatusColor: Color {
-        if app.browserStatus.isBrowsing { return .green }
-        return .orange
+    private var networkStatus: SQStatus {
+        app.browserStatus.isBrowsing ? .healthy : .attention
     }
 
     private var networkStatusText: String {
@@ -934,6 +1097,10 @@ struct ConnectionHubView: View {
             return n > 0 ? "Live discovery — \(n) device\(n == 1 ? "" : "s") nearby" : "Listening on local network…"
         }
         return "Discovery paused"
+    }
+
+    private var networkStatusPillText: String {
+        app.browserStatus.isBrowsing ? "On this network" : "Discovery paused"
     }
 
     private var horizontalPadding: CGFloat {
@@ -960,9 +1127,9 @@ struct ConnectionHubView: View {
     private var backgroundGradient: LinearGradient {
         LinearGradient(
             colors: [
-                Color.accentColor.opacity(0.05),
+                ScreenQTheme.cosmicCyan.opacity(0.06),
                 Color.clear,
-                Color.accentColor.opacity(0.02)
+                ScreenQTheme.cosmicViolet.opacity(0.04)
             ],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
@@ -978,7 +1145,10 @@ private struct ActiveSessionCard: View {
     let onClose: () -> Void
 
     var body: some View {
-        Button(action: onSelect) {
+        Button(action: {
+            SQHaptics.tap()
+            onSelect()
+        }) {
             VStack(alignment: .leading, spacing: 0) {
                 ZStack(alignment: .topTrailing) {
                     LinearGradient(
@@ -991,12 +1161,15 @@ private struct ActiveSessionCard: View {
                         Image(systemName: slot.systemImage)
                             .font(.system(size: 44, weight: .light))
                             .foregroundColor(.white.opacity(0.8))
+                            .accessibilityHidden(true)
                     )
 
                     HStack(spacing: 6) {
-                        Circle().fill(Color.green).frame(width: 7, height: 7)
+                        LiveStatusDot(color: ScreenQTheme.cosmicMint, active: true)
+                            .scaleEffect(0.55)
+                            .frame(width: 12, height: 12)
                         Text("LIVE")
-                            .font(.system(size: 10, weight: .bold))
+                            .font(.sqCaption)
                             .foregroundColor(.white)
                     }
                     .padding(.horizontal, 8)
@@ -1008,32 +1181,33 @@ private struct ActiveSessionCard: View {
                 HStack(spacing: 8) {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(slot.label)
-                            .font(.subheadline.weight(.semibold))
+                            .font(.sqHeadline)
                             .lineLimit(1)
                         Text(protocolLabel)
-                            .font(.caption2)
+                            .font(.sqCaption)
                             .foregroundColor(.secondary)
                     }
                     Spacer()
-                    Button(action: onClose) {
+                    Button(action: {
+                        SQHaptics.bump()
+                        onClose()
+                    }) {
                         Image(systemName: "xmark.circle.fill")
                             .font(.system(size: 18))
                             .foregroundColor(.secondary)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Disconnect from session")
                 }
                 .padding(10)
             }
             .frame(width: 240)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color.primary.opacity(0.05))
-            )
+            .clipShape(RoundedRectangle(cornerRadius: ScreenQTheme.cardCornerRadius, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(Color.green.opacity(0.4), lineWidth: 1.2)
+                RoundedRectangle(cornerRadius: ScreenQTheme.cardCornerRadius, style: .continuous)
+                    .strokeBorder(ScreenQTheme.cosmicMint.opacity(0.5), lineWidth: 1.2)
             )
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .shadow(color: ScreenQTheme.cosmicMint.opacity(0.15), radius: 12, x: 0, y: 6)
         }
         .buttonStyle(.plain)
     }
@@ -1046,11 +1220,19 @@ private struct ActiveSessionCard: View {
         }
     }
 
+    private var protocolTint: Color {
+        switch slot.kind {
+        case .screenQ:  return ScreenQTheme.cosmicCyan
+        case .vnc:      return ScreenQTheme.cosmicTeal
+        case .rdp:      return ScreenQTheme.cosmicAmber
+        }
+    }
+
     private var gradientColors: [Color] {
         switch slot.kind {
-        case .screenQ:  return [.orange, .pink]
-        case .vnc:      return [.blue, .purple]
-        case .rdp:      return [Color(red: 0.20, green: 0.65, blue: 0.70), .blue]
+        case .screenQ:  return [ScreenQTheme.cosmicCyan, ScreenQTheme.cosmicViolet]
+        case .vnc:      return [ScreenQTheme.cosmicTeal, ScreenQTheme.cosmicCyan]
+        case .rdp:      return [ScreenQTheme.cosmicAmber, ScreenQTheme.cosmicRose]
         }
     }
 }
@@ -1064,6 +1246,10 @@ private struct SavedConnectionCard: View {
     let onToggleBookmark: () -> Void
 
     @State private var isHovered = false
+    @State private var cachedThumbnailImage: CGImage? = nil
+
+    /// Window during which a freshly captured thumbnail is badged "Live".
+    private static let liveWindow: TimeInterval = 60
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1072,6 +1258,7 @@ private struct SavedConnectionCard: View {
                     .frame(height: large ? 150 : 110)
                     .frame(maxWidth: .infinity)
                     .clipped()
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
                 ZStack(alignment: .topLeading) {
                     LinearGradient(
@@ -1080,19 +1267,31 @@ private struct SavedConnectionCard: View {
                         endPoint: .bottom
                     )
                     .blendMode(.multiply)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
-                    HStack {
-                        protocolPill
+                    HStack(alignment: .top, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            SQPill(text: saved.resolvedProtocol.displayName, status: .info, compact: true)
+                                .frame(maxWidth: large ? 170 : 145, alignment: .leading)
+                            if let freshness = thumbnailFreshness {
+                                SQPill(text: freshness.text, status: freshness.status, compact: true)
+                                    .accessibilityLabel(freshness.accessibilityLabel)
+                            }
+                        }
                         Spacer()
-                        Button(action: onToggleBookmark) {
+                        Button(action: {
+                            SQHaptics.tap()
+                            onToggleBookmark()
+                        }) {
                             Image(systemName: isBookmark ? "star.fill" : "star")
                                 .font(.system(size: 13, weight: .semibold))
-                                .foregroundColor(isBookmark ? .yellow : .white.opacity(0.85))
+                                .foregroundColor(isBookmark ? ScreenQTheme.cosmicAmber : .white.opacity(0.85))
                                 .frame(width: 28, height: 28)
                                 .background(Color.black.opacity(0.35))
                                 .clipShape(Circle())
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel(isBookmark ? "Remove bookmark" : "Bookmark")
                     }
                     .padding(10)
                 }
@@ -1101,76 +1300,107 @@ private struct SavedConnectionCard: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(saved.displayName)
-                    .font(.system(size: large ? 15 : 13, weight: .semibold))
+                    .font(large ? .sqHeadline : .sqBody)
                     .lineLimit(1)
                 Text(saved.address)
-                    .font(.caption2)
+                    .font(.sqCaption)
                     .foregroundColor(.secondary)
                     .lineLimit(1)
                 if !large {
                     Text(timeAgoString)
-                        .font(.system(size: 10))
+                        .font(.sqCaption)
                         .foregroundColor(.secondary.opacity(0.7))
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, large ? 10 : 8)
+            .padding(.horizontal, 4)
+            .padding(.top, large ? 10 : 8)
         }
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color.primary.opacity(0.04))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(Color.primary.opacity(isHovered ? 0.20 : 0.07), lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .screenQCard(tint: protocolTint, padding: 10)
         .scaleEffect(isHovered ? 1.01 : 1.0)
         .zIndex(isHovered ? 1 : 0)
-        .shadow(color: Color.black.opacity(isHovered ? 0.25 : 0.0), radius: isHovered ? 14 : 0, x: 0, y: isHovered ? 6 : 0)
         .animation(.easeOut(duration: 0.15), value: isHovered)
         #if os(macOS)
         .onHover { isHovered = $0 }
         #endif
+        .onAppear { loadCachedThumbnail() }
+        .onChange(of: saved.thumbnailUpdatedAt) { _ in
+            loadCachedThumbnail()
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(saved.resolvedProtocol.displayName) connection: \(saved.displayName), \(saved.address)")
     }
 
     @ViewBuilder
     private var thumbnail: some View {
-        if let data = saved.thumbnailData,
-           let source = CGImageSourceCreateWithData(data as CFData, nil),
-           let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+        if let image = resolvedCGImage {
             Image(decorative: image, scale: 1)
                 .resizable()
                 .aspectRatio(contentMode: .fill)
+                .saturation(thumbnailIsStale ? 0.0 : 1.0)
+                .colorMultiply(thumbnailIsStale ? Color.gray.opacity(0.85) : .white)
         } else {
             ZStack {
-                LinearGradient(
-                    colors: gradientColors,
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
+                ScreenQTheme.accent(protocolTint)
                 Image(systemName: protocolIcon)
                     .font(.system(size: large ? 56 : 40, weight: .light))
                     .foregroundColor(.white.opacity(0.78))
+                    .accessibilityHidden(true)
             }
         }
     }
 
-    private var protocolPill: some View {
-        HStack(spacing: 4) {
-            Image(systemName: protocolIcon)
-                .font(.system(size: 10, weight: .bold))
-            Text(saved.resolvedProtocol.displayName)
-                .font(.system(size: 10, weight: .bold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.78)
+    /// Returns the CGImage to show, preferring the inline `thumbnailData`
+    /// (always present alongside the timestamp) but falling back to the
+    /// disk-backed `SavedConnectionThumbnailCache` when callers populate it
+    /// directly.
+    private var resolvedCGImage: CGImage? {
+        if let data = saved.thumbnailData,
+           let source = CGImageSourceCreateWithData(data as CFData, nil),
+           let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+            return image
         }
-        .foregroundColor(.white)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Color.black.opacity(0.55))
-        .clipShape(Capsule())
-        .frame(maxWidth: large ? 170 : 145, alignment: .leading)
+        return cachedThumbnailImage
+    }
+
+    /// Pull the disk-backed cache (if any) into a CGImage we can display.
+    private func loadCachedThumbnail() {
+        if saved.thumbnailData != nil {
+            // Inline payload wins; no need to hit the disk cache.
+            cachedThumbnailImage = nil
+            return
+        }
+        guard let data = SavedConnectionThumbnailCache.shared.loadData(for: saved.id),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            cachedThumbnailImage = nil
+            return
+        }
+        cachedThumbnailImage = image
+    }
+
+    private var thumbnailIsStale: Bool {
+        guard resolvedCGImage != nil else { return false }
+        guard let date = saved.thumbnailUpdatedAt else { return true }
+        return Date().timeIntervalSince(date) >= Self.liveWindow
+    }
+
+    private struct Freshness {
+        let text: String
+        let status: SQStatus
+        let accessibilityLabel: String
+    }
+
+    private var thumbnailFreshness: Freshness? {
+        guard resolvedCGImage != nil else { return nil }
+        guard let date = saved.thumbnailUpdatedAt else { return nil }
+        let age = Date().timeIntervalSince(date)
+        if age < Self.liveWindow {
+            return Freshness(text: "Live", status: .healthy, accessibilityLabel: "Live preview")
+        }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        let relative = formatter.localizedString(for: date, relativeTo: Date())
+        return Freshness(text: relative, status: .muted, accessibilityLabel: "Thumbnail \(relative)")
     }
 
     private var protocolIcon: String {
@@ -1182,12 +1412,12 @@ private struct SavedConnectionCard: View {
         }
     }
 
-    private var gradientColors: [Color] {
+    private var protocolTint: Color {
         switch saved.resolvedProtocol {
-        case .screenQ:          return [Color(red: 1.00, green: 0.45, blue: 0.30), Color(red: 0.95, green: 0.20, blue: 0.45)]
-        case .macScreenSharing: return [Color(red: 0.30, green: 0.55, blue: 0.95), Color(red: 0.50, green: 0.35, blue: 0.85)]
-        case .vnc:              return [Color(red: 0.55, green: 0.30, blue: 0.85), Color(red: 0.80, green: 0.30, blue: 0.65)]
-        case .rdp:              return [Color(red: 0.20, green: 0.65, blue: 0.70), Color(red: 0.25, green: 0.45, blue: 0.85)]
+        case .screenQ:          return ScreenQTheme.cosmicCyan
+        case .macScreenSharing: return ScreenQTheme.cosmicViolet
+        case .vnc:              return ScreenQTheme.cosmicTeal
+        case .rdp:              return ScreenQTheme.cosmicAmber
         }
     }
 
@@ -1206,33 +1436,49 @@ private struct TailnetLibraryRow: View {
     var onDetails: () -> Void
     var onSave: () -> Void
 
+    private var onlineStatus: SQStatus {
+        device.isOnline == false ? .muted : .healthy
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: device.symbolName)
                 .font(.system(size: 22, weight: .semibold))
-                .foregroundColor(.accentColor)
+                .foregroundColor(ScreenQTheme.cosmicMint)
                 .frame(width: 28)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
                 Text(device.displayName)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.sqHeadline)
                     .lineLimit(1)
                 HStack(spacing: 8) {
-                    Label(device.statusText, systemImage: device.isOnline == false ? "circle" : "circle.fill")
-                        .foregroundColor(device.isOnline == false ? .secondary : .green)
+                    HStack(spacing: 5) {
+                        LiveStatusDot(color: onlineStatus.tint, active: device.isOnline == true)
+                            .scaleEffect(0.6)
+                            .frame(width: 10, height: 10)
+                        Text(device.statusText)
+                            .foregroundColor(onlineStatus.tint)
+                    }
                     Text(device.connectionHost ?? "No tailnet address")
                         .foregroundColor(.secondary)
                     Label(device.recommendedProtocol.displayName, systemImage: device.recommendedProtocol.systemImage)
                         .foregroundColor(.secondary)
                 }
-                .font(.caption)
+                .font(.sqCaption)
             }
             Spacer()
             Menu {
-                Button { onConnect(device.recommendedProtocol) } label: {
+                Button {
+                    SQHaptics.tap()
+                    onConnect(device.recommendedProtocol)
+                } label: {
                     Label("Best Available", systemImage: device.recommendedProtocol.systemImage)
                 }
                 ForEach(RemoteConnectionProtocol.allCases, id: \.self) { connectionProtocol in
-                    Button { onConnect(connectionProtocol) } label: {
+                    Button {
+                        SQHaptics.tap()
+                        onConnect(connectionProtocol)
+                    } label: {
                         Label(connectionProtocol.displayName, systemImage: connectionProtocol.systemImage)
                     }
                 }
@@ -1240,7 +1486,10 @@ private struct TailnetLibraryRow: View {
                 Button { onDetails() } label: {
                     Label("Details", systemImage: "info.circle")
                 }
-                Button { onSave() } label: {
+                Button {
+                    SQHaptics.tap()
+                    onSave()
+                } label: {
                     Label("Save", systemImage: "star")
                 }
             } label: {
@@ -1249,18 +1498,25 @@ private struct TailnetLibraryRow: View {
             }
             .menuStyle(.borderlessButton)
             .disabled(device.connectionHost == nil)
+            .accessibilityLabel("Actions")
         }
-        .padding(10)
-        .background(Color.primary.opacity(0.035))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .screenQCard(tint: ScreenQTheme.cosmicMint, padding: 10)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Tailnet device: \(device.displayName), \(device.statusText)")
         .contextMenu {
-            Button { onConnect(device.recommendedProtocol) } label: {
+            Button {
+                SQHaptics.tap()
+                onConnect(device.recommendedProtocol)
+            } label: {
                 Label("Connect", systemImage: "play.fill")
             }
             Button { onDetails() } label: {
                 Label("Details", systemImage: "info.circle")
             }
-            Button { onSave() } label: {
+            Button {
+                SQHaptics.tap()
+                onSave()
+            } label: {
                 Label("Save", systemImage: "star")
             }
         }
@@ -1282,7 +1538,7 @@ private struct GroupLibraryRow: View {
         DisclosureGroup(isExpanded: $expanded) {
             if savedConnections.isEmpty {
                 Text("No saved connections in this group.")
-                    .font(.caption)
+                    .font(.sqCaption)
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 8)
@@ -1302,12 +1558,13 @@ private struct GroupLibraryRow: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: group.icon)
-                    .foregroundColor(.accentColor)
+                    .foregroundColor(ScreenQTheme.cosmicCyan)
                     .frame(width: 18)
+                    .accessibilityHidden(true)
                 Text(group.name)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.sqHeadline)
                 Text("\(savedConnections.count)")
-                    .font(.caption.weight(.semibold))
+                    .font(.sqCaption)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 2)
                     .background(Color.primary.opacity(0.08))
@@ -1320,13 +1577,14 @@ private struct GroupLibraryRow: View {
             Button { onEdit() } label: {
                 Label("Edit Group", systemImage: "pencil")
             }
-            Button { onDelete() } label: {
+            Button {
+                SQHaptics.bump()
+                onDelete()
+            } label: {
                 Label("Delete Group", systemImage: "trash")
             }
         }
-        .padding(10)
-        .background(Color.primary.opacity(0.035))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .screenQCard(padding: 10)
     }
 }
 
@@ -1341,27 +1599,38 @@ private struct GroupConnectionRow: View {
             Image(systemName: saved.resolvedProtocol.systemImage)
                 .foregroundColor(.secondary)
                 .frame(width: 18)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
                 Text(saved.displayName)
-                    .font(.caption.weight(.semibold))
+                    .font(.sqCallout)
                     .lineLimit(1)
                 Text(saved.address)
-                    .font(.caption2)
+                    .font(.sqCaption)
                     .foregroundColor(.secondary)
                     .lineLimit(1)
             }
             Spacer()
-            Button(action: onConnect) {
+            Button(action: {
+                SQHaptics.tap()
+                onConnect()
+            }) {
                 Image(systemName: "play.circle")
+                    .foregroundColor(ScreenQTheme.cosmicCyan)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Connect to \(saved.displayName)")
         }
         .padding(.vertical, 5)
         .padding(.horizontal, 8)
         .background(Color.primary.opacity(0.03))
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(saved.resolvedProtocol.displayName) connection: \(saved.displayName), \(saved.address)")
         .contextMenu {
-            Button { onConnect() } label: {
+            Button {
+                SQHaptics.tap()
+                onConnect()
+            } label: {
                 Label("Connect", systemImage: "play.fill")
             }
             Button { onDetails() } label: {
@@ -1432,7 +1701,7 @@ private struct SavedConnectionEditorSheet: View {
                 if !groups.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Groups")
-                            .font(.caption.bold())
+                            .font(.sqCaption)
                             .foregroundColor(.secondary)
                         ForEach(groups) { group in
                             Toggle(group.name, isOn: groupBinding(group.id))
@@ -1441,7 +1710,7 @@ private struct SavedConnectionEditorSheet: View {
                 }
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Notes")
-                        .font(.caption.bold())
+                        .font(.sqCaption)
                         .foregroundColor(.secondary)
                     TextEditor(text: $saved.notes)
                         .frame(height: 86)
@@ -1454,9 +1723,7 @@ private struct SavedConnectionEditorSheet: View {
             .textFieldStyle(.roundedBorder)
 
             if let validationMessage {
-                Label(validationMessage, systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundColor(.orange)
+                SQPill(text: validationMessage, status: .attention)
             }
 
             HStack {
@@ -1537,7 +1804,7 @@ private struct SavedConnectionDetailSheet: View {
                 }
                 if !saved.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Text(saved.notes)
-                        .font(.body)
+                        .font(.sqBody)
                         .padding(10)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Color.primary.opacity(0.04))
@@ -1545,13 +1812,19 @@ private struct SavedConnectionDetailSheet: View {
                 }
             }
             HStack {
-                Button("Delete", action: onDelete)
-                    .foregroundColor(.red)
+                Button("Delete") {
+                    SQHaptics.bump()
+                    onDelete()
+                }
+                .foregroundColor(ScreenQTheme.cosmicRose)
                 Spacer()
                 Button("Copy Link", action: onCopyLink)
                 Button("Edit", action: onEdit)
-                Button("Connect", action: onConnect)
-                    .buttonStyle(.bordered)
+                Button("Connect") {
+                    SQHaptics.tap()
+                    onConnect()
+                }
+                .buttonStyle(.bordered)
             }
         }
         .padding(20)
@@ -1682,9 +1955,10 @@ private struct ConnectionGroupEditorSheet: View {
 private func sheetHeader(title: String, systemImage: String) -> some View {
     HStack(spacing: 10) {
         Image(systemName: systemImage)
-            .foregroundColor(.accentColor)
+            .foregroundColor(ScreenQTheme.cosmicCyan)
+            .accessibilityHidden(true)
         Text(title)
-            .font(.title3.bold())
+            .font(.sqTitle)
             .lineLimit(1)
         Spacer()
     }
@@ -1693,11 +1967,11 @@ private func sheetHeader(title: String, systemImage: String) -> some View {
 private func detailRow(_ label: String, _ value: String) -> some View {
     HStack(alignment: .firstTextBaseline, spacing: 12) {
         Text(label)
-            .font(.caption.bold())
+            .font(.sqCaption)
             .foregroundColor(.secondary)
             .frame(width: 110, alignment: .leading)
         Text(value)
-            .font(.body)
+            .font(.sqBody)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

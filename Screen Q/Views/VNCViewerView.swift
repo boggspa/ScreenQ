@@ -20,6 +20,9 @@ struct VNCViewerView: View {
     @StateObject private var controlPreferences: ViewerControlPreferences
     @State private var metalRenderTimer: Timer?
     @State private var showQualityHUD: Bool = false
+    @State private var sessionStartedAt: Date?
+    @State private var peakSessionFPS: Double = 0
+    @State private var summaryStats: SessionSummarySheet.Stats?
     #if os(iOS)
     @StateObject private var iosInputState = VNCIOSInputState()
     @State private var isKeyboardActive = false
@@ -46,6 +49,7 @@ struct VNCViewerView: View {
                 VNCIOSControlStrip(
                     session: session,
                     inputState: iosInputState,
+                    preferences: controlPreferences,
                     securityStatus: session.securityStatus,
                     streamQuality: $controlPreferences.streamQuality,
                     streamProfile: $controlPreferences.streamProfile,
@@ -101,6 +105,7 @@ struct VNCViewerView: View {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
                 }
                 .help("Enter fullscreen")
+                .accessibilityLabel("Enter fullscreen")
             }
             ToolbarItem(placement: .automatic) {
                 Button {
@@ -109,6 +114,7 @@ struct VNCViewerView: View {
                     Image(systemName: "rectangle.expand.vertical")
                 }
                 .help("Resize remote desktop to match this window")
+                .accessibilityLabel("Resize remote to window")
                 .disabled(!session.canRequestRemoteResize)
             }
             #endif
@@ -119,10 +125,11 @@ struct VNCViewerView: View {
                     Image(systemName: showQualityHUD ? "speedometer" : "gauge.with.dots.needle.33percent")
                 }
                 .help("Toggle performance HUD")
+                .accessibilityLabel("Toggle performance HUD")
             }
             ToolbarItem(placement: .automatic) {
                 Button("Disconnect", action: disconnectAndExit)
-                .foregroundColor(.red)
+                .foregroundColor(ScreenQTheme.cosmicRose)
             }
         }
         .sheet(isPresented: $session.needsPassword) {
@@ -162,6 +169,12 @@ struct VNCViewerView: View {
         }
         .onChange(of: session.phase) { _ in
             stopRecordingIfSessionInactive()
+            handlePhaseChange(session.phase)
+        }
+        .onChange(of: session.measuredFPS) { newFPS in
+            if newFPS > peakSessionFPS {
+                peakSessionFPS = newFPS
+            }
         }
         #if os(iOS)
         .onChange(of: touchMode) { _, newValue in
@@ -190,79 +203,103 @@ struct VNCViewerView: View {
                 recorder.stop()
             }
         }
+        .sheet(item: $summaryStats) { stats in
+            SessionSummarySheet(
+                stats: stats,
+                isAlreadySaved: isConnectionAlreadySaved,
+                onConnectAgain: { reconnectFromSummary() },
+                onSaveToFavorites: isConnectionAlreadySaved ? nil : { saveConnectionToFavorites() },
+                onDismiss: {
+                    summaryStats = nil
+                    onDisconnect()
+                }
+            )
+        }
     }
 
     @ViewBuilder
     private var content: some View {
         switch session.phase {
         case .connecting:
-            VStack(spacing: 12) {
-                ProgressView()
-                Text("Connecting to \(session.peerLabel)…")
-                    .foregroundColor(.secondary)
-                VNCConnectionSecurityBadge(status: session.securityStatus)
-                Button("Cancel", action: disconnectAndExit)
-                    .buttonStyle(.bordered)
-                    .foregroundColor(.red)
-            }
+            CinematicSessionScreen(
+                kind: .progress,
+                title: "Reaching \(session.peerLabel)",
+                subtitle: "Negotiating an RFB / VNC session…",
+                detail: securityDetailText,
+                primaryButton: nil,
+                secondaryButton: CinematicSessionScreen.ButtonSpec(
+                    title: "Cancel",
+                    systemImage: "xmark",
+                    style: .ghost,
+                    action: disconnectAndExit
+                )
+            )
 
         case .authenticating:
-            VStack(spacing: 12) {
-                Image(systemName: "lock.fill")
-                    .font(.largeTitle)
-                Text("Authenticating…")
-                    .foregroundColor(.secondary)
-                VNCConnectionSecurityBadge(status: session.securityStatus)
-                Button("Cancel", action: disconnectAndExit)
-                    .buttonStyle(.bordered)
-                    .foregroundColor(.red)
-            }
+            CinematicSessionScreen(
+                kind: .progress,
+                title: "Authenticating",
+                subtitle: "Verifying credentials with \(session.peerLabel)…",
+                detail: securityDetailText,
+                primaryButton: nil,
+                secondaryButton: CinematicSessionScreen.ButtonSpec(
+                    title: "Cancel",
+                    systemImage: "xmark",
+                    style: .ghost,
+                    action: disconnectAndExit
+                )
+            )
 
         case .connected:
             vncCanvas
 
         case .reconnecting(let attempt):
-            VStack(spacing: 12) {
-                ProgressView()
-                Text("Reconnecting…")
-                    .font(.headline)
-                Text("Attempt \(attempt) of \(5)")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-                Button("Cancel", action: disconnectAndExit)
-                    .buttonStyle(.bordered)
-                    .foregroundColor(.red)
-            }
+            CinematicSessionScreen(
+                kind: .progress,
+                title: "Reconnecting",
+                subtitle: "Attempt \(attempt) of 5 — \(session.peerLabel) lost contact briefly.",
+                primaryButton: nil,
+                secondaryButton: CinematicSessionScreen.ButtonSpec(
+                    title: "Cancel",
+                    systemImage: "xmark",
+                    style: .ghost,
+                    action: disconnectAndExit
+                )
+            )
 
         case .failed(let reason):
-            VStack(spacing: 12) {
-                Image(systemName: "exclamationmark.triangle")
-                    .font(.largeTitle)
-                    .foregroundColor(.red)
-                Text("Connection Failed")
-                    .font(.headline)
-                Text(reason)
-                    .font(.body)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
-                Button("Dismiss") { onDisconnect() }
-                    .buttonStyle(.bordered)
-            }
+            CinematicSessionScreen(
+                kind: .failure,
+                title: "Connection failed",
+                subtitle: reason,
+                primaryButton: CinematicSessionScreen.ButtonSpec(
+                    title: "Dismiss",
+                    systemImage: "xmark.circle",
+                    style: .destructive,
+                    action: { onDisconnect() }
+                ),
+                secondaryButton: nil
+            )
 
         case .ended(let reason):
-            VStack(spacing: 12) {
-                Image(systemName: "rectangle.badge.xmark")
-                    .font(.largeTitle)
-                    .foregroundColor(.secondary)
-                Text("Session Ended")
-                    .font(.headline)
-                Text(reason)
-                    .foregroundColor(.secondary)
-                Button("Done") { onDisconnect() }
-                    .buttonStyle(.bordered)
-            }
+            CinematicSessionScreen(
+                kind: .ended,
+                title: "Session ended",
+                subtitle: reason,
+                primaryButton: CinematicSessionScreen.ButtonSpec(
+                    title: "Done",
+                    systemImage: "arrow.backward",
+                    style: .filled,
+                    action: { onDisconnect() }
+                ),
+                secondaryButton: nil
+            )
         }
+    }
+
+    private var securityDetailText: String? {
+        let title = session.securityStatus.title
+        return title.isEmpty ? nil : title
     }
 
     @ViewBuilder
@@ -291,40 +328,46 @@ struct VNCViewerView: View {
         } else if let renderer = session.metalRenderer {
             vncCanvasMetaliOS(renderer: renderer)
         } else {
-            VStack(spacing: 8) {
-                ProgressView("Waiting for framebuffer…")
+            VStack(spacing: 14) {
+                ScreenQBrandMark(size: 56)
+                Text("Preparing the framebuffer")
+                    .font(.sqHeadline)
+                    .foregroundColor(.white)
                 Text(session.firstFrameTelemetry.statusText)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                    .font(.sqCaption)
+                    .foregroundColor(.white.opacity(0.65))
                     .multilineTextAlignment(.center)
-                    .padding(.horizontal, 24)
+                    .padding(.horizontal, 32)
+                ScreenQActivityTrail(tint: .white)
+                    .padding(.top, 6)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         #endif
     }
 
     private var qualityHUD: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(String(format: "%.0f fps", session.measuredFPS))
-                .font(.system(.caption, design: .monospaced).weight(.bold))
+        VStack(alignment: .leading, spacing: 4) {
+            SQPill(text: String(format: "%.0f fps", session.measuredFPS),
+                   status: .info,
+                   compact: true)
             Text("\(session.serverWidth)×\(session.serverHeight)")
-                .font(.system(.caption2, design: .monospaced))
+                .font(.sqCaption.monospacedDigit())
             if let securitySummary = session.firstFrameTelemetry.securitySummary {
                 Text(securitySummary)
-                    .font(.system(.caption2, design: .monospaced))
+                    .font(.sqCaption.monospacedDigit())
             }
             Text(session.firstFrameTelemetry.statusText)
-                .font(.system(.caption2, design: .monospaced))
+                .font(.sqCaption.monospacedDigit())
             if session.firstFrameTelemetry.recoveryFullFrameRequests > 0 {
                 Text("Recovery \(session.firstFrameTelemetry.recoveryFullFrameRequests)")
-                    .font(.system(.caption2, design: .monospaced))
+                    .font(.sqCaption.monospacedDigit())
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Color.black.opacity(0.55))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
         .foregroundColor(.white)
-        .cornerRadius(6)
+        .screenQGlass(cornerRadius: 10)
     }
 
     #if os(iOS)
@@ -506,28 +549,31 @@ struct VNCViewerView: View {
 
     private func zoomHUD(scale: CGFloat) -> some View {
         Text("\(Int((scale * 100).rounded()))%")
-            .font(.caption.monospacedDigit().bold())
+            .font(.sqCaption.monospacedDigit())
+            .foregroundColor(.white)
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(.ultraThinMaterial)
-            .clipShape(Capsule())
+            .background(Capsule().fill(Color.black.opacity(0.55)))
+            .overlay(Capsule().stroke(ScreenQTheme.cosmicTeal.opacity(0.55), lineWidth: 0.5))
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .padding(.top, 12)
             .allowsHitTesting(false)
     }
 
     private func dragFeedbackOverlay(_ feedback: IOSDragFeedback) -> some View {
-        let color: Color = feedback.kind == .right ? .orange : .accentColor
+        let color: Color = feedback.kind == .right ? ScreenQTheme.cosmicAmber : ScreenQTheme.cosmicTeal
         return ZStack {
             Circle()
                 .stroke(color, lineWidth: 2)
                 .frame(width: 44, height: 44)
             Image(systemName: feedback.kind == .right ? "contextualmenu.and.cursorarrow" : "cursorarrow.motionlines")
-                .font(.caption.bold())
+                .font(.sqCaption.bold())
                 .foregroundColor(color)
+                .accessibilityHidden(true)
         }
         .position(feedback.point)
         .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
     #endif
@@ -566,13 +612,15 @@ struct VNCViewerView: View {
 
     private var recordingButton: some View {
         Button {
+            SQHaptics.tap()
             toggleRecording()
         } label: {
             Image(systemName: recorder.isRecording ? "stop.circle.fill" : "record.circle")
-                .foregroundColor(recorder.isRecording ? .red : .primary)
+                .foregroundColor(recorder.isRecording ? ScreenQTheme.cosmicRose : .primary)
         }
         .disabled(!recorder.isRecording && session.currentImage == nil && (session.serverWidth <= 0 || session.serverHeight <= 0))
         .help(recorder.isRecording ? "Stop recording" : "Record session")
+        .accessibilityLabel(recorder.isRecording ? "Stop recording" : "Record session")
     }
 
     private func toggleRecording() {
@@ -596,6 +644,14 @@ struct VNCViewerView: View {
     }
 
     private func disconnectAndExit() {
+        if let stats = currentSummaryStats() {
+            summaryStats = stats
+            Task {
+                if recorder.isRecording { recorder.stop() }
+                await session.disconnect()
+            }
+            return
+        }
         Task {
             if recorder.isRecording {
                 recorder.stop()
@@ -603,6 +659,82 @@ struct VNCViewerView: View {
             await session.disconnect()
             onDisconnect()
         }
+    }
+
+    // MARK: - Disconnect summary
+
+    private func handlePhaseChange(_ phase: VNCSession.Phase) {
+        switch phase {
+        case .connected:
+            if sessionStartedAt == nil {
+                sessionStartedAt = Date()
+                peakSessionFPS = 0
+            }
+        case .ended:
+            presentSummaryIfActive()
+        default:
+            break
+        }
+    }
+
+    private func presentSummaryIfActive() {
+        guard summaryStats == nil, let stats = currentSummaryStats() else { return }
+        summaryStats = stats
+    }
+
+    private func currentSummaryStats() -> SessionSummarySheet.Stats? {
+        guard let started = sessionStartedAt else { return nil }
+        let duration = Date().timeIntervalSince(started)
+        let peak = peakSessionFPS > 0 ? peakSessionFPS : nil
+        let protocolLabel = session.profile.displayName
+        let hostLabel = session.serverName.isEmpty ? session.peerLabel : session.serverName
+        return SessionSummarySheet.Stats(
+            duration: duration,
+            bytesIn: 0,
+            bytesOut: 0,
+            averageRTT: nil,
+            peakFPS: peak,
+            protocolName: protocolLabel,
+            hostDisplayName: hostLabel
+        )
+    }
+
+    private var isConnectionAlreadySaved: Bool {
+        let host = session.savedConnectionHost
+        let port = session.savedConnectionPort
+        let proto = session.savedConnectionProtocol
+        return app.savedConnections.connections.contains { entry in
+            entry.host.caseInsensitiveCompare(host) == .orderedSame &&
+            entry.port == port &&
+            entry.resolvedProtocol == proto
+        }
+    }
+
+    private func saveConnectionToFavorites() {
+        let host = session.savedConnectionHost
+        let port = session.savedConnectionPort
+        guard !host.isEmpty else { return }
+        app.savedConnections.addOrUpdate(
+            host: host,
+            port: port,
+            displayName: session.peerLabel,
+            connectionProtocol: session.savedConnectionProtocol,
+            source: .manual,
+            isBookmark: true
+        )
+    }
+
+    private func reconnectFromSummary() {
+        let host = session.savedConnectionHost
+        let port = session.savedConnectionPort
+        guard !host.isEmpty else { return }
+        let pending: PendingViewerConnection = .manual(
+            host: host,
+            port: port,
+            displayName: session.peerLabel,
+            connectionProtocol: session.savedConnectionProtocol
+        )
+        app.requestViewerConnection(pending)
     }
 
     #if os(macOS)
@@ -631,25 +763,26 @@ private struct VNCConnectionSecurityBadge: View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: status.symbolName)
                 .foregroundColor(status.tint)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(status.title)
-                    .font(.caption.weight(.semibold))
+                    .font(.sqCaption)
                 Text(status.detail)
-                    .font(.caption2)
+                    .font(.sqCaption)
                     .foregroundColor(.secondary)
                     .lineLimit(3)
                 if let action = status.recommendedAction {
                     Text(action)
-                        .font(.caption2.weight(.medium))
-                        .foregroundColor(.orange)
+                        .font(.sqCaption)
+                        .foregroundColor(ScreenQTheme.cosmicAmber)
                         .lineLimit(3)
                 }
             }
+            Spacer(minLength: 0)
         }
-        .padding(10)
         .frame(maxWidth: 420, alignment: .leading)
-        .background(Color.primary.opacity(0.06))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .screenQCard(tint: status.tint, cornerRadius: 10, padding: 10)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -694,13 +827,13 @@ extension RemoteSecurityStatus {
     var tint: Color {
         switch level {
         case .encrypted:
-            return .green
+            return ScreenQTheme.cosmicMint
         case .networkProtected:
-            return .blue
+            return ScreenQTheme.cosmicCyan
         case .legacyAuth:
-            return .orange
+            return ScreenQTheme.cosmicAmber
         case .unprotected:
-            return .red
+            return ScreenQTheme.cosmicRose
         case .unknown:
             return .secondary
         }
@@ -1219,6 +1352,7 @@ private final class VNCIOSInputState: ObservableObject {
 private struct VNCIOSControlStrip: View {
     @ObservedObject var session: VNCSession
     @ObservedObject var inputState: VNCIOSInputState
+    @ObservedObject var preferences: ViewerControlPreferences
     let securityStatus: RemoteSecurityStatus
     @Binding var streamQuality: Double
     @Binding var streamProfile: StreamProfile
@@ -1229,12 +1363,18 @@ private struct VNCIOSControlStrip: View {
     let resetViewport: () -> Void
     var onDisconnect: () -> Void
 
-    @ViewBuilder
+    @State fileprivate var showCustomization = false
+
     var body: some View {
-        if toolbarCondensed {
-            condensedBody
-        } else {
-            expandedBody
+        Group {
+            if toolbarCondensed {
+                condensedBody
+            } else {
+                expandedBody
+            }
+        }
+        .sheet(isPresented: $showCustomization) {
+            SQToolbarCustomizationSheet(preferences: preferences, isPresented: $showCustomization)
         }
     }
 
@@ -1243,15 +1383,31 @@ private struct VNCIOSControlStrip: View {
             iconButton(systemName: "plus", label: "Expand controls", size: 44) {
                 toolbarCondensed = false
             }
-            iconButton(systemName: "xmark.circle", label: "Disconnect", tint: .red, size: 44) {
-                onDisconnect()
-            }
+            disconnectButton
         }
         .padding(7)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .shadow(color: .black.opacity(0.25), radius: 14, x: 0, y: 6)
+        .vncToolbarChrome()
         .fixedSize()
+    }
+
+    private var disconnectButton: some View {
+        Button {
+            SQHaptics.warning()
+            onDisconnect()
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(ScreenQTheme.cosmicRose.opacity(0.90))
+                Image(systemName: "xmark")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundColor(.white)
+            }
+            .frame(width: 38, height: 38)
+            .shadow(color: ScreenQTheme.cosmicRose.opacity(0.45), radius: 6, x: 0, y: 3)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Disconnect")
     }
 
     private var expandedBody: some View {
@@ -1299,17 +1455,32 @@ private struct VNCIOSControlStrip: View {
                 )
 
                 overflowMenu
+                customizeButton
 
-                iconButton(systemName: "xmark.circle", label: "Disconnect", tint: .red) {
-                    onDisconnect()
-                }
+                disconnectButton
             }
             .padding(8)
         }
         .frame(maxHeight: 58)
-        .background(Color.black.opacity(0.55))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .shadow(color: .black.opacity(0.25), radius: 14, x: 0, y: 6)
+        .vncToolbarChrome(cornerRadius: 16)
+    }
+
+    private var customizeButton: some View {
+        // Phase 3: always-visible discoverable gear so toolbar customization
+        // (placement, density, modifier behaviour) is one tap from the strip.
+        Button {
+            SQHaptics.tap()
+            showCustomization = true
+        } label: {
+            Image(systemName: "gearshape.fill")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(ScreenQTheme.cosmicCyan)
+                .frame(width: 38, height: 38)
+                .background(Circle().fill(ScreenQTheme.cosmicCyan.opacity(0.12)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Customize toolbar")
     }
 
     private var allKeysMenu: some View {
@@ -1346,6 +1517,7 @@ private struct VNCIOSControlStrip: View {
                 .font(.system(size: 17, weight: .semibold))
                 .frame(width: 38, height: 38)
         }
+        .accessibilityLabel("Keyboard shortcuts")
     }
 
     private var overflowMenu: some View {
@@ -1385,6 +1557,7 @@ private struct VNCIOSControlStrip: View {
                 .font(.system(size: 17, weight: .semibold))
                 .frame(width: 38, height: 38)
         }
+        .accessibilityLabel("More")
     }
 
     private func modifierButton(_ modifier: VNCIOSModifier) -> some View {
@@ -1791,6 +1964,31 @@ private final class VNCKeyboardTextField: UITextField {
         return modifiers
     }
 }
+
+private extension View {
+    func vncToolbarChrome(cornerRadius: CGFloat = 22) -> some View {
+        background(
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(.ultraThinMaterial)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .stroke(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(0.30),
+                            Color.white.opacity(0.05)
+                        ],
+                        startPoint: .top,
+                        endPoint:   .bottom
+                    ),
+                    lineWidth: 0.75
+                )
+        )
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .shadow(color: .black.opacity(0.30), radius: 18, x: 0, y: 10)
+    }
+}
 #endif
 
 // MARK: - Password / Credentials Sheets (macOS 11.5+)
@@ -1806,19 +2004,30 @@ private struct VNCPasswordSheet: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            Text(title).font(.headline)
-            Text(message).font(.subheadline).foregroundColor(.secondary).multilineTextAlignment(.center)
+            HStack(spacing: 10) {
+                Image(systemName: "lock.shield")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundColor(ScreenQTheme.cosmicTeal)
+                    .accessibilityHidden(true)
+                Text(title).font(.sqTitle)
+            }
+            Text(message)
+                .font(.sqCallout)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
             SecureField("Password", text: $password)
                 .textFieldStyle(.roundedBorder)
                 .frame(maxWidth: 260)
             Toggle("Remember in Keychain", isOn: $rememberCredentials)
+                .font(.sqBody)
                 .frame(maxWidth: 260)
             if rememberCredentials {
                 Toggle("Require Touch ID / Face ID / passcode before reuse", isOn: $requireLocalAuthenticationForSavedCredentials)
+                    .font(.sqCallout)
                     .frame(maxWidth: 260)
             }
             Text("Saved Mac Screen Sharing credentials stay in this device's Keychain.")
-                .font(.caption)
+                .font(.sqCaption)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 260)
@@ -1828,6 +2037,7 @@ private struct VNCPasswordSheet: View {
                 Button("Connect") { onConnect() }
                     .keyboardShortcut(.defaultAction)
                     .disabled(password.isEmpty)
+                    .foregroundColor(ScreenQTheme.cosmicTeal)
             }
         }
         .padding(24)
@@ -1845,9 +2055,17 @@ private struct VNCCredentialsSheet: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            Text("macOS Login Required").font(.headline)
+            HStack(spacing: 10) {
+                Image(systemName: "person.crop.circle.badge.checkmark")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundColor(ScreenQTheme.cosmicTeal)
+                    .accessibilityHidden(true)
+                Text("macOS Login Required").font(.sqTitle)
+            }
             Text("Enter the macOS username and password for the remote Mac.")
-                .font(.subheadline).foregroundColor(.secondary).multilineTextAlignment(.center)
+                .font(.sqCallout)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
             TextField("Username", text: $username)
                 .textFieldStyle(.roundedBorder)
                 .frame(maxWidth: 260)
@@ -1855,13 +2073,15 @@ private struct VNCCredentialsSheet: View {
                 .textFieldStyle(.roundedBorder)
                 .frame(maxWidth: 260)
             Toggle("Remember in Keychain", isOn: $rememberCredentials)
+                .font(.sqBody)
                 .frame(maxWidth: 260)
             if rememberCredentials {
                 Toggle("Require Touch ID / Face ID / passcode before reuse", isOn: $requireLocalAuthenticationForSavedCredentials)
+                    .font(.sqCallout)
                     .frame(maxWidth: 260)
             }
             Text("Saved VNC credentials stay in this device's Keychain.")
-                .font(.caption)
+                .font(.sqCaption)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 260)
@@ -1871,6 +2091,7 @@ private struct VNCCredentialsSheet: View {
                 Button("Connect") { onConnect() }
                     .keyboardShortcut(.defaultAction)
                     .disabled(username.isEmpty || password.isEmpty)
+                    .foregroundColor(ScreenQTheme.cosmicTeal)
             }
         }
         .padding(24)

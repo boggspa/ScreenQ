@@ -39,20 +39,21 @@ struct FileTransferOverlay: View {
     @ViewBuilder
     private var dropTargetIndicator: some View {
         if isDropTargeted && isTransferEnabled {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 3, dash: [12, 6]))
+            RoundedRectangle(cornerRadius: ScreenQTheme.cardCornerRadius, style: .continuous)
+                .strokeBorder(ScreenQTheme.cosmicCyan, style: StrokeStyle(lineWidth: 3, dash: [12, 6]))
                 .background(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(Color.accentColor.opacity(0.1))
+                    RoundedRectangle(cornerRadius: ScreenQTheme.cardCornerRadius, style: .continuous)
+                        .fill(ScreenQTheme.cosmicCyan.opacity(0.10))
                 )
                 .overlay(
                     VStack(spacing: 8) {
                         Image(systemName: "arrow.down.doc.fill")
                             .font(.system(size: 40))
-                            .foregroundColor(.accentColor)
+                            .foregroundColor(ScreenQTheme.cosmicCyan)
+                            .accessibilityHidden(true)
                         Text("Drop files to send")
-                            .font(.headline)
-                            .foregroundColor(.accentColor)
+                            .font(.sqHeadline)
+                            .foregroundColor(ScreenQTheme.cosmicCyan)
                     }
                 )
                 .padding(20)
@@ -74,8 +75,7 @@ struct FileTransferOverlay: View {
         }
         .padding(12)
         .frame(maxWidth: 320)
-        .background(Color.black.opacity(0.7))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .screenQGlass(cornerRadius: ScreenQTheme.panelCornerRadius)
         .padding(12)
     }
 
@@ -84,58 +84,77 @@ struct FileTransferOverlay: View {
         HStack(spacing: 8) {
             Image(systemName: fileIcon(for: transfer.mimeType))
                 .foregroundColor(.secondary)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(transfer.fileName)
-                    .font(.caption.bold())
+                    .font(.sqCallout)
+                    .fontWeight(.semibold)
                     .lineLimit(1)
                 HStack(spacing: 4) {
                     Text(direction)
-                        .font(.caption2)
+                        .font(.sqCaption)
                         .foregroundColor(.secondary)
-                    Text(stateLabel(transfer.state))
-                        .font(.caption2)
-                        .foregroundColor(stateColor(transfer.state))
+                    SQPill(text: stateLabel(transfer.state), status: stateStatus(transfer.state), compact: true)
                 }
                 Text(ByteFormatting.human(Int(min(transfer.fileSize, Int64(Int.max)))))
-                    .font(.caption2)
+                    .font(.sqCaption)
                     .foregroundColor(.secondary)
             }
             Spacer()
             if isIncoming && transfer.state == .offered {
                 HStack(spacing: 6) {
                     Button("Decline") {
+                        SQHaptics.tap()
                         service.rejectTransfer(transfer.id)
                     }
                     .buttonStyle(.bordered)
                     Button("Accept") {
+                        SQHaptics.success()
                         service.acceptTransfer(transfer.id)
                     }
                     .buttonStyle(.bordered)
                 }
                 .controlSize(.mini)
             } else if transfer.state == .receiving || transfer.state == .accepted || (!isIncoming && transfer.state == .offered) {
-                ProgressView(value: transfer.progress)
-                    .frame(width: 60)
+                HStack(spacing: 6) {
+                    ProgressView(value: transfer.progress)
+                        .accentColor(ScreenQTheme.cosmicCyan)
+                        .frame(width: 60)
+                    Button {
+                        SQHaptics.warning()
+                        service.rejectTransfer(transfer.id)
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 16))
+                            .foregroundColor(ScreenQTheme.cosmicRose)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Cancel transfer")
+                }
             } else if case .completed = transfer.state {
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.green)
+                    .foregroundColor(ScreenQTheme.cosmicMint)
+                    .accessibilityLabel("Completed")
             } else if case .failed = transfer.state {
                 Image(systemName: "xmark.circle.fill")
-                    .foregroundColor(.red)
+                    .foregroundColor(ScreenQTheme.cosmicRose)
+                    .accessibilityLabel("Failed")
             } else if case .rejected = transfer.state {
                 Image(systemName: "xmark.circle")
-                    .foregroundColor(.orange)
+                    .foregroundColor(ScreenQTheme.cosmicAmber)
+                    .accessibilityLabel("Rejected")
             }
         }
+        .screenQCard(padding: 10)
+        .accessibilityElement(children: .contain)
     }
 
     private func disabledStatus(reason: String) -> some View {
         Label(reason, systemImage: "doc.badge.arrow.up")
-            .font(.caption)
+            .font(.sqCaption)
             .foregroundColor(.secondary)
             .padding(10)
-            .background(Color.black.opacity(0.62))
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .screenQGlass(cornerRadius: ScreenQTheme.pillCornerRadius)
             .padding(12)
     }
 
@@ -176,12 +195,14 @@ struct FileTransferOverlay: View {
         }
     }
 
-    private func stateColor(_ state: FileTransferService.TransferState) -> Color {
+    private func stateStatus(_ state: FileTransferService.TransferState) -> SQStatus {
         switch state {
-        case .completed:  return .green
-        case .rejected:   return .orange
-        case .failed:     return .red
-        default:          return .secondary
+        case .offered:    return .attention
+        case .accepted:   return .info
+        case .receiving:  return .info
+        case .completed:  return .healthy
+        case .rejected:   return .attention
+        case .failed:     return .error
         }
     }
 }

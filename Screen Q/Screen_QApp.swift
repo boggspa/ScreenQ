@@ -33,5 +33,16 @@ struct Screen_QApp: App {
                 }
                 #endif
         }
+
+        #if os(macOS)
+        // Native macOS Settings scene. Built into SwiftUI on macOS 11.0+ and
+        // automatically wired to the ⌘, menu item / "Screen Q → Settings…".
+        Settings {
+            SettingsScene()
+                .environmentObject(appState)
+                .environmentObject(appState.viewerSessions)
+                .frame(minWidth: 880, minHeight: 540)
+        }
+        #endif
     }
 }

@@ -8,7 +8,20 @@
 
 import SwiftUI
 
+/// Thin wrapper that keeps the existing sheet / NavigationLink call sites
+/// working. The body just embeds `SecurityTrustSettingsContent` so it can
+/// be reused inside the unified Settings pane.
 struct SecurityTrustView: View {
+    var body: some View {
+        SecurityTrustSettingsContent()
+            .navigationTitle("Security & Trust")
+    }
+}
+
+/// The full Security & Trust surface, extracted so it can be embedded in
+/// the Settings pane (`SettingsScene.Tab.security`) and in the legacy
+/// sheet/NavigationLink entry point.
+struct SecurityTrustSettingsContent: View {
     @EnvironmentObject private var app: AppState
     @State private var refreshToken = UUID()
 
@@ -57,77 +70,87 @@ struct SecurityTrustView: View {
             .frame(maxWidth: .infinity)
             .id(refreshToken)
         }
-        .navigationTitle("Security & Trust")
+        .background(ScreenQTheme.heroBackground.ignoresSafeArea())
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Security & Trust")
-                .font(.title2.bold())
+                .font(.sqTitle)
             Text("Review and revoke local trust decisions. Credentials stay in Keychain; this screen only stores non-secret metadata, saved endpoints, certificate pins, and peer fingerprints.")
-                .font(.footnote)
+                .font(.sqCallout)
                 .foregroundColor(.secondary)
         }
     }
 
     private var protocolTrustModel: some View {
-        trustPanel(title: "Protocol Trust Model", systemImage: "shield.lefthalf.filled") {
+        trustPanel(title: "Protocol Trust Model", systemImage: "shield.lefthalf.filled", tint: ScreenQTheme.cosmicIndigo) {
             protocolRow(
                 title: "Screen Q Native",
                 detail: "Best path: encrypted handshake, pinned device identity, host approval, and granular permissions. Clipboard and file transfer are available only when granted for the session.",
                 systemImage: "display",
-                tint: .green
+                tint: ScreenQTheme.cosmicMint
             )
             protocolRow(
                 title: "RDP",
                 detail: "Windows path: TLS/NLA, Windows account credentials, and per-host certificate pin review. Clipboard redirection can be requested; Screen Q does not offer native file transfer on this route.",
                 systemImage: "pc",
-                tint: .purple
+                tint: ScreenQTheme.cosmicViolet
             )
             protocolRow(
                 title: "Mac Screen Sharing",
                 detail: "Apple compatibility path: prefers macOS account authentication; stream security depends on Apple/RFB and the network path. Clipboard and file transfer controls are disabled here.",
                 systemImage: "macwindow",
-                tint: .blue
+                tint: ScreenQTheme.cosmicCyan
             )
             protocolRow(
                 title: "Generic VNC",
                 detail: "Compatibility fallback: legacy password auth. Use only over Tailscale, VPN, or a private LAN. Clipboard and file transfer controls are disabled here.",
                 systemImage: "rectangle.connected.to.line.below",
-                tint: .orange
+                tint: ScreenQTheme.cosmicAmber
             )
         }
     }
 
     private var savedConnections: some View {
-        trustPanel(title: "Saved Connections", systemImage: "clock.badge.checkmark") {
+        trustPanel(title: "Saved Connections", systemImage: "clock.badge.checkmark", tint: ScreenQTheme.cosmicCyan) {
             if app.savedConnections.connections.isEmpty {
-                Text("No saved connections yet.")
-                    .foregroundColor(.secondary)
+                SQEmptyState(
+                    icon: "bookmark",
+                    title: "No saved connections yet",
+                    message: "Connections you save appear here for review and removal.",
+                    tint: ScreenQTheme.cosmicCyan,
+                    compact: true
+                )
             } else {
                 ForEach(app.savedConnections.connections) { connection in
                     HStack(alignment: .top) {
                         Image(systemName: icon(for: connection.resolvedProtocol))
                             .foregroundColor(tint(for: connection.resolvedProtocol))
+                            .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(connection.displayName)
-                                .font(.headline)
+                                .font(.sqHeadline)
                             Text("\(connection.resolvedProtocol.displayName) - \(connection.address)")
-                                .font(.caption)
+                                .font(.sqCaption)
                                 .foregroundColor(.secondary)
                             Text(securitySummary(for: connection.resolvedProtocol))
-                                .font(.caption)
+                                .font(.sqCaption)
                                 .foregroundColor(.secondary)
                         }
                         Spacer()
                         if connection.isBookmark {
                             Image(systemName: "star.fill")
-                                .foregroundColor(.yellow)
+                                .foregroundColor(ScreenQTheme.cosmicAmber)
+                                .accessibilityLabel("Bookmarked")
                         }
-                        Button("Remove") {
+                        SQDestructiveButton(
+                            title: "Remove",
+                            systemImage: "trash",
+                            isEnabled: true
+                        ) {
                             removeSavedConnection(connection)
                         }
-                        .buttonStyle(.bordered)
                     }
                     Divider()
                 }
@@ -136,45 +159,57 @@ struct SecurityTrustView: View {
     }
 
     private var rememberedCredentials: some View {
-        trustPanel(title: "Remembered Credentials", systemImage: "key.fill") {
+        trustPanel(title: "Remembered Credentials", systemImage: "key.fill", tint: ScreenQTheme.cosmicAmber) {
             if credentialRecords.isEmpty {
-                Text("No remembered remote-access credentials are registered in Screen Q's credential inventory.")
-                    .foregroundColor(.secondary)
+                SQEmptyState(
+                    icon: "key.slash",
+                    title: "No remembered credentials",
+                    message: "Saved RDP, VNC, and Mac Screen Sharing credentials will appear here.",
+                    tint: ScreenQTheme.cosmicAmber,
+                    compact: true
+                )
             } else {
                 ForEach(credentialRecords) { credential in
                     HStack(alignment: .top) {
                         Image(systemName: credential.kind.systemImage)
                             .foregroundColor(tint(for: credential.kind))
+                            .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(credential.kind.displayName)
-                                .font(.headline)
+                                .font(.sqHeadline)
                             Text(credential.address)
-                                .font(.caption)
+                                .font(.sqCaption)
                                 .foregroundColor(.secondary)
                             if let username = credential.username, !username.isEmpty {
                                 Text("Username \(username)")
-                                    .font(.caption)
+                                    .font(.sqCaption)
                                     .foregroundColor(.secondary)
                             }
-                            Text(credential.requiresLocalAuthentication ? "Reuse requires Touch ID, Face ID, or passcode." : "Reuse allowed after device unlock.")
-                                .font(.caption2)
-                                .foregroundColor(credential.requiresLocalAuthentication ? .green : .orange)
+                            SQPill(
+                                text: credential.requiresLocalAuthentication
+                                    ? "Touch ID / Face ID required"
+                                    : "Allowed after unlock",
+                                status: credential.requiresLocalAuthentication ? .healthy : .attention,
+                                compact: true
+                            )
                             if credential.lastUpdated == .distantPast {
                                 Text("Existing Keychain item; metadata will update next time credentials are saved.")
-                                    .font(.caption2)
+                                    .font(.sqCaption)
                                     .foregroundColor(.secondary)
                             } else {
                                 Text("Updated \(Self.dateFormatter.string(from: credential.lastUpdated))")
-                                    .font(.caption2)
+                                    .font(.sqCaption)
                                     .foregroundColor(.secondary)
                             }
                         }
                         Spacer()
-                        Button("Forget") {
+                        SQDestructiveButton(
+                            title: "Forget",
+                            systemImage: "trash",
+                            isEnabled: true
+                        ) {
                             forgetCredential(credential)
                         }
-                        .buttonStyle(.bordered)
-                        .foregroundColor(.red)
                     }
                     Divider()
                 }
@@ -183,24 +218,35 @@ struct SecurityTrustView: View {
     }
 
     private var trustedDevices: some View {
-        trustPanel(title: "Native Screen Q Trusted Devices", systemImage: "person.badge.key") {
+        trustPanel(title: "Native Screen Q Trusted Devices", systemImage: "person.badge.key", tint: ScreenQTheme.cosmicMint) {
             if trustedPeers.isEmpty {
-                Text("No pinned Screen Q device identities yet.")
-                    .foregroundColor(.secondary)
+                SQEmptyState(
+                    icon: "person.badge.shield.checkmark",
+                    title: "No pinned device identities",
+                    message: "Devices you trust during pairing appear here.",
+                    tint: ScreenQTheme.cosmicMint,
+                    compact: true
+                )
             } else {
                 ForEach(trustedPeers) { peer in
                     HStack(alignment: .top) {
                         Image(systemName: "key.horizontal")
-                            .foregroundColor(.green)
+                            .foregroundColor(ScreenQTheme.cosmicMint)
+                            .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(peer.displayName)
-                                .font(.headline)
-                            Text("Fingerprint \(peer.fingerprint.prefix(16))...")
+                                .font(.sqHeadline)
+                            Text("Fingerprint \(peer.fingerprint.prefix(16))…")
                                 .font(.system(.caption, design: .monospaced))
                                 .foregroundColor(.secondary)
                             Text("Last seen \(Self.dateFormatter.string(from: peer.lastSeen))")
-                                .font(.caption)
+                                .font(.sqCaption)
                                 .foregroundColor(.secondary)
+                            SQPill(
+                                text: peer.accessPolicy.securityTrustLabel,
+                                status: trustPillStatus(for: peer.accessPolicy),
+                                compact: true
+                            )
                         }
                         Spacer()
                         Picker("Access", selection: Binding(
@@ -213,11 +259,13 @@ struct SecurityTrustView: View {
                         }
                         .labelsHidden()
                         .frame(width: 150)
-                        Button("Revoke") {
+                        SQDestructiveButton(
+                            title: "Revoke",
+                            systemImage: "xmark.shield",
+                            isEnabled: true
+                        ) {
                             revokeTrustedPeer(peer)
                         }
-                        .buttonStyle(.bordered)
-                        .foregroundColor(.red)
                     }
                     Divider()
                 }
@@ -226,34 +274,42 @@ struct SecurityTrustView: View {
     }
 
     private var rdpCertificatePins: some View {
-        trustPanel(title: "Pinned RDP Certificates", systemImage: "checkmark.seal") {
+        trustPanel(title: "Pinned RDP Certificates", systemImage: "checkmark.seal", tint: ScreenQTheme.cosmicViolet) {
             if rdpCertificates.isEmpty {
-                Text("No Windows RDP certificates have been trusted yet.")
-                    .foregroundColor(.secondary)
+                SQEmptyState(
+                    icon: "seal",
+                    title: "No pinned RDP certificates",
+                    message: "Certificates you trust when connecting to Windows hosts appear here.",
+                    tint: ScreenQTheme.cosmicViolet,
+                    compact: true
+                )
             } else {
                 ForEach(rdpCertificates) { certificate in
                     HStack(alignment: .top) {
                         Image(systemName: "desktopcomputer")
-                            .foregroundColor(.purple)
+                            .foregroundColor(ScreenQTheme.cosmicViolet)
+                            .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 2) {
                             Text("\(certificate.host):\(certificate.port)")
-                                .font(.headline)
+                                .font(.sqHeadline)
                             Text(certificate.subject.isEmpty ? "Unknown certificate subject" : certificate.subject)
-                                .font(.caption)
+                                .font(.sqCaption)
                                 .foregroundColor(.secondary)
-                            Text("SHA-256 \(certificate.fingerprintSHA256.prefix(24))...")
+                            Text("SHA-256 \(certificate.fingerprintSHA256.prefix(24))…")
                                 .font(.system(.caption, design: .monospaced))
                                 .foregroundColor(.secondary)
                             Text("Last trusted \(Self.dateFormatter.string(from: certificate.lastTrustedAt))")
-                                .font(.caption2)
+                                .font(.sqCaption)
                                 .foregroundColor(.secondary)
                         }
                         Spacer()
-                        Button("Forget") {
+                        SQDestructiveButton(
+                            title: "Forget",
+                            systemImage: "trash",
+                            isEnabled: true
+                        ) {
                             forgetRDPCertificate(certificate)
                         }
-                        .buttonStyle(.bordered)
-                        .foregroundColor(.red)
                     }
                     Divider()
                 }
@@ -266,18 +322,20 @@ struct SecurityTrustView: View {
             Image(systemName: systemImage)
                 .foregroundColor(tint)
                 .frame(width: 22)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.sqHeadline)
                 Text(detail)
-                    .font(.caption)
+                    .font(.sqCaption)
                     .foregroundColor(.secondary)
             }
         }
+        .accessibilityElement(children: .combine)
     }
 
     private var credentialBoundary: some View {
-        trustPanel(title: "Credential Boundary", systemImage: "lock.shield") {
+        trustPanel(title: "Credential Boundary", systemImage: "lock.shield", tint: ScreenQTheme.cosmicTeal) {
             Label("RDP, Mac Screen Sharing, and VNC credentials are stored in Keychain only when you choose to remember them.", systemImage: "key")
             Label("Saved credentials can require Touch ID, Face ID, or device passcode before reuse.", systemImage: "touchid")
             Label("Incoming Screen Q file offers require an explicit accept action before any chunks are written to Downloads.", systemImage: "doc.badge.arrow.up")
@@ -285,24 +343,29 @@ struct SecurityTrustView: View {
             Label("A VNC password is not a Mac admin/user password. Screen Q labels that fallback separately.", systemImage: "exclamationmark.shield")
             Label("RDP certificate trust is pinned per Windows host and blocks changed identities until reviewed.", systemImage: "checkmark.seal")
         }
-        .font(.footnote)
+        .font(.sqCallout)
     }
 
     private var auditTrail: some View {
-        trustPanel(title: "Recent Audit", systemImage: "list.bullet.clipboard") {
+        trustPanel(title: "Recent Audit", systemImage: "list.bullet.clipboard", tint: ScreenQTheme.cosmicIndigo) {
             if app.auditLog.recentEntries.isEmpty {
-                Text("No audit entries yet.")
-                    .foregroundColor(.secondary)
+                SQEmptyState(
+                    icon: "list.bullet.clipboard",
+                    title: "No audit entries yet",
+                    message: "Trust changes, certificate decisions, and security state changes will show up here.",
+                    tint: ScreenQTheme.cosmicIndigo,
+                    compact: true
+                )
             } else {
                 ForEach(app.auditLog.recentEntries.suffix(12).reversed()) { entry in
                     VStack(alignment: .leading, spacing: 2) {
                         Text("\(entry.eventType.rawValue) - \(entry.peerName)")
-                            .font(.headline)
+                            .font(.sqHeadline)
                         Text(entry.detail)
-                            .font(.caption)
+                            .font(.sqCaption)
                             .foregroundColor(.secondary)
                         Text(Self.dateFormatter.string(from: entry.timestamp))
-                            .font(.caption2)
+                            .font(.sqCaption)
                             .foregroundColor(.secondary)
                     }
                     Divider()
@@ -314,19 +377,18 @@ struct SecurityTrustView: View {
     private func trustPanel<Content: View>(
         title: String,
         systemImage: String,
+        tint: Color,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label(title, systemImage: systemImage)
-                .font(.headline)
+        // `systemImage` retained for source-compatibility with previous
+        // call sites; the section header is purely textual now and gets
+        // its visual weight from the tinted card chrome.
+        _ = systemImage
+        return VStack(alignment: .leading, spacing: 12) {
+            SQSectionHeader(title)
             content()
         }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color.gray.opacity(0.12))
-        )
+        .screenQCard(tint: tint)
     }
 
     private func icon(for connectionProtocol: RemoteConnectionProtocol) -> String {
@@ -340,18 +402,26 @@ struct SecurityTrustView: View {
 
     private func tint(for connectionProtocol: RemoteConnectionProtocol) -> Color {
         switch connectionProtocol {
-        case .screenQ: return .green
-        case .macScreenSharing: return .blue
-        case .vnc: return .orange
-        case .rdp: return .purple
+        case .screenQ: return ScreenQTheme.cosmicMint
+        case .macScreenSharing: return ScreenQTheme.cosmicCyan
+        case .vnc: return ScreenQTheme.cosmicAmber
+        case .rdp: return ScreenQTheme.cosmicViolet
         }
     }
 
     private func tint(for credentialKind: StoredCredentialMetadata.Kind) -> Color {
         switch credentialKind {
-        case .macScreenSharing: return .blue
-        case .vnc: return .orange
-        case .rdp: return .purple
+        case .macScreenSharing: return ScreenQTheme.cosmicCyan
+        case .vnc: return ScreenQTheme.cosmicAmber
+        case .rdp: return ScreenQTheme.cosmicViolet
+        }
+    }
+
+    private func trustPillStatus(for policy: TrustedPeerAccessPolicy) -> SQStatus {
+        switch policy {
+        case .askEveryTime: return .info
+        case .alwaysAllow:  return .healthy
+        case .alwaysDeny:   return .error
         }
     }
 
@@ -369,6 +439,7 @@ struct SecurityTrustView: View {
     }
 
     private func removeSavedConnection(_ connection: SavedConnection) {
+        SQHaptics.warning()
         app.savedConnections.remove(connection.id)
         app.auditLog.log(
             peerName: connection.displayName,
@@ -379,6 +450,7 @@ struct SecurityTrustView: View {
     }
 
     private func forgetCredential(_ credential: StoredCredentialMetadata) {
+        SQHaptics.warning()
         switch credential.kind {
         case .macScreenSharing, .vnc:
             VNCKeychainCredentialStore.delete(host: credential.host, port: credential.port)
@@ -394,6 +466,7 @@ struct SecurityTrustView: View {
     }
 
     private func revokeTrustedPeer(_ peer: TrustedPeer) {
+        SQHaptics.warning()
         var next = trustedPeers.filter { $0.id != peer.id || $0.fingerprint != peer.fingerprint }
         next.sort { $0.lastSeen > $1.lastSeen }
         if let data = try? JSONEncoder().encode(next) {
@@ -403,12 +476,13 @@ struct SecurityTrustView: View {
             peerName: peer.displayName,
             peerID: peer.id,
             event: .trustChanged,
-            detail: "Revoked trusted Screen Q device identity \(peer.fingerprint.prefix(16))..."
+            detail: "Revoked trusted Screen Q device identity \(peer.fingerprint.prefix(16))…"
         )
         refreshToken = UUID()
     }
 
     private func updateTrustedPeer(_ peer: TrustedPeer, accessPolicy: TrustedPeerAccessPolicy) {
+        SQHaptics.tap()
         var next = trustedPeers
         guard let index = next.firstIndex(where: { $0.id == peer.id && $0.fingerprint == peer.fingerprint }) else { return }
         next[index].accessPolicy = accessPolicy
@@ -420,17 +494,18 @@ struct SecurityTrustView: View {
             peerName: peer.displayName,
             peerID: peer.id,
             event: .trustChanged,
-            detail: "Set Screen Q device identity \(peer.fingerprint.prefix(16))... access policy to \(accessPolicy.securityTrustLabel)."
+            detail: "Set Screen Q device identity \(peer.fingerprint.prefix(16))… access policy to \(accessPolicy.securityTrustLabel)."
         )
         refreshToken = UUID()
     }
 
     private func forgetRDPCertificate(_ certificate: RDPTrustedCertificate) {
+        SQHaptics.warning()
         RDPCertificateTrustStore.delete(host: certificate.host, port: certificate.port)
         app.auditLog.log(
             peerName: "\(certificate.host):\(certificate.port)",
             event: .certificateDecision,
-            detail: "Forgot pinned RDP certificate \(certificate.fingerprintSHA256.prefix(16))..."
+            detail: "Forgot pinned RDP certificate \(certificate.fingerprintSHA256.prefix(16))…"
         )
         refreshToken = UUID()
     }

@@ -202,7 +202,7 @@ struct ViewerView: View {
             Label("To connect across networks, install Tailscale on both devices and use the MagicDNS name or 100.x address.", systemImage: "lock.shield")
             Label("Default Screen Q port is \(ScreenQProtocol.defaultPort). VNC's 5900 is intentionally avoided.", systemImage: "number")
         }
-        .font(.footnote)
+        .font(.sqCallout)
         .foregroundColor(.secondary)
     }
 }
@@ -232,11 +232,12 @@ private struct MacSessionTabBar: View {
                     .frame(width: 24, height: 22)
                     .background(
                         RoundedRectangle(cornerRadius: 5)
-                            .fill(store.selectedSessionID == nil ? Color.accentColor.opacity(0.25) : Color.clear)
+                            .fill(store.selectedSessionID == nil ? ScreenQTheme.cosmicCyan.opacity(0.25) : Color.clear)
                     )
             }
             .buttonStyle(.plain)
             .help("New connection")
+            .accessibilityLabel("New connection")
 
             Button {
                 showingMultiObserveOverview.toggle()
@@ -246,13 +247,14 @@ private struct MacSessionTabBar: View {
                     .frame(width: 24, height: 22)
                     .background(
                         RoundedRectangle(cornerRadius: 5)
-                            .fill(showingMultiObserveOverview ? Color.accentColor.opacity(0.25) : Color.clear)
+                            .fill(showingMultiObserveOverview ? ScreenQTheme.cosmicCyan.opacity(0.25) : Color.clear)
                     )
             }
             .buttonStyle(.plain)
             .disabled(store.sessions.count < 2)
             .opacity(store.sessions.count < 2 ? 0.45 : 1)
             .help("Multi-observe")
+            .accessibilityLabel("Multi-observe")
             .padding(.trailing, 8)
         }
         .frame(height: 30)
@@ -265,8 +267,9 @@ private struct MacSessionTabBar: View {
         return HStack(spacing: 6) {
             Image(systemName: slot.systemImage)
                 .font(.system(size: 11, weight: .semibold))
+                .accessibilityHidden(true)
             Text(slot.label)
-                .font(.system(size: 12))
+                .font(.sqCaption)
                 .lineLimit(1)
                 .truncationMode(.tail)
             Button {
@@ -279,13 +282,14 @@ private struct MacSessionTabBar: View {
             }
             .buttonStyle(.plain)
             .help("Close \(slot.label)")
+            .accessibilityLabel("Close \(slot.label)")
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
         .frame(maxWidth: 220)
         .background(
             RoundedRectangle(cornerRadius: 5)
-                .fill(isSelected ? Color.accentColor.opacity(0.25) : Color.clear)
+                .fill(isSelected ? ScreenQTheme.cosmicCyan.opacity(0.25) : Color.clear)
         )
         .contentShape(Rectangle())
         .onTapGesture {
@@ -304,12 +308,14 @@ private struct IOSShareOnlyDeviceSheet: View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 12) {
                 Image(systemName: host.advertisedPlatform == "iPadOS" ? "ipad" : "iphone")
-                    .font(.largeTitle)
-                    .foregroundColor(.accentColor)
+                    .font(.system(size: 34, weight: .semibold, design: .rounded))
+                    .foregroundColor(ScreenQTheme.cosmicCyan)
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(host.displayName)
-                        .font(.title2.bold())
+                        .font(.sqTitle)
                     Text("Apple-native iPhone/iPad sharing")
+                        .font(.sqCallout)
                         .foregroundColor(.secondary)
                 }
             }
@@ -319,11 +325,11 @@ private struct IOSShareOnlyDeviceSheet: View {
                 Label("Use FaceTime SharePlay Remote Control when both people can join the same call.", systemImage: "2.circle")
                 Label("Screen Q does not market ReplayKit iPhone/iPad sharing as a commercial remote-control path.", systemImage: "3.circle")
             }
-            .font(.subheadline)
+            .font(.sqBody)
 
             HStack {
                 Label("Use Apple-managed controls", systemImage: "sparkles.tv")
-                    .font(.caption)
+                    .font(.sqCaption)
                     .foregroundColor(.secondary)
                 Spacer()
                 Button("Done") {

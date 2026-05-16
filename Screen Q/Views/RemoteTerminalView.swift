@@ -97,11 +97,20 @@ struct RemoteTerminalView: View {
 
             Divider()
 
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
+                SQPill(
+                    text: state.isRunning ? "Running" : "Ready",
+                    status: state.isRunning ? .info : .healthy,
+                    compact: true
+                )
+
                 Text("$")
                     .font(.system(.body, design: .monospaced))
-                    .foregroundColor(.green)
-                TextField("Enter command…", text: $state.currentInput, onCommit: { state.submit() })
+                    .foregroundColor(ScreenQTheme.cosmicMint)
+                TextField("Enter command…", text: $state.currentInput, onCommit: {
+                    SQHaptics.tap()
+                    state.submit()
+                })
                     .font(.system(.body, design: .monospaced))
                     .textFieldStyle(.plain)
                     .disabled(state.isRunning)
@@ -109,20 +118,35 @@ struct RemoteTerminalView: View {
                 if state.isRunning {
                     ProgressView()
                         .controlSize(.small)
+                        .accentColor(ScreenQTheme.cosmicCyan)
                 } else {
-                    Button("Run") { state.submit() }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .disabled(state.currentInput.trimmingCharacters(in: .whitespaces).isEmpty)
+                    Button {
+                        SQHaptics.tap()
+                        state.submit()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.right")
+                            Text("Run")
+                        }
+                        .font(.sqCaption)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule().fill(
+                                state.currentInput.trimmingCharacters(in: .whitespaces).isEmpty
+                                    ? Color.secondary.opacity(0.30)
+                                    : ScreenQTheme.cosmicCyan
+                            )
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(state.currentInput.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            #if os(macOS)
-            .background(Color(NSColor.windowBackgroundColor))
-            #else
-            .background(Color(.systemBackground))
-            #endif
+            .screenQGlass(cornerRadius: 0)
         }
         .onAppear { inputFocused = true }
     }
@@ -132,14 +156,14 @@ struct RemoteTerminalView: View {
         VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 4) {
                 Text("$")
-                    .foregroundColor(.green)
+                    .foregroundColor(ScreenQTheme.cosmicMint)
                 Text(record.command)
                     .foregroundColor(.white)
                 Spacer()
                 if record.isComplete {
                     let code = record.exitCode ?? 0
                     Text("exit \(code)")
-                        .foregroundColor(code == 0 ? .green : .red)
+                        .foregroundColor(code == 0 ? ScreenQTheme.cosmicMint : ScreenQTheme.cosmicRose)
                         .font(.system(.caption2, design: .monospaced))
                 }
             }
@@ -148,7 +172,7 @@ struct RemoteTerminalView: View {
             ForEach(record.lines) { line in
                 Text(line.text)
                     .font(.system(.caption, design: .monospaced))
-                    .foregroundColor(line.stream == .stderr ? .red : .white.opacity(0.85))
+                    .foregroundColor(line.stream == .stderr ? ScreenQTheme.cosmicRose : .white.opacity(0.85))
 
             }
         }

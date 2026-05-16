@@ -62,100 +62,32 @@ struct ManualConnectView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Manual / Tailscale connect")
-                .font(.title3).bold()
-            Text("Works with LAN, VPN, or Tailscale MagicDNS / private IP (e.g. mac-mini.tailnet.ts.net or 100.65.4.12).")
-                .font(.footnote)
-                .foregroundColor(.secondary)
+        VStack(alignment: .leading, spacing: 14) {
+            SQSectionHeader(
+                "Manual / Tailscale connect",
+                subtitle: "LAN, VPN, or Tailscale MagicDNS / private IP."
+            )
 
-            // Quick-fill buttons for detected addresses
-            let addrs = NetworkInterfaces.connectableAddresses()
-            if !addrs.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("This device's addresses:")
-                        .font(.caption).foregroundColor(.secondary)
-                    CompatFlowLayout(spacing: 6) {
-                        ForEach(addrs) { iface in
-                            Button {
-                                hostText = iface.address
-                            } label: {
-                                Label(iface.address, systemImage: iface.kind == .tailscale ? "network" : "wifi")
-                                    .font(.caption)
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                        }
-                    }
-                }
-            }
+            quickFillRow
 
-            HStack(spacing: 12) {
-                protocolPicker
-
-                TextField("Hostname or IP", text: $hostText, onCommit: { probe() })
-                    .textFieldStyle(.roundedBorder)
-                    #if os(iOS)
-                    .textInputAutocapitalization(.never)
-                    .keyboardType(.URL)
-                    .autocorrectionDisabled(true)
-                    #endif
-
-                TextField("Port", text: $portText)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 100)
-                    #if os(iOS)
-                    .keyboardType(.numberPad)
-                    #endif
-            }
+            connectionFieldsRow
 
             protocolHint
 
-            TextField("Wake MAC address (optional)", text: $wakeMACText)
-                .textFieldStyle(.roundedBorder)
-                #if os(iOS)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled(true)
-                #endif
-
-            Text("Saved with this endpoint for Wake-on-LAN. It requires a Mac/NIC that supports network wake and a LAN broadcast path.")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            wakeMACField
 
             if let importError {
-                Label(importError, systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundColor(.orange)
+                SQErrorRecovery(
+                    title: "Import error",
+                    message: importError,
+                    retryTitle: "Dismiss",
+                    onRetry: { self.importError = nil }
+                )
             }
 
-            // Probe result inline
-            if let result = probeResult {
-                HStack(spacing: 6) {
-                    Image(systemName: result.systemImage)
-                        .foregroundColor(result.succeeded ? .green : .red)
-                    Text(result.friendlyMessage)
-                        .font(.footnote)
-                        .foregroundColor(result.succeeded ? Color.primary : Color.red)
-                }
-                .padding(.vertical, 4)
-            }
+            probeFeedback
 
-            HStack {
-                Button("Test Connection") { probe() }
-                    .buttonStyle(.bordered)
-                    .disabled(trimmedHost.isEmpty || isProbing)
-
-                if isProbing {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-
-                Spacer()
-
-                Button(connectButtonTitle) { connect() }
-                    .buttonStyle(.bordered)
-                    .disabled(trimmedHost.isEmpty || isProbing || !selectedProtocol.isAvailable)
-            }
+            actionRow
         }
         .fileImporter(
             isPresented: $isImportingRDP,
@@ -166,13 +98,19 @@ struct ManualConnectView: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color.gray.opacity(0.12))
-        )
+        .screenQCard(tint: protocolTint)
         .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(.separator, lineWidth: 0.5)
+            Group {
+                if isProbing {
+                    SQLoadingScrim(
+                        title: "Checking host…",
+                        subtitle: trimmedHost.isEmpty ? nil : trimmedHost,
+                        tint: .white
+                    )
+                    .allowsHitTesting(false)
+                }
+            },
+            alignment: .center
         )
         .onAppear {
             guard shouldLaunchRDPImporter else { return }
@@ -181,6 +119,172 @@ struct ManualConnectView: View {
             isImportingRDP = true
         }
     }
+
+    // MARK: - Quick fill (this device's addresses)
+
+    @ViewBuilder
+    private var quickFillRow: some View {
+        let addrs = NetworkInterfaces.connectableAddresses()
+        if !addrs.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("This device's addresses")
+                    .font(.sqCaption)
+                    .foregroundColor(.secondary)
+                    .textCase(.uppercase)
+                CompatFlowLayout(spacing: 6) {
+                    ForEach(addrs) { iface in
+                        Button {
+                            SQHaptics.tap()
+                            hostText = iface.address
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: iface.kind == .tailscale ? "network" : "wifi")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .accessibilityHidden(true)
+                                Text(iface.address)
+                                    .font(.sqCaption)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .foregroundColor(iface.kind == .tailscale ? ScreenQTheme.cosmicMint : ScreenQTheme.cosmicCyan)
+                            .background(
+                                Capsule().fill(
+                                    (iface.kind == .tailscale ? ScreenQTheme.cosmicMint : ScreenQTheme.cosmicCyan)
+                                        .opacity(0.18)
+                                )
+                            )
+                            .overlay(
+                                Capsule().stroke(
+                                    (iface.kind == .tailscale ? ScreenQTheme.cosmicMint : ScreenQTheme.cosmicCyan)
+                                        .opacity(0.45),
+                                    lineWidth: 0.5
+                                )
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Host / Port row
+
+    private var connectionFieldsRow: some View {
+        HStack(spacing: 10) {
+            protocolPicker
+
+            TextField("Hostname or IP", text: $hostText, onCommit: { probe() })
+                .textFieldStyle(.roundedBorder)
+                .font(.sqBody)
+                #if os(iOS)
+                .textInputAutocapitalization(.never)
+                .keyboardType(.URL)
+                .autocorrectionDisabled(true)
+                #endif
+
+            TextField("Port", text: $portText)
+                .textFieldStyle(.roundedBorder)
+                .font(.sqBody)
+                .frame(width: 96)
+                #if os(iOS)
+                .keyboardType(.numberPad)
+                #endif
+        }
+    }
+
+    private var wakeMACField: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            TextField("Wake MAC address (optional)", text: $wakeMACText)
+                .textFieldStyle(.roundedBorder)
+                .font(.sqBody)
+                #if os(iOS)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled(true)
+                #endif
+
+            Text("Saved with this endpoint for Wake-on-LAN. Requires a Mac/NIC that supports network wake and a LAN broadcast path.")
+                .font(.sqCaption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    // MARK: - Probe feedback
+
+    @ViewBuilder
+    private var probeFeedback: some View {
+        if let result = probeResult {
+            if result.succeeded {
+                HStack(spacing: 6) {
+                    SQPill(text: "Reachable", status: .healthy)
+                    Text(result.friendlyMessage)
+                        .font(.sqCaption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+            } else {
+                SQErrorRecovery(
+                    title: "Couldn't reach \(trimmedHost.isEmpty ? "host" : trimmedHost)",
+                    message: result.friendlyMessage,
+                    onRetry: { probe() }
+                )
+            }
+        }
+    }
+
+    // MARK: - Action row
+
+    private var actionRow: some View {
+        HStack(spacing: 10) {
+            Button {
+                SQHaptics.tap()
+                probe()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "antenna.radiowaves.left.and.right")
+                        .accessibilityHidden(true)
+                    Text("Test")
+                }
+                .font(.sqHeadline)
+                .foregroundColor(protocolTint)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(Capsule().strokeBorder(protocolTint.opacity(0.55), lineWidth: 0.8))
+            }
+            .buttonStyle(.plain)
+            .disabled(trimmedHost.isEmpty || isProbing)
+            .opacity((trimmedHost.isEmpty || isProbing) ? 0.5 : 1.0)
+
+            Spacer()
+
+            Button {
+                SQHaptics.success()
+                connect()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "bolt.fill")
+                        .accessibilityHidden(true)
+                    Text(connectButtonTitle)
+                }
+                .font(.sqHeadline)
+                .foregroundColor(.white)
+                .padding(.horizontal, 18)
+                .padding(.vertical, 9)
+                .background(
+                    Capsule().fill(
+                        (trimmedHost.isEmpty || isProbing || !selectedProtocol.isAvailable)
+                            ? Color.secondary.opacity(0.22)
+                            : protocolTint
+                    )
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(trimmedHost.isEmpty || isProbing || !selectedProtocol.isAvailable)
+            .accessibilityLabel(connectButtonTitle)
+        }
+    }
+
+    // MARK: - Computed helpers
 
     private var trimmedHost: String {
         hostText.trimmingCharacters(in: .whitespaces)
@@ -199,6 +303,15 @@ struct ManualConnectView: View {
         }
     }
 
+    private var protocolTint: Color {
+        switch selectedProtocol {
+        case .screenQ: return ScreenQTheme.cosmicCyan
+        case .macScreenSharing: return ScreenQTheme.cosmicViolet
+        case .vnc: return ScreenQTheme.cosmicTeal
+        case .rdp: return ScreenQTheme.cosmicAmber
+        }
+    }
+
     @ViewBuilder
     private var protocolHint: some View {
         switch selectedProtocol {
@@ -212,7 +325,7 @@ struct ManualConnectView: View {
                 Label(vncSecurityHint, systemImage: vncSecurityIcon)
                     .foregroundColor(vncSecurityTint)
             }
-            .font(.caption)
+            .font(.sqCaption)
             .foregroundColor(.secondary)
         case .vnc:
             VStack(alignment: .leading, spacing: 5) {
@@ -221,7 +334,7 @@ struct ManualConnectView: View {
                 Label(vncSecurityHint, systemImage: vncSecurityIcon)
                     .foregroundColor(vncSecurityTint)
             }
-            .font(.caption)
+            .font(.sqCaption)
             .foregroundColor(.secondary)
         case .rdp:
             VStack(alignment: .leading, spacing: 6) {
@@ -230,14 +343,23 @@ struct ManualConnectView: View {
                 Label(rdpSecurityHint, systemImage: rdpSecurityIcon)
                     .foregroundColor(rdpSecurityTint)
                 Button {
+                    SQHaptics.tap()
                     isImportingRDP = true
                 } label: {
-                    Label("Import .rdp File", systemImage: "square.and.arrow.down")
+                    HStack(spacing: 6) {
+                        Image(systemName: "square.and.arrow.down")
+                            .accessibilityHidden(true)
+                        Text("Import .rdp File")
+                    }
+                    .font(.sqCaption)
+                    .foregroundColor(ScreenQTheme.cosmicAmber)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Capsule().strokeBorder(ScreenQTheme.cosmicAmber.opacity(0.55), lineWidth: 0.6))
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .buttonStyle(.plain)
             }
-            .font(.caption)
+            .font(.sqCaption)
             .foregroundColor(.secondary)
         }
     }
@@ -245,34 +367,48 @@ struct ManualConnectView: View {
     private var protocolPicker: some View {
         Menu {
             Button {
+                SQHaptics.tap()
                 selectProtocol(.screenQ)
             } label: {
                 Label("Screen Q", systemImage: selectedProtocol == .screenQ ? "checkmark" : "display")
             }
 
             Button {
+                SQHaptics.tap()
                 selectProtocol(.macScreenSharing)
             } label: {
                 Label("Mac Screen Sharing", systemImage: selectedProtocol == .macScreenSharing ? "checkmark" : "macwindow")
             }
 
             Button {
+                SQHaptics.tap()
                 selectProtocol(.vnc)
             } label: {
                 Label("Generic VNC", systemImage: selectedProtocol == .vnc ? "checkmark" : "rectangle.connected.to.line.below")
             }
 
             Button {
+                SQHaptics.tap()
                 selectProtocol(.rdp)
             } label: {
                 Label("RDP / Windows", systemImage: selectedProtocol == .rdp ? "checkmark" : "pc")
             }
         } label: {
-            Label(selectedProtocol.displayName, systemImage: selectedProtocol.systemImage)
-                .frame(minWidth: 112)
+            HStack(spacing: 4) {
+                Image(systemName: selectedProtocol.systemImage)
+                    .accessibilityHidden(true)
+                Text(selectedProtocol.displayName)
+            }
+            .font(.sqCallout)
+            .foregroundColor(protocolTint)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(minWidth: 138)
+            .background(Capsule().fill(protocolTint.opacity(0.14)))
+            .overlay(Capsule().stroke(protocolTint.opacity(0.45), lineWidth: 0.5))
         }
         .menuStyle(.borderlessButton)
-        .buttonStyle(.bordered)
+        .accessibilityLabel("Protocol: \(selectedProtocol.displayName)")
     }
 
     private var vncSecurityScope: NetworkTrustScope {
@@ -294,7 +430,7 @@ struct ManualConnectView: View {
     }
 
     private var vncSecurityTint: Color {
-        vncSecurityScope.publicNetworkWarning == nil ? .secondary : .orange
+        vncSecurityScope.publicNetworkWarning == nil ? Color.secondary : ScreenQTheme.cosmicAmber
     }
 
     private var rdpSecurityScope: NetworkTrustScope {
@@ -316,7 +452,7 @@ struct ManualConnectView: View {
     }
 
     private var rdpSecurityTint: Color {
-        rdpSecurityScope.publicNetworkWarning == nil ? .secondary : .orange
+        rdpSecurityScope.publicNetworkWarning == nil ? Color.secondary : ScreenQTheme.cosmicAmber
     }
 
     private func selectProtocol(_ connectionProtocol: RemoteConnectionProtocol) {
@@ -339,6 +475,11 @@ struct ManualConnectView: View {
             await MainActor.run {
                 probeResult = result
                 isProbing = false
+                if result.succeeded {
+                    SQHaptics.success()
+                } else {
+                    SQHaptics.warning()
+                }
             }
         }
     }
@@ -365,6 +506,7 @@ struct ManualConnectView: View {
                     isProbing = false
                     guard result.succeeded else {
                         probeResult = result
+                        SQHaptics.warning()
                         return
                     }
                     onConnect(host, port, connectionProtocol, wakeMAC)
@@ -391,6 +533,7 @@ struct ManualConnectView: View {
         }
         guard WakeOnLAN.normalizedMACString(raw) != nil else {
             importError = "Wake MAC must be 12 hex digits, e.g. AA:BB:CC:DD:EE:FF."
+            SQHaptics.error()
             return false
         }
         importError = nil
@@ -418,8 +561,10 @@ struct ManualConnectView: View {
             importedRDPProfile = profile
             importError = nil
             probeResult = nil
+            SQHaptics.success()
         } catch {
             importError = error.localizedDescription
+            SQHaptics.error()
         }
     }
 }

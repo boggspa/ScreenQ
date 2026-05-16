@@ -18,28 +18,20 @@ struct DiscoveryView: View {
     var onSelectTailnet: ((TailnetDevice, RemoteConnectionProtocol) -> Void)? = nil
     var showsTailnet: Bool = true
     var onDetails: ((DiscoveredHost, RemoteConnectionProtocol) -> Void)? = nil
+    var onManualConnect: (() -> Void)? = nil
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Nearby Devices")
-                    .font(.title3).bold()
-                Spacer()
-                if app.browserStatus.isBrowsing {
-                    ProgressView()
-                        .controlSize(.small)
+        VStack(alignment: .leading, spacing: 14) {
+            SQSectionHeader(
+                "Nearby Devices",
+                subtitle: statusSummary,
+                action: .init("Rescan", systemImage: "arrow.clockwise") {
+                    SQHaptics.tap()
+                    Task { await app.bonjourBrowser.start() }
                 }
-                Button("Rescan") { Task { await app.bonjourBrowser.start() } }
-            }
+            )
 
-            // Status banner
-            HStack(spacing: 6) {
-                Image(systemName: statusIcon)
-                    .foregroundColor(statusColor)
-                Text(statusSummary)
-                    .font(.footnote)
-                    .foregroundColor(.secondary)
-            }
+            statusRow
 
             // Screen Q hosts
             if !app.discoveredHosts.isEmpty {
@@ -47,23 +39,27 @@ struct DiscoveryView: View {
                     title: hasNativeAndRFBHosts ? "Recommended: Screen Q Native" : "Screen Q Native",
                     detail: hasNativeAndRFBHosts ? "Use this first for the fastest Screen Q connection." : nil
                 )
-                ForEach(app.discoveredHosts) { host in
-                    Button {
-                        onSelect(host)
-                    } label: {
-                        DiscoveryRow(host: host)
-                    }
-                    .buttonStyle(.plain)
-                    .contextMenu {
+                VStack(spacing: 8) {
+                    ForEach(app.discoveredHosts) { host in
                         Button {
+                            SQHaptics.tap()
                             onSelect(host)
                         } label: {
-                            Label("Connect", systemImage: "play.fill")
+                            DiscoveryRow(host: host)
                         }
-                        Button {
-                            onDetails?(host, .screenQ)
-                        } label: {
-                            Label("Details", systemImage: "info.circle")
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            Button {
+                                SQHaptics.tap()
+                                onSelect(host)
+                            } label: {
+                                Label("Connect", systemImage: "play.fill")
+                            }
+                            Button {
+                                onDetails?(host, .screenQ)
+                            } label: {
+                                Label("Details", systemImage: "info.circle")
+                            }
                         }
                     }
                 }
@@ -75,23 +71,27 @@ struct DiscoveryView: View {
                     title: hasNativeAndRFBHosts ? "Compatibility: Mac Screen Sharing" : "Mac Screen Sharing",
                     detail: "Uses Apple Screen Sharing on port 5900."
                 )
-                ForEach(app.discoveredRFBHosts) { host in
-                    Button {
-                        onSelectRFB?(host)
-                    } label: {
-                        RFBDiscoveryRow(host: host)
-                    }
-                    .buttonStyle(.plain)
-                    .contextMenu {
+                VStack(spacing: 8) {
+                    ForEach(app.discoveredRFBHosts) { host in
                         Button {
+                            SQHaptics.tap()
                             onSelectRFB?(host)
                         } label: {
-                            Label("Connect", systemImage: "play.fill")
+                            RFBDiscoveryRow(host: host)
                         }
-                        Button {
-                            onDetails?(host, .macScreenSharing)
-                        } label: {
-                            Label("Details", systemImage: "info.circle")
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            Button {
+                                SQHaptics.tap()
+                                onSelectRFB?(host)
+                            } label: {
+                                Label("Connect", systemImage: "play.fill")
+                            }
+                            Button {
+                                onDetails?(host, .macScreenSharing)
+                            } label: {
+                                Label("Details", systemImage: "info.circle")
+                            }
                         }
                     }
                 }
@@ -99,27 +99,38 @@ struct DiscoveryView: View {
 
             // Empty state
             if app.discoveredHosts.isEmpty && app.discoveredRFBHosts.isEmpty {
-                VStack(spacing: 10) {
-                    VStack(spacing: 8) {
-                        Image(systemName: "magnifyingglass")
-                            .font(.largeTitle)
-                            .foregroundColor(.secondary)
-                        Text("No devices found")
-                            .font(.headline)
-                        Text("On the Mac you want to share, enable Screen Sharing in System Settings or open Screen Q and tap Start Hosting.\n\nBonjour discovery only works on the same local network. For Tailscale or VPN, use Manual Connect below.")
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                            .multilineTextAlignment(.center)
-                    }
+                if let error = app.browserStatus.browserError {
+                    SQErrorRecovery(
+                        title: "Bonjour error",
+                        message: "Discovery couldn't query the local network.",
+                        detail: error,
+                        onRetry: {
+                            SQHaptics.tap()
+                            Task { await app.bonjourBrowser.start() }
+                        }
+                    )
+                } else {
+                    SQEmptyState(
+                        icon: "wifi.exclamationmark",
+                        title: "No Macs found on this network",
+                        message: "Make sure both devices are connected to the same Wi-Fi. Bonjour discovery doesn't reach across VPN or Tailscale — use Manual Connect for those.",
+                        tint: ScreenQTheme.cosmicTeal,
+                        primary: .init("Rescan", systemImage: "arrow.clockwise") {
+                            SQHaptics.tap()
+                            Task { await app.bonjourBrowser.start() }
+                        },
+                        secondary: onManualConnect.map { handler -> SQEmptyState.Action in
+                            SQEmptyState.Action("Manual Connect", systemImage: "arrow.right") {
+                                SQHaptics.tap()
+                                handler()
+                            }
+                        }
+                    )
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 16)
             }
 
             if showsTailnet {
-                Divider()
-                    .padding(.vertical, 2)
-
+                Divider().opacity(0.4).padding(.vertical, 2)
                 tailnetSection
             }
         }
@@ -130,14 +141,39 @@ struct DiscoveryView: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color.gray.opacity(0.12))
-        )
+        .screenQCard(tint: ScreenQTheme.cosmicCyan)
         .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(.separator, lineWidth: 0.5)
+            Group {
+                if app.browserStatus.isBrowsing && app.discoveredHosts.isEmpty && app.discoveredRFBHosts.isEmpty {
+                    SQLoadingScrim(
+                        title: "Scanning Bonjour…",
+                        subtitle: "Looking for Macs on this network",
+                        tint: .white
+                    )
+                    .allowsHitTesting(false)
+                }
+            },
+            alignment: .center
         )
+    }
+
+    private var statusRow: some View {
+        HStack(spacing: 6) {
+            if app.browserStatus.browserError != nil {
+                SQPill(text: "Error", status: .error, compact: true)
+            } else if !app.discoveredHosts.isEmpty || !app.discoveredRFBHosts.isEmpty {
+                SQPill(text: "Found", status: .healthy, compact: true)
+            } else if app.browserStatus.isBrowsing {
+                SQPill(text: "Searching", status: .info, compact: true)
+            } else {
+                SQPill(text: "Idle", status: .muted, compact: true)
+            }
+            Text(statusSummary)
+                .font(.sqCaption)
+                .foregroundColor(.secondary)
+                .lineLimit(2)
+            Spacer()
+        }
     }
 
     private var statusSummary: String {
@@ -160,67 +196,65 @@ struct DiscoveryView: View {
     private func discoverySectionHeader(title: String, detail: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
-                .font(.caption.bold())
+                .font(.sqCaption)
                 .foregroundColor(.secondary)
+                .textCase(.uppercase)
             if let detail {
                 Text(detail)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+                    .font(.sqCaption)
+                    .foregroundColor(.secondary.opacity(0.85))
             }
         }
-    }
-
-    private var statusIcon: String {
-        if !app.discoveredHosts.isEmpty || !app.discoveredRFBHosts.isEmpty { return "checkmark.circle.fill" }
-        if app.browserStatus.browserError != nil { return "exclamationmark.triangle" }
-        return "magnifyingglass"
-    }
-
-    private var statusColor: Color {
-        if !app.discoveredHosts.isEmpty { return .green }
-        if !app.discoveredRFBHosts.isEmpty { return .blue }
-        if app.browserStatus.browserError != nil { return .red }
-        return .secondary
+        .padding(.top, 4)
     }
 
     @ViewBuilder
     private var tailnetSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Label("Tailnet Devices", systemImage: "lock.shield")
-                    .font(.caption.bold())
+                    .font(.sqCaption)
                     .foregroundColor(.secondary)
+                    .textCase(.uppercase)
                 Spacer()
                 if app.tailnetDiscoveryStatus.isLoading {
-                    ProgressView()
-                        .controlSize(.small)
+                    ScreenQActivityTrail(tint: ScreenQTheme.cosmicMint)
                 }
                 if app.tailnetAuthConfigured {
                     Button("Refresh") {
+                        SQHaptics.tap()
                         Task { await app.refreshTailnetDevices() }
                     }
-                    .controlSize(.small)
+                    .buttonStyle(.plain)
+                    .font(.sqCaption)
+                    .foregroundColor(ScreenQTheme.cosmicMint)
+
                     Button("Forget") {
+                        SQHaptics.warning()
                         app.forgetTailscaleCredentials()
                         clearTailnetCredentialFields()
                         showTailnetTokenField = false
                     }
-                    .controlSize(.small)
-                    .foregroundColor(.red)
+                    .buttonStyle(.plain)
+                    .font(.sqCaption)
+                    .foregroundColor(ScreenQTheme.cosmicRose)
                 } else {
                     Button(showTailnetTokenField ? "Cancel" : "Connect Tailscale") {
+                        SQHaptics.tap()
                         showTailnetTokenField.toggle()
                     }
-                    .controlSize(.small)
+                    .buttonStyle(.plain)
+                    .font(.sqCaption)
+                    .foregroundColor(ScreenQTheme.cosmicMint)
                 }
             }
 
             HStack(spacing: 6) {
-                Image(systemName: tailnetStatusIcon)
-                    .foregroundColor(tailnetStatusColor)
+                SQPill(text: tailnetPillText, status: tailnetPillStatus, compact: true)
                 Text(app.tailnetDiscoveryStatus.summary)
-                    .font(.footnote)
+                    .font(.sqCaption)
                     .foregroundColor(.secondary)
+                Spacer()
             }
 
             if showTailnetTokenField || (!app.tailnetAuthConfigured && app.tailnetDevices.isEmpty) {
@@ -234,12 +268,14 @@ struct DiscoveryView: View {
                     if tailscaleCredentialMode == .oauthClient {
                         TextField("Tailscale OAuth client ID", text: $tailscaleOAuthClientID)
                             .textFieldStyle(.roundedBorder)
+                            .font(.sqBody)
                             #if os(iOS)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled(true)
                             #endif
                         SecureField("Tailscale OAuth client secret", text: $tailscaleOAuthClientSecret)
                             .textFieldStyle(.roundedBorder)
+                            .font(.sqBody)
                             #if os(iOS)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled(true)
@@ -247,6 +283,7 @@ struct DiscoveryView: View {
                     } else {
                         SecureField("Tailscale API access token", text: $tailscaleToken)
                             .textFieldStyle(.roundedBorder)
+                            .font(.sqBody)
                             #if os(iOS)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled(true)
@@ -255,10 +292,12 @@ struct DiscoveryView: View {
 
                     HStack {
                         Text(tailnetCredentialHelpText)
-                            .font(.caption2)
+                            .font(.sqCaption)
                             .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                         Spacer()
-                        Button("Save & Load") {
+                        Button {
+                            SQHaptics.success()
                             Task {
                                 switch tailscaleCredentialMode {
                                 case .oauthClient:
@@ -272,8 +311,21 @@ struct DiscoveryView: View {
                                 clearTailnetCredentialFields()
                                 showTailnetTokenField = false
                             }
+                        } label: {
+                            Text("Save & Load")
+                                .font(.sqHeadline)
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(
+                                    Capsule().fill(
+                                        canSaveTailnetCredentials
+                                            ? ScreenQTheme.cosmicMint
+                                            : Color.secondary.opacity(0.18)
+                                    )
+                                )
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.plain)
                         .disabled(!canSaveTailnetCredentials)
                     }
                     #if os(iOS)
@@ -281,21 +333,56 @@ struct DiscoveryView: View {
                     .autocorrectionDisabled(true)
                     #endif
                 }
+                .screenQCard(tint: ScreenQTheme.cosmicMint, padding: 12)
             }
 
             if app.tailnetAuthConfigured, let credentialSummary = tailnetCredentialSummary {
                 Label(credentialSummary, systemImage: "key")
-                    .font(.caption2)
+                    .font(.sqCaption)
                     .foregroundColor(.secondary)
             }
 
             if !app.tailnetDevices.isEmpty {
-                ForEach(app.tailnetDevices) { device in
-                    TailnetDiscoveryRow(device: device) { selectedProtocol in
-                        onSelectTailnet?(device, selectedProtocol)
+                VStack(spacing: 8) {
+                    ForEach(app.tailnetDevices) { device in
+                        TailnetDiscoveryRow(device: device) { selectedProtocol in
+                            SQHaptics.tap()
+                            onSelectTailnet?(device, selectedProtocol)
+                        }
                     }
                 }
+            } else if app.tailnetAuthConfigured && !app.tailnetDiscoveryStatus.isLoading {
+                SQEmptyState(
+                    icon: "lock.shield",
+                    title: "No tailnet devices",
+                    message: "Your tailnet is connected but doesn't expose any reachable Macs right now.",
+                    tint: ScreenQTheme.cosmicMint,
+                    primary: .init("Refresh", systemImage: "arrow.clockwise") {
+                        SQHaptics.tap()
+                        Task { await app.refreshTailnetDevices() }
+                    },
+                    compact: true
+                )
             }
+        }
+    }
+
+    private var tailnetPillText: String {
+        switch app.tailnetDiscoveryStatus.phase {
+        case .signedOut: return "Sign in"
+        case .idle:     return "Idle"
+        case .loading:  return "Loading"
+        case .loaded(let count): return count > 0 ? "\(count)" : "Empty"
+        case .failed:   return "Failed"
+        }
+    }
+
+    private var tailnetPillStatus: SQStatus {
+        switch app.tailnetDiscoveryStatus.phase {
+        case .loaded(let count) where count > 0: return .healthy
+        case .failed: return .error
+        case .loading: return .info
+        default: return .muted
         }
     }
 
@@ -334,23 +421,6 @@ struct DiscoveryView: View {
         tailscaleOAuthClientID = ""
         tailscaleOAuthClientSecret = ""
     }
-
-    private var tailnetStatusIcon: String {
-        switch app.tailnetDiscoveryStatus.phase {
-        case .signedOut, .idle: return "lock.shield"
-        case .loading: return "arrow.triangle.2.circlepath"
-        case .loaded(let count): return count > 0 ? "checkmark.circle.fill" : "magnifyingglass"
-        case .failed: return "exclamationmark.triangle"
-        }
-    }
-
-    private var tailnetStatusColor: Color {
-        switch app.tailnetDiscoveryStatus.phase {
-        case .loaded(let count) where count > 0: return .green
-        case .failed: return .orange
-        default: return .secondary
-        }
-    }
 }
 
 private enum TailnetCredentialMode: Hashable {
@@ -362,35 +432,40 @@ private struct DiscoveryRow: View {
     let host: DiscoveredHost
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            Image(systemName: hostSymbol)
-                .font(.title2)
-                .foregroundColor(.accentColor)
-            VStack(alignment: .leading, spacing: 2) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(ScreenQTheme.accent(ScreenQTheme.cosmicCyan))
+                    .frame(width: 38, height: 38)
+                Image(systemName: hostSymbol)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(.white)
+                    .accessibilityHidden(true)
+            }
+            VStack(alignment: .leading, spacing: 3) {
                 Text(host.displayName)
-                    .font(.headline)
+                    .font(.sqHeadline)
+                    .foregroundColor(.primary)
                 HStack(spacing: 6) {
                     if let v = host.advertisedAppVersion {
-                        Text("v\(v)").font(.caption).foregroundColor(.secondary)
+                        Text("v\(v)")
+                            .font(.sqCaption)
+                            .foregroundColor(.secondary)
                     }
                     if let p = host.advertisedPlatform {
-                        Text(p).font(.caption).foregroundColor(.secondary)
+                        Text(p)
+                            .font(.sqCaption)
+                            .foregroundColor(.secondary)
                     }
                     if host.advertisesControl {
-                        Label("Control", systemImage: "cursorarrow.click")
-                            .font(.caption)
-                            .foregroundColor(.green)
+                        SQPill(text: "Control", status: .healthy, compact: true)
                     } else if host.isIOSShareOnlyPresence {
-                        Label("Apple-native", systemImage: "iphone")
-                            .font(.caption)
-                            .foregroundColor(.blue)
+                        SQPill(text: "Apple-native", status: .info, compact: true)
                     } else {
-                        Label("View only", systemImage: "eye")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                        SQPill(text: "View only", status: .muted, compact: true)
                     }
                     if !host.acceptsScreenQConnection {
                         Text("Share only")
-                            .font(.caption)
+                            .font(.sqCaption)
                             .foregroundColor(.secondary)
                     }
                 }
@@ -398,11 +473,10 @@ private struct DiscoveryRow: View {
             Spacer()
             Image(systemName: host.isIOSShareOnlyPresence ? "info.circle" : "chevron.right")
                 .foregroundColor(.secondary)
+                .accessibilityHidden(true)
         }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 10).fill(Color.gray.opacity(0.08))
-        )
+        .screenQCard(tint: ScreenQTheme.cosmicCyan, padding: 12)
+        .accessibilityElement(children: .combine)
     }
 
     private var hostSymbol: String {
@@ -420,29 +494,33 @@ private struct RFBDiscoveryRow: View {
     let host: DiscoveredHost
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            Image(systemName: "desktopcomputer")
-                .font(.title2)
-                .foregroundColor(.blue)
-            VStack(alignment: .leading, spacing: 2) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(ScreenQTheme.accent(ScreenQTheme.cosmicViolet))
+                    .frame(width: 38, height: 38)
+                Image(systemName: "desktopcomputer")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(.white)
+                    .accessibilityHidden(true)
+            }
+            VStack(alignment: .leading, spacing: 3) {
                 Text(host.displayName)
-                    .font(.headline)
+                    .font(.sqHeadline)
+                    .foregroundColor(.primary)
                 HStack(spacing: 6) {
-                    Label("Screen Sharing", systemImage: "rectangle.on.rectangle")
-                        .font(.caption)
-                        .foregroundColor(.blue)
-                    Text("Mac Screen Sharing")
-                        .font(.caption)
+                    SQPill(text: "Screen Sharing", status: .info, compact: true)
+                    Text("Apple RFB port 5900")
+                        .font(.sqCaption)
                         .foregroundColor(.secondary)
                 }
             }
             Spacer()
             Image(systemName: "chevron.right")
                 .foregroundColor(.secondary)
+                .accessibilityHidden(true)
         }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 10).fill(Color.gray.opacity(0.08))
-        )
+        .screenQCard(tint: ScreenQTheme.cosmicViolet, padding: 12)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -452,22 +530,30 @@ private struct TailnetDiscoveryRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            Image(systemName: device.symbolName)
-                .font(.title2)
-                .foregroundColor(.blue)
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(ScreenQTheme.accent(ScreenQTheme.cosmicMint))
+                    .frame(width: 38, height: 38)
+                Image(systemName: device.symbolName)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(.white)
+                    .accessibilityHidden(true)
+            }
             VStack(alignment: .leading, spacing: 3) {
                 Text(device.displayName)
-                    .font(.headline)
+                    .font(.sqHeadline)
+                    .foregroundColor(.primary)
                 HStack(spacing: 6) {
-                    Label(device.statusText, systemImage: device.isOnline == false ? "circle" : "circle.fill")
-                        .font(.caption)
-                        .foregroundColor(device.isOnline == false ? .secondary : .green)
+                    SQPill(
+                        text: device.statusText,
+                        status: device.isOnline == false ? .muted : .healthy,
+                        compact: true
+                    )
                     Text(device.primaryAddress ?? device.hostname ?? "No tailnet address")
-                        .font(.caption)
+                        .font(.sqCaption)
                         .foregroundColor(.secondary)
-                    Label(device.recommendedProtocol.displayName, systemImage: protocolIcon(device.recommendedProtocol))
-                        .font(.caption)
-                        .foregroundColor(.blue)
+                        .lineLimit(1)
+                    SQPill(text: device.recommendedProtocol.displayName, status: .info, compact: true)
                 }
             }
             Spacer()
@@ -498,15 +584,15 @@ private struct TailnetDiscoveryRow: View {
                     Label("Generic VNC", systemImage: "rectangle.connected.to.line.below")
                 }
             } label: {
-                Image(systemName: "chevron.right.circle")
-                    .foregroundColor(.secondary)
+                Image(systemName: "chevron.right.circle.fill")
+                    .font(.system(size: 18))
+                    .foregroundColor(ScreenQTheme.cosmicMint)
             }
+            .menuStyle(.borderlessButton)
             .disabled(device.connectionHost == nil)
+            .accessibilityLabel("Connect options")
         }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 10).fill(Color.gray.opacity(0.08))
-        )
+        .screenQCard(tint: ScreenQTheme.cosmicMint, padding: 12)
     }
 
     private func protocolIcon(_ connectionProtocol: RemoteConnectionProtocol) -> String {

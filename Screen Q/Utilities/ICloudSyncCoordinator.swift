@@ -372,6 +372,7 @@ final class ICloudSyncCoordinator: ObservableObject {
 
         savedConnections.$connections
             .dropFirst()
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.schedulePush(markPreferencesChanged: false)
             }
@@ -379,12 +380,14 @@ final class ICloudSyncCoordinator: ObservableObject {
 
         computerList.$groups
             .dropFirst()
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.schedulePush(markPreferencesChanged: false)
             }
             .store(in: &cancellables)
 
         NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 guard let self,
                       !self.isApplyingRemote,
@@ -399,6 +402,7 @@ final class ICloudSyncCoordinator: ObservableObject {
             for: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
             object: keyValueStore
         )
+        .receive(on: DispatchQueue.main)
         .sink { [weak self] _ in
             self?.handleRemoteChange()
         }

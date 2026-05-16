@@ -190,6 +190,33 @@ final class ViewerControlPreferences: ObservableObject {
         didSet { defaults.set(hiddenToolbarItems.map(\.rawValue), forKey: keys.hiddenToolbarItems) }
     }
 
+    // MARK: - Phase 3 prefs (modifier auto-release, sticky modifiers, stats HUD anchor)
+
+    /// Seconds before a `.momentary` modifier auto-releases when no
+    /// keystroke arrives. Surfaced in the modifier customization sheet.
+    @Published var modifierAutoReleaseSeconds: Double {
+        didSet { defaults.set(modifierAutoReleaseSeconds, forKey: keys.modifierAutoReleaseSeconds) }
+    }
+
+    /// When true, a long-press on a modifier chip locks it (sticky).
+    /// When false, modifiers always behave as momentary.
+    @Published var stickyModifierOnLongPress: Bool {
+        didSet { defaults.set(stickyModifierOnLongPress, forKey: keys.stickyModifierOnLongPress) }
+    }
+
+    /// User-positioned anchor for the floating stats HUD chip.
+    @Published var statsHUDAnchor: CGPoint {
+        didSet {
+            defaults.set(Double(statsHUDAnchor.x), forKey: keys.statsHUDAnchorX)
+            defaults.set(Double(statsHUDAnchor.y), forKey: keys.statsHUDAnchorY)
+        }
+    }
+
+    /// When true the stats HUD shows only the FPS chip.
+    @Published var statsHUDCollapsed: Bool {
+        didSet { defaults.set(statsHUDCollapsed, forKey: keys.statsHUDCollapsed) }
+    }
+
     private let defaults: UserDefaults
     private let keys: PreferenceKeys
 
@@ -215,6 +242,28 @@ final class ViewerControlPreferences: ObservableObject {
         preferredKeyboardMode = ViewerKeyboardInputMode(rawValue: defaults.string(forKey: keys.keyboardMode, fallbackKey: PreferenceKeys.global.keyboardMode) ?? "") ?? .unicode
         toolbarItems = Self.sanitizedToolbarItems(defaults.stringArray(forKey: keys.toolbarItems) ?? defaults.stringArray(forKey: PreferenceKeys.global.toolbarItems))
         hiddenToolbarItems = Self.sanitizedHiddenToolbarItems(defaults.stringArray(forKey: keys.hiddenToolbarItems) ?? defaults.stringArray(forKey: PreferenceKeys.global.hiddenToolbarItems))
+
+        // Phase 3 prefs
+        modifierAutoReleaseSeconds = defaults.double(
+            forKey: keys.modifierAutoReleaseSeconds,
+            fallbackKey: PreferenceKeys.global.modifierAutoReleaseSeconds
+        ) ?? 4.0
+        if let stickyOverride = defaults.bool(
+            forKey: keys.stickyModifierOnLongPress,
+            fallbackKey: PreferenceKeys.global.stickyModifierOnLongPress
+        ) {
+            stickyModifierOnLongPress = stickyOverride
+        } else {
+            stickyModifierOnLongPress = true
+        }
+        statsHUDAnchor = CGPoint(
+            x: defaults.double(forKey: keys.statsHUDAnchorX, fallbackKey: PreferenceKeys.global.statsHUDAnchorX) ?? 0,
+            y: defaults.double(forKey: keys.statsHUDAnchorY, fallbackKey: PreferenceKeys.global.statsHUDAnchorY) ?? 0
+        )
+        statsHUDCollapsed = defaults.bool(
+            forKey: keys.statsHUDCollapsed,
+            fallbackKey: PreferenceKeys.global.statsHUDCollapsed
+        ) ?? false
     }
 
     func isToolbarItemVisible(_ item: ViewerToolbarItem) -> Bool {
@@ -281,6 +330,11 @@ final class ViewerControlPreferences: ObservableObject {
         let keyboardMode: String
         let toolbarItems: String
         let hiddenToolbarItems: String
+        let modifierAutoReleaseSeconds: String
+        let stickyModifierOnLongPress: String
+        let statsHUDAnchorX: String
+        let statsHUDAnchorY: String
+        let statsHUDCollapsed: String
 
         init(scope: ViewerControlPreferenceScope?) {
             if let scope {
@@ -305,6 +359,11 @@ final class ViewerControlPreferences: ObservableObject {
             keyboardMode = "\(prefix).keyboardMode"
             toolbarItems = "\(prefix).toolbarItems"
             hiddenToolbarItems = "\(prefix).hiddenToolbarItems"
+            modifierAutoReleaseSeconds = "\(prefix).modifierAutoReleaseSeconds"
+            stickyModifierOnLongPress  = "\(prefix).stickyModifierOnLongPress"
+            statsHUDAnchorX            = "\(prefix).statsHUDAnchorX"
+            statsHUDAnchorY            = "\(prefix).statsHUDAnchorY"
+            statsHUDCollapsed          = "\(prefix).statsHUDCollapsed"
         }
     }
 }

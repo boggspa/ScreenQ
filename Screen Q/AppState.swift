@@ -240,12 +240,14 @@ final class AppState: ObservableObject {
             localDeviceID: id
         )
         self.iCloudSync.objectWillChange
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
         #if os(macOS)
         self.macHost.configure(app: self)
         self.macHost.objectWillChange
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
         #endif

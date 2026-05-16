@@ -702,7 +702,7 @@ struct ShareTargetPickerContent: View {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(sections) { section in
                     Text(section.kind.pickerLabel)
-                        .font(.caption.weight(.semibold))
+                        .font(.sqCaption)
                         .foregroundColor(.secondary)
                         .textCase(.uppercase)
                         .padding(.horizontal, 14)
@@ -720,12 +720,14 @@ struct ShareTargetPickerContent: View {
                                 Image(systemName: target.kind.pickerIcon)
                                     .font(.system(size: 15, weight: .semibold))
                                     .frame(width: 22)
+                                    .accessibilityHidden(true)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(target.name)
+                                        .font(.sqBody)
                                         .lineLimit(1)
                                     if let detail = target.detail, !detail.isEmpty {
                                         Text(detail)
-                                            .font(.caption)
+                                            .font(.sqCaption)
                                             .foregroundColor(.secondary)
                                             .lineLimit(1)
                                     }
@@ -734,7 +736,8 @@ struct ShareTargetPickerContent: View {
                                 if target.id == session.activeShareTargetID {
                                     Image(systemName: "checkmark")
                                         .font(.system(size: 13, weight: .semibold))
-                                        .foregroundColor(.accentColor)
+                                        .foregroundColor(ScreenQTheme.cosmicCyan)
+                                        .accessibilityLabel("Selected")
                                 }
                             }
                             .padding(.horizontal, 14)
@@ -813,6 +816,9 @@ struct RemoteScreenView: View {
     @State private var viewport: ViewportTransform = .identity
     @State private var lastCanvasSize: CGSize = .zero
     @State private var lastMagnificationScale: CGFloat = 1.0
+    @State private var sessionStartedAt: Date?
+    @State private var peakSessionFPS: Double = 0
+    @State private var summaryStats: SessionSummarySheet.Stats?
     #if os(iOS)
     @State private var controlsVisible = true
     @State private var zoomHUDScale: CGFloat?
@@ -844,9 +850,15 @@ struct RemoteScreenView: View {
         .onChange(of: session.phase) { _ in
             applyStreamControls()
             stopRecordingIfSessionInactive()
+            handlePhaseChange(session.phase)
         }
         .onChange(of: session.activeShareTargetID) { _ in
             resetViewport()
+        }
+        .onChange(of: stats.fps) { newFPS in
+            if newFPS > peakSessionFPS {
+                peakSessionFPS = newFPS
+            }
         }
         .onReceive(renderer.$currentImage.compactMap { $0 }.throttle(for: .seconds(5), scheduler: RunLoop.main, latest: true)) { image in
             app.savedConnections.updateThumbnail(
@@ -865,69 +877,113 @@ struct RemoteScreenView: View {
                 recorder.stop()
             }
         }
+        .sheet(item: $summaryStats) { stats in
+            SessionSummarySheet(
+                stats: stats,
+                isAlreadySaved: isConnectionAlreadySaved,
+                onConnectAgain: { reconnectFromSummary() },
+                onSaveToFavorites: isConnectionAlreadySaved ? nil : { saveConnectionToFavorites() },
+                onDismiss: {
+                    summaryStats = nil
+                    onDisconnect()
+                }
+            )
+        }
     }
 
     @ViewBuilder
     private var content: some View {
         switch session.phase {
         case .handshake, .connecting:
-            ProgressView("Connecting to \(session.peerLabel)…")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            CinematicSessionScreen(
+                kind: .progress,
+                title: "Reaching \(session.peerLabel)",
+                subtitle: "Negotiating an encrypted Screen Q session…",
+                primaryButton: nil,
+                secondaryButton: CinematicSessionScreen.ButtonSpec(
+                    title: "Cancel",
+                    systemImage: "xmark",
+                    style: .ghost,
+                    action: onDisconnect
+                )
+            )
         case .awaitingPairingCode:
             pairingForm
         case .awaitingHostApproval:
-            ProgressView("Waiting for host approval…")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            CinematicSessionScreen(
+                kind: .progress,
+                title: "Waiting for host approval",
+                subtitle: "We've sent your request to \(session.peerLabel). Approve the connection on the host Mac to continue.",
+                primaryButton: nil,
+                secondaryButton: CinematicSessionScreen.ButtonSpec(
+                    title: "Cancel",
+                    systemImage: "xmark",
+                    style: .ghost,
+                    action: onDisconnect
+                )
+            )
         case .approved, .streaming, .viewOnly:
             screenCanvas
         case .failed(let r):
-            VStack(spacing: 12) {
-                Image(systemName: "xmark.octagon")
-                    .font(.system(size: 40))
-                    .foregroundColor(.red)
-                Text("Session failed").font(.title3)
-                Text(r).foregroundColor(.secondary)
-                Button("Disconnect") { onDisconnect() }
-                    .buttonStyle(.bordered)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding()
+            CinematicSessionScreen(
+                kind: .failure,
+                title: "Session failed",
+                subtitle: r,
+                primaryButton: CinematicSessionScreen.ButtonSpec(
+                    title: "Disconnect",
+                    systemImage: "xmark.circle",
+                    style: .destructive,
+                    action: onDisconnect
+                ),
+                secondaryButton: nil
+            )
         case .ended(let r):
-            VStack(spacing: 12) {
-                Image(systemName: "checkmark.circle")
-                    .font(.system(size: 40))
-                    .foregroundColor(.secondary)
-                Text("Session ended")
-                Text(r).foregroundColor(.secondary)
-                Button("Back") { onDisconnect() }
-                    .buttonStyle(.bordered)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding()
+            CinematicSessionScreen(
+                kind: .ended,
+                title: "Session ended",
+                subtitle: r,
+                primaryButton: CinematicSessionScreen.ButtonSpec(
+                    title: "Back",
+                    systemImage: "arrow.backward",
+                    style: .filled,
+                    action: onDisconnect
+                ),
+                secondaryButton: nil
+            )
         case .idle, .advertising, .browsing:
-            ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            CinematicSessionScreen(
+                kind: .progress,
+                title: "Preparing…",
+                subtitle: nil,
+                primaryButton: nil,
+                secondaryButton: nil
+            )
         }
     }
 
     private var statusBar: some View {
         HStack(spacing: 10) {
-            HStack(spacing: 6) {
-                Image(systemName: statusSymbol)
-                    .foregroundColor(statusColor)
+            HStack(spacing: 8) {
+                LiveStatusDot(color: statusColor, active: session.phase.isActive)
                 Text(session.phase.humanDescription)
-                    .font(.subheadline)
+                    .font(.sqCallout.weight(.semibold))
+                    .foregroundColor(.white)
                     .lineLimit(1)
+
                 if session.phase.isActive && session.encryptionStatusKnown {
-                    Text(session.encryptionEnabled ? "Encrypted" : "Unencrypted")
-                        .font(.caption.bold())
-                        .foregroundColor(session.encryptionEnabled ? .green : .orange)
-                        .lineLimit(1)
+                    SessionStatusBadge(
+                        label: session.encryptionEnabled ? "Encrypted" : "Unencrypted",
+                        systemImage: session.encryptionEnabled ? "lock.fill" : "lock.open.fill",
+                        tint: session.encryptionEnabled ? ScreenQTheme.cosmicMint : ScreenQTheme.cosmicAmber
+                    )
                 }
+
                 if recorder.isRecording {
-                    Label(recordingDurationLabel, systemImage: "record.circle.fill")
-                        .font(.caption.bold())
-                        .foregroundColor(.red)
-                        .lineLimit(1)
+                    SessionStatusBadge(
+                        label: recordingDurationLabel,
+                        systemImage: "record.circle.fill",
+                        tint: ScreenQTheme.cosmicRose
+                    )
                 }
             }
             .fixedSize(horizontal: true, vertical: false)
@@ -941,7 +997,22 @@ struct RemoteScreenView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .background(Color.black.opacity(0.6))
+        .background(
+            LinearGradient(
+                colors: [
+                    Color.black.opacity(0.78),
+                    Color.black.opacity(0.55)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
+        .overlay(
+            Rectangle()
+                .fill(Color.white.opacity(0.06))
+                .frame(height: 0.5),
+            alignment: .bottom
+        )
     }
 
     private var statsView: some View {
@@ -958,8 +1029,8 @@ struct RemoteScreenView: View {
             }
             .fixedSize(horizontal: true, vertical: false)
         }
-        .font(.caption.monospacedDigit())
-        .foregroundColor(.secondary)
+        .font(.sqCaption.monospacedDigit())
+        .foregroundColor(.white.opacity(0.72))
         .frame(minHeight: 18, maxHeight: 22)
     }
 
@@ -995,9 +1066,9 @@ struct RemoteScreenView: View {
     }
     private var statusColor: Color {
         switch session.phase {
-        case .streaming, .approved: return .green
-        case .viewOnly: return .blue
-        case .failed: return .red
+        case .streaming, .approved: return ScreenQTheme.cosmicMint
+        case .viewOnly: return ScreenQTheme.cosmicCyan
+        case .failed: return ScreenQTheme.cosmicRose
         default: return .secondary
         }
     }
@@ -1010,16 +1081,18 @@ struct RemoteScreenView: View {
                 Image(systemName: controlPreferences.toolbarCondensed ? "plus" : "minus")
             }
             .help(controlPreferences.toolbarCondensed ? "Expand toolbar" : "Condense toolbar")
+            .accessibilityLabel(controlPreferences.toolbarCondensed ? "Expand toolbar" : "Condense toolbar")
 
             if !controlPreferences.toolbarCondensed {
                 expandedToolbarButtons
             }
 
-            Button { onDisconnect() } label: {
+            Button { handleDisconnect() } label: {
                 Image(systemName: "xmark.circle")
-                    .foregroundColor(.red)
+                    .foregroundColor(ScreenQTheme.cosmicRose)
             }
             .help("Disconnect")
+            .accessibilityLabel("Disconnect")
         }
     }
 
@@ -1031,11 +1104,13 @@ struct RemoteScreenView: View {
             } label: {
                 Image(systemName: showStats ? "info.circle.fill" : "info.circle")
             }
+            .accessibilityLabel(showStats ? "Hide stats" : "Show stats")
             Button {
                 session.fitMode.toggle()
             } label: {
                 Image(systemName: session.fitMode ? "rectangle.arrowtriangle.2.outward" : "rectangle.arrowtriangle.2.inward")
             }
+            .accessibilityLabel(session.fitMode ? "Fill screen" : "Fit to screen")
             StreamQualityButton(
                 quality: $controlPreferences.streamQuality,
                 profile: $controlPreferences.streamProfile,
@@ -1051,6 +1126,7 @@ struct RemoteScreenView: View {
                 Image(systemName: controlPreferences.showCursorOverlay ? "cursorarrow.rays" : "eye.slash")
             }
             .help(controlPreferences.showCursorOverlay ? "Hide overlay cursor" : "Show overlay cursor")
+            .accessibilityLabel(controlPreferences.showCursorOverlay ? "Hide overlay cursor" : "Show overlay cursor")
             #if os(iOS)
             if !viewport.isIdentity {
                 Button {
@@ -1058,6 +1134,7 @@ struct RemoteScreenView: View {
                 } label: {
                     Image(systemName: "minus.magnifyingglass")
                 }
+                .accessibilityLabel("Reset zoom")
             }
             #endif
 
@@ -1079,6 +1156,7 @@ struct RemoteScreenView: View {
                 } label: {
                     Image(systemName: "display.2")
                 }
+                .accessibilityLabel("Displays")
             }
 
             if session.shareTargets.count > 1 {
@@ -1088,6 +1166,7 @@ struct RemoteScreenView: View {
                     Image(systemName: "rectangle.on.rectangle")
                 }
                 .help("Share target")
+                .accessibilityLabel("Share target")
                 .popover(isPresented: $showShareTargetPicker) {
                     ShareTargetPickerContent(session: session) {
                         showShareTargetPicker = false
@@ -1113,6 +1192,7 @@ struct RemoteScreenView: View {
             } label: {
                 Image(systemName: touchMode.icon)
             }
+            .accessibilityLabel("Touch mode")
             #endif
 
             Menu {
@@ -1122,6 +1202,7 @@ struct RemoteScreenView: View {
             } label: {
                 Image(systemName: "command.square")
             }
+            .accessibilityLabel("Special keys")
 
             #if os(iOS)
             Button {
@@ -1129,12 +1210,14 @@ struct RemoteScreenView: View {
             } label: {
                 Image(systemName: isKeyboardActive ? "keyboard.chevron.compact.down" : "keyboard")
             }
+            .accessibilityLabel(isKeyboardActive ? "Hide keyboard" : "Show keyboard")
             #else
             Button {
                 showKeyboardEntry.toggle()
             } label: {
                 Image(systemName: "keyboard")
             }
+            .accessibilityLabel("Show keyboard")
 
             #if os(macOS)
             Button {
@@ -1142,6 +1225,7 @@ struct RemoteScreenView: View {
             } label: {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
             }
+            .accessibilityLabel("Toggle full screen")
             #endif
             #endif
         }
@@ -1149,39 +1233,27 @@ struct RemoteScreenView: View {
 
     private var recordingButton: some View {
         Button {
+            SQHaptics.tap()
             toggleRecording()
         } label: {
             Image(systemName: recorder.isRecording ? "stop.circle.fill" : "record.circle")
-                .foregroundColor(recorder.isRecording ? .red : .primary)
+                .foregroundColor(recorder.isRecording ? ScreenQTheme.cosmicRose : .primary)
         }
         .disabled(!recorder.isRecording && !canStartRecording)
         .help(recorder.isRecording ? "Stop recording" : "Record session")
+        .accessibilityLabel(recorder.isRecording ? "Stop recording" : "Record session")
     }
 
     @ViewBuilder
     private var pairingForm: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "lock.shield")
-                .font(.system(size: 36))
-                .foregroundColor(.accentColor)
-            Text("Enter the 6-digit pairing code shown on \(session.peerLabel).")
-                .multilineTextAlignment(.center)
-            TextField("123456", text: $session.pairingPrompt)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 220)
-                .font(.system(.title3, design: .monospaced))
-                #if os(iOS)
-                .keyboardType(.numberPad)
-                .textContentType(.oneTimeCode)
-                #endif
-            Button("Send pairing request") {
+        CinematicSessionPairingScreen(
+            peerLabel: session.peerLabel,
+            pairingPrompt: $session.pairingPrompt,
+            onSubmit: {
                 Task { await session.sendPairingRequest() }
-            }
-            .buttonStyle(.bordered)
-            .disabled(session.pairingPrompt.count != 6)
-        }
-        .padding(40)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+            },
+            onCancel: onDisconnect
+        )
     }
 
     @ViewBuilder
@@ -1197,8 +1269,20 @@ struct RemoteScreenView: View {
                         .gesture(dragGesture(in: proxy.size))
                     #endif
                 } else {
-                    ProgressView("Waiting for first frame…")
-                        .foregroundColor(.white)
+                    VStack(spacing: 14) {
+                        ScreenQBrandMark(size: 56)
+                        Text("Preparing the stream")
+                            .font(.sqHeadline)
+                            .foregroundColor(.white)
+                        Text("Waiting for the first frame from \(session.peerLabel)…")
+                            .font(.sqCaption)
+                            .foregroundColor(.white.opacity(0.65))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 32)
+                        ScreenQActivityTrail(tint: .white)
+                            .padding(.top, 6)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 if controlPreferences.showCursorOverlay {
                     CursorOverlayView(
@@ -1248,7 +1332,7 @@ struct RemoteScreenView: View {
                     controlsVisible: $controlsVisible,
                     viewport: viewport,
                     resetViewport: resetViewport,
-                    onDisconnect: onDisconnect
+                    onDisconnect: handleDisconnect
                 )
                 #endif
                 #if os(macOS)
@@ -1534,6 +1618,98 @@ struct RemoteScreenView: View {
         }
     }
 
+    // MARK: - Disconnect summary
+
+    private func handlePhaseChange(_ phase: SessionState) {
+        switch phase {
+        case .approved, .streaming, .viewOnly:
+            if sessionStartedAt == nil {
+                sessionStartedAt = Date()
+                peakSessionFPS = 0
+            }
+        case .ended:
+            // Natural end — host or peer closed the connection. Capture
+            // the summary so the user sees totals before the view tears
+            // down. `failed` doesn't show a summary because the cinematic
+            // failure screen already owns that surface.
+            presentSummaryIfActive()
+        default:
+            break
+        }
+    }
+
+    /// Called when the user explicitly taps Disconnect during an active
+    /// session. Captures stats, shows the summary sheet, and tears down
+    /// the transport. The hub navigation happens on sheet dismiss.
+    private func handleDisconnect() {
+        if let stats = currentSummaryStats() {
+            summaryStats = stats
+            Task { await session.tearDown(reason: "Viewer disconnected") }
+        } else {
+            // Session never streamed — skip the summary, exit immediately.
+            onDisconnect()
+        }
+    }
+
+    private func presentSummaryIfActive() {
+        guard summaryStats == nil, let stats = currentSummaryStats() else { return }
+        summaryStats = stats
+    }
+
+    private func currentSummaryStats() -> SessionSummarySheet.Stats? {
+        guard let started = sessionStartedAt else { return nil }
+        let duration = Date().timeIntervalSince(started)
+        let bytesIn = UInt64(max(0, stats.totalBytes))
+        let avgRTT = stats.roundTripMillis > 0 ? stats.roundTripMillis : nil
+        let peak = peakSessionFPS > 0 ? peakSessionFPS : nil
+        return SessionSummarySheet.Stats(
+            duration: duration,
+            bytesIn: bytesIn,
+            bytesOut: 0,
+            averageRTT: avgRTT,
+            peakFPS: peak,
+            protocolName: "Screen Q",
+            hostDisplayName: session.peerLabel
+        )
+    }
+
+    private var isConnectionAlreadySaved: Bool {
+        let host = session.controlPreferenceScope.host
+        let port = session.controlPreferenceScope.port
+        return app.savedConnections.connections.contains { entry in
+            entry.host.caseInsensitiveCompare(host) == .orderedSame &&
+            entry.port == port &&
+            entry.resolvedProtocol == .screenQ
+        }
+    }
+
+    private func saveConnectionToFavorites() {
+        let host = session.controlPreferenceScope.host
+        let port = session.controlPreferenceScope.port
+        guard !host.isEmpty else { return }
+        app.savedConnections.addOrUpdate(
+            host: host,
+            port: port,
+            displayName: session.peerLabel,
+            connectionProtocol: .screenQ,
+            source: .manual,
+            isBookmark: true
+        )
+    }
+
+    private func reconnectFromSummary() {
+        let host = session.controlPreferenceScope.host
+        let port = session.controlPreferenceScope.port
+        guard !host.isEmpty else { return }
+        let pending: PendingViewerConnection = .manual(
+            host: host,
+            port: port,
+            displayName: session.peerLabel,
+            connectionProtocol: .screenQ
+        )
+        app.requestViewerConnection(pending)
+    }
+
     #if os(iOS)
     private func sendViewportHint(
         canvasSize: CGSize,
@@ -1558,28 +1734,31 @@ struct RemoteScreenView: View {
 
     private func zoomHUD(scale: CGFloat) -> some View {
         Text("\(Int((scale * 100).rounded()))%")
-            .font(.caption.monospacedDigit().bold())
+            .font(.sqCaption.monospacedDigit())
+            .foregroundColor(.white)
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(.ultraThinMaterial)
-            .clipShape(Capsule())
+            .background(Capsule().fill(Color.black.opacity(0.55)))
+            .overlay(Capsule().stroke(ScreenQTheme.cosmicCyan.opacity(0.55), lineWidth: 0.5))
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .padding(.top, 12)
             .allowsHitTesting(false)
     }
 
     private func dragFeedbackOverlay(_ feedback: IOSDragFeedback) -> some View {
-        let color: Color = feedback.kind == .right ? .orange : .accentColor
+        let color: Color = feedback.kind == .right ? ScreenQTheme.cosmicAmber : ScreenQTheme.cosmicCyan
         return ZStack {
             Circle()
                 .stroke(color, lineWidth: 2)
                 .frame(width: 44, height: 44)
             Image(systemName: feedback.kind == .right ? "contextualmenu.and.cursorarrow" : "cursorarrow.motionlines")
-                .font(.caption.bold())
+                .font(.sqCaption.bold())
                 .foregroundStyle(color)
+                .accessibilityHidden(true)
         }
         .position(feedback.point)
         .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
     #endif
 
@@ -1600,7 +1779,7 @@ struct RemoteScreenView: View {
             }
         }
         .padding(12)
-        .background(Color.black.opacity(0.6)).clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .screenQGlass(cornerRadius: 12)
     }
     #endif
 }

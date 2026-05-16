@@ -60,10 +60,11 @@ final class MacInputInjectionService: ObservableObject {
     }
 
     /// True only if every gate is open: enabled, not view-only, accessibility,
-    /// and a selected display exists.
+    /// and a selected display exists. The accessibility flag is kept fresh
+    /// by `MacPermissionsService`'s polling timer + app-activation hooks,
+    /// so we don't force a TCC read on every input event.
     var canInject: Bool {
-        permissions.refresh()
-        return enabled && !viewOnly && permissions.accessibilityGranted && currentDisplayBounds() != nil
+        enabled && !viewOnly && permissions.accessibilityGranted && currentDisplayBounds() != nil
     }
 
     func handle(
@@ -125,8 +126,7 @@ final class MacInputInjectionService: ObservableObject {
     }
 
     private func canInject(displayID: CGDirectDisplayID?, inputConstraint: CaptureInputConstraint?) -> Bool {
-        permissions.refresh()
-        return enabled &&
+        enabled &&
             !viewOnly &&
             permissions.accessibilityGranted &&
             (inputConstraint?.mappingFrame != nil || currentDisplayBounds(displayID: displayID) != nil)

@@ -519,9 +519,24 @@ final class SavedConnectionsStore: ObservableObject {
         }) ?? connections.firstIndex(where: { $0.host == host && $0.port == port }) else {
             return
         }
+        let connectionID = connections[idx].id
         connections[idx].displayName = displayName
         connections[idx].thumbnailData = thumbnailData
         connections[idx].thumbnailUpdatedAt = Date()
+        save()
+        // Mirror into the disk-backed cache so callers that prefer the
+        // out-of-band path (e.g. a richer JPEG) can read it without paging
+        // the entire connections array out of UserDefaults.
+        SavedConnectionThumbnailCache.shared.store(jpeg: thumbnailData, for: connectionID)
+    }
+
+    /// Stamps the thumbnail-updated timestamp on the connection with the given id.
+    /// Used after the disk-backed `SavedConnectionThumbnailCache` writes a
+    /// frame, so the UI can show a "Live" badge when the capture is fresh.
+    func updateThumbnailDate(_ id: UUID, to date: Date) {
+        guard let idx = connections.firstIndex(where: { $0.id == id }) else { return }
+        connections[idx].thumbnailUpdatedAt = date
+        connections[idx].updatedAt = Date()
         save()
     }
 
@@ -568,12 +583,14 @@ final class SavedConnectionsStore: ObservableObject {
         deletedConnectionTombstones[id] = Date()
         saveDeletedConnectionTombstones()
         save()
+        SavedConnectionThumbnailCache.shared.remove(id)
     }
 
     func clearRecents() {
         let removed = connections.filter { !$0.isBookmark }
         for connection in removed {
             deletedConnectionTombstones[connection.id] = Date()
+            SavedConnectionThumbnailCache.shared.remove(connection.id)
         }
         connections.removeAll { !$0.isBookmark }
         saveDeletedConnectionTombstones()

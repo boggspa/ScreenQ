@@ -5,6 +5,7 @@
 
 #if os(macOS)
 import AppKit
+import Combine
 import SwiftUI
 
 @MainActor
@@ -26,7 +27,7 @@ final class MacPairingPromptController: NSObject, NSWindowDelegate {
         }
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: request.trustedReconnect ? 310 : 290),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: request.trustedReconnect ? 334 : 314),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -74,6 +75,9 @@ private struct MacPairingPromptView: View {
     let request: PairingRequest
     @ObservedObject var runtime: MacHostRuntime
 
+    @State private var now: Date = Date()
+    private let waitTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
     private var codeMatches: Bool {
         runtime.pairingCodeMatches(request)
     }
@@ -104,6 +108,7 @@ private struct MacPairingPromptView: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 labeledValue("Device", "\(request.viewer.displayName) (\(request.viewer.platform.human))")
+                labeledValue("Waiting", waitText)
                 labeledValue("Permissions", permissionSummary)
                 if let fingerprint = request.identityFingerprint {
                     labeledValue("Identity", "\(fingerprint.prefix(16))...")
@@ -127,6 +132,17 @@ private struct MacPairingPromptView: View {
         }
         .padding(22)
         .frame(width: 460, alignment: .leading)
+        .onReceive(waitTimer) { now = $0 }
+    }
+
+    private var waitText: String {
+        let elapsed = max(0, Int(now.timeIntervalSince(request.receivedAt)))
+        if elapsed < 60 {
+            return "\(elapsed)s"
+        }
+        let minutes = elapsed / 60
+        let seconds = elapsed % 60
+        return "\(minutes)m \(seconds)s"
     }
 
     private var title: String {

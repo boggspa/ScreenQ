@@ -5,6 +5,33 @@
 
 import SwiftUI
 
+/// Embeddable variant for the Settings pane. Owns a `@AppStorage`-backed
+/// quality value and a session-less stream profile so the existing
+/// `StreamQualityPanel` UI can render as a stand-alone preference editor.
+/// Default tuning is sourced from `StreamQualityPreference.defaultQuality`.
+struct StreamQualityPanelDefaults: View {
+
+    @AppStorage("ScreenQ.Defaults.StreamQuality")
+    private var storedQuality: Double = StreamQualityPreference.defaultQuality
+    @State private var profile: StreamProfile = StreamQualityPreference().nativeProfile
+    @State private var didHydrateProfile = false
+
+    var body: some View {
+        StreamQualityPanel(
+            quality: $storedQuality,
+            streamProfile: $profile,
+            stats: nil,
+            protocolName: "default",
+            detail: "Applies as the starting point for new sessions. Each active session keeps its own override while connected."
+        )
+        .onAppear {
+            guard !didHydrateProfile else { return }
+            didHydrateProfile = true
+            profile = StreamQualityPreference(quality: storedQuality).nativeProfile
+        }
+    }
+}
+
 struct StreamQualityButton: View {
     @Binding private var quality: Double
     private var profile: Binding<StreamProfile>?
@@ -33,6 +60,9 @@ struct StreamQualityButton: View {
 
     var body: some View {
         Button {
+            #if os(iOS)
+            SQHaptics.tap()
+            #endif
             isPresented = true
         } label: {
             Image(systemName: "slider.horizontal.3")
@@ -55,12 +85,37 @@ struct StreamQualityButton: View {
     }
 }
 
-private struct StreamQualityPanel: View {
+// MARK: - StreamQualityPanel
+
+/// The shared quality / compression / advanced-parameters surface. Hosted
+/// inside `StreamQualityButton`'s popover during a session and embedded in
+/// the unified Settings pane (`SettingsScene.Tab.streamQuality`).
+///
+/// The original session-side initializer takes a `quality:` binding plus
+/// optional `streamProfile`/`stats`/`protocolName`/`detail`. A second,
+/// preference-based convenience init is provided for the Settings pane —
+/// it owns an internal default-quality binding so the surface works as a
+/// standalone preference editor with no live session attached.
+struct StreamQualityPanel: View {
     @Binding var quality: Double
     var streamProfile: Binding<StreamProfile>?
     var stats: TransportStats?
     var protocolName: String
     var detail: String
+
+    init(
+        quality: Binding<Double>,
+        streamProfile: Binding<StreamProfile>? = nil,
+        stats: TransportStats? = nil,
+        protocolName: String,
+        detail: String
+    ) {
+        self._quality = quality
+        self.streamProfile = streamProfile
+        self.stats = stats
+        self.protocolName = protocolName
+        self.detail = detail
+    }
 
     private var preference: StreamQualityPreference {
         StreamQualityPreference(quality: quality)
@@ -73,33 +128,35 @@ private struct StreamQualityPanel: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                header
+                SQSectionHeader("Quality", subtitle: "\(preference.percent)% · \(preference.estimatedBitrateText(protocolName: protocolName))")
 
                 Slider(value: qualityBinding, in: StreamQualityPreference.allowedRange)
-
-                HStack {
-                    Text("Compression")
-                    Spacer()
-                    Text(preference.estimatedBitrateText(protocolName: protocolName))
-                        .foregroundColor(.secondary)
-                }
-                .font(.caption)
+                    .accentColor(ScreenQTheme.cosmicCyan)
+                    .onChange(of: quality) { _ in
+                        #if os(iOS)
+                        SQHaptics.tap()
+                        #endif
+                    }
 
                 summaryRows
 
                 if let stats {
                     StreamLatencyDiagnostics(stats: stats) {
+                        #if os(iOS)
+                        SQHaptics.bump()
+                        #endif
                         applyResponsivePreset()
                     }
                 }
 
                 Text(detail)
-                    .font(.caption)
+                    .font(.sqCaption)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
                 Divider()
 
+                SQSectionHeader("Presets")
                 presetButtons
 
                 Divider()
@@ -107,16 +164,7 @@ private struct StreamQualityPanel: View {
                 advancedControls
             }
         }
-    }
-
-    private var header: some View {
-        HStack {
-            Label("Quality", systemImage: "slider.horizontal.3")
-                .font(.headline)
-            Spacer()
-            Text("\(preference.percent)%")
-                .font(.system(.body, design: .monospaced).bold())
-        }
+        .screenQCard(padding: 14)
     }
 
     private var summaryRows: some View {
@@ -127,7 +175,7 @@ private struct StreamQualityPanel: View {
             profileRow("Detail", effectiveProfile.usesViewportAwareDetail ? "Viewport-aware" : "Full-frame")
             profileRow("Ceiling", "\(formatMbps(effectiveProfile.maxBitrate)) / \(effectiveProfile.targetFPS) fps")
         }
-        .font(.caption)
+        .font(.sqCaption)
     }
 
     private var presetButtons: some View {
@@ -200,7 +248,7 @@ private struct StreamQualityPanel: View {
                 Toggle("Prefer Hardware Encoder", isOn: profileBinding(\.prefersHardwareAcceleration, markCustom: false))
 
                 Text("Native Screen Q applies bitrate, FPS, scaling, codec preference, keyframe interval, JPEG fallback quality, adaptive mode, viewport-aware detail, and hardware preference. VNC and RDP currently apply the viewer-side cadence and rendering limits they expose.")
-                    .font(.caption2)
+                    .font(.sqCaption)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -223,8 +271,9 @@ private struct StreamQualityPanel: View {
                 Text(valueText)
                     .foregroundColor(.secondary)
             }
-            .font(.caption)
+            .font(.sqCaption)
             Slider(value: value, in: range, step: step)
+                .accentColor(ScreenQTheme.cosmicCyan)
         }
     }
 
@@ -372,11 +421,36 @@ private struct StreamQualityPanel: View {
     }
 
     private func qualityPresetButton(_ title: String, value: Double) -> some View {
-        Button(title) {
+        let isSelected = abs(quality - value) < 0.02
+        return Button {
+            #if os(iOS)
+            SQHaptics.tap()
+            #endif
             applyPresetQuality(value, modeOverride: modeForPresetValue(value))
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 10, weight: .bold))
+                    .accessibilityHidden(true)
+                Text(title)
+                    .font(.sqCaption)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity)
+            .foregroundColor(isSelected ? .white : ScreenQTheme.cosmicCyan)
+            .background(
+                Capsule().fill(
+                    isSelected
+                        ? ScreenQTheme.cosmicCyan
+                        : ScreenQTheme.cosmicCyan.opacity(0.15)
+                )
+            )
+            .overlay(
+                Capsule().stroke(ScreenQTheme.cosmicCyan.opacity(isSelected ? 0 : 0.45), lineWidth: 0.5)
+            )
         }
-        .buttonStyle(.bordered)
-        .frame(maxWidth: .infinity)
+        .buttonStyle(.plain)
     }
 
     private func modeForPresetValue(_ value: Double) -> StreamOptimizationMode {
@@ -393,11 +467,28 @@ private struct StreamQualityPanel: View {
     }
 
     private var responsivePresetButton: some View {
-        Button("Responsive") {
+        Button {
+            #if os(iOS)
+            SQHaptics.bump()
+            #endif
             applyResponsivePreset()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "bolt.fill")
+                    .font(.system(size: 10, weight: .bold))
+                    .accessibilityHidden(true)
+                Text("Responsive")
+                    .font(.sqCaption)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity)
+            .foregroundColor(.white)
+            .background(
+                Capsule().fill(ScreenQTheme.accent(ScreenQTheme.cosmicAmber))
+            )
         }
-        .buttonStyle(.bordered)
-        .frame(maxWidth: .infinity)
+        .buttonStyle(.plain)
     }
 
     private func profileRow(_ title: String, _ value: String) -> some View {
@@ -422,10 +513,9 @@ private struct StreamLatencyDiagnostics: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Label("Live latency", systemImage: "timer")
-                    .font(.caption.weight(.semibold))
+                    .font(.sqCaption)
                 Spacer()
-                Text(statusText)
-                    .foregroundColor(statusColor)
+                SQPill(text: statusText, status: statusKind, compact: true)
             }
 
             metricRow("Frame delay", formatMillis(stats.frameLatencyMillis))
@@ -438,15 +528,25 @@ private struct StreamLatencyDiagnostics: View {
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 8)
-                    Button("Apply Responsive") {
+                    Button {
+                        #if os(iOS)
+                        SQHaptics.bump()
+                        #endif
                         applyResponsivePreset()
+                    } label: {
+                        Text("Apply Responsive")
+                            .font(.sqCaption)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .foregroundColor(.white)
+                            .background(Capsule().fill(ScreenQTheme.cosmicAmber))
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.plain)
                 }
                 .padding(.top, 2)
             }
         }
-        .font(.caption)
+        .font(.sqCaption)
     }
 
     private var observedLatency: Double {
@@ -460,11 +560,11 @@ private struct StreamLatencyDiagnostics: View {
         return "High"
     }
 
-    private var statusColor: Color {
-        guard observedLatency > 0 else { return .secondary }
-        if observedLatency < 80 { return .green }
-        if observedLatency < 160 { return .orange }
-        return .red
+    private var statusKind: SQStatus {
+        guard observedLatency > 0 else { return .muted }
+        if observedLatency < 80 { return .healthy }
+        if observedLatency < 160 { return .attention }
+        return .error
     }
 
     private var shouldSuggestResponsive: Bool {
@@ -479,7 +579,7 @@ private struct StreamLatencyDiagnostics: View {
             Spacer()
             Text(value)
                 .foregroundColor(.secondary)
-                .font(.caption.monospacedDigit())
+                .font(.sqCaption.monospacedDigit())
         }
     }
 

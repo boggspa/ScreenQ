@@ -32,6 +32,9 @@ struct RDPViewerView: View {
     @State private var viewport: ViewportTransform = .identity
     @State private var lastCanvasSize: CGSize = .zero
     @State private var didScheduleInitialControlConfiguration = false
+    @State private var sessionStartedAt: Date?
+    @State private var peakSessionFPS: Double = 0
+    @State private var summaryStats: SessionSummarySheet.Stats?
     @StateObject private var controlPreferences: ViewerControlPreferences
 
     #if os(iOS)
@@ -73,6 +76,7 @@ struct RDPViewerView: View {
                     Image(systemName: showStats ? "info.circle.fill" : "info.circle")
                 }
                 .help(showStats ? "Hide stats" : "Show stats")
+                .accessibilityLabel(showStats ? "Hide stats" : "Show stats")
 
                 Button {
                     session.fitMode.toggle()
@@ -81,6 +85,7 @@ struct RDPViewerView: View {
                     Image(systemName: session.fitMode ? "rectangle.arrowtriangle.2.outward" : "rectangle.arrowtriangle.2.inward")
                 }
                 .help(session.fitMode ? "Fill viewer" : "Fit to viewer")
+                .accessibilityLabel(session.fitMode ? "Fill viewer" : "Fit to viewer")
 
                 StreamQualityButton(
                     quality: $controlPreferences.streamQuality,
@@ -98,6 +103,7 @@ struct RDPViewerView: View {
                     Image(systemName: controlPreferences.showCursorOverlay ? "cursorarrow.rays" : "eye.slash")
                 }
                 .help(controlPreferences.showCursorOverlay ? "Hide overlay cursor" : "Show overlay cursor")
+                .accessibilityLabel(controlPreferences.showCursorOverlay ? "Hide overlay cursor" : "Show overlay cursor")
 
                 Button {
                     showKeyboardEntry.toggle()
@@ -105,6 +111,7 @@ struct RDPViewerView: View {
                     Image(systemName: "keyboard")
                 }
                 .help("Send text")
+                .accessibilityLabel("Send text")
 
                 RDPCertificateMenu(session: session)
 
@@ -114,6 +121,7 @@ struct RDPViewerView: View {
                     Image(systemName: app.viewerFocusMode ? "sidebar.left" : "rectangle.inset.filled")
                 }
                 .help(app.viewerFocusMode ? "Show sidebar" : "Focus viewer")
+                .accessibilityLabel(app.viewerFocusMode ? "Show sidebar" : "Focus viewer")
 
                 Button {
                     MacWindowControls.toggleFullScreen()
@@ -121,18 +129,19 @@ struct RDPViewerView: View {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
                 }
                 .help("Enter fullscreen")
+                .accessibilityLabel("Enter fullscreen")
 
                 Button("Disconnect") {
                     disconnect()
                 }
-                .foregroundColor(.red)
+                .foregroundColor(ScreenQTheme.cosmicRose)
             }
             #else
             ToolbarItem(placement: .automatic) {
                 Button("Disconnect") {
                     disconnect()
                 }
-                .foregroundColor(.red)
+                .foregroundColor(ScreenQTheme.cosmicRose)
             }
             #endif
         }
@@ -188,6 +197,12 @@ struct RDPViewerView: View {
         .onChange(of: session.phase) { newPhase in
             syncCredentialFields(from: newPhase)
             stopRecordingIfSessionInactive()
+            handlePhaseChange(newPhase)
+        }
+        .onChange(of: stats.fps) { newFPS in
+            if newFPS > peakSessionFPS {
+                peakSessionFPS = newFPS
+            }
         }
         .onReceive(session.$currentImage.compactMap { $0 }.throttle(for: .seconds(5), scheduler: RunLoop.main, latest: true)) { image in
             app.savedConnections.updateThumbnail(
@@ -206,14 +221,30 @@ struct RDPViewerView: View {
                 recorder.stop()
             }
         }
+        .sheet(item: $summaryStats) { stats in
+            SessionSummarySheet(
+                stats: stats,
+                isAlreadySaved: isConnectionAlreadySaved,
+                onConnectAgain: { reconnectFromSummary() },
+                onSaveToFavorites: isConnectionAlreadySaved ? nil : { saveConnectionToFavorites() },
+                onDismiss: {
+                    summaryStats = nil
+                    onDisconnect()
+                }
+            )
+        }
     }
 
     @ViewBuilder
     private var contentContainer: some View {
-        if case .connected = session.phase {
+        switch session.phase {
+        case .connected:
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
+        case .preflighting, .connecting, .ended, .failed, .engineUnavailable:
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        default:
             content
                 .frame(maxWidth: 520)
                 .padding(24)
@@ -224,122 +255,170 @@ struct RDPViewerView: View {
     private var content: some View {
         switch session.phase {
         case .preflighting:
-            VStack(spacing: 12) {
-                ProgressView()
-                Text("Checking RDP endpoint...")
-                    .font(.headline)
-                Text(session.profile.address)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                securityBadge
-            }
+            CinematicSessionScreen(
+                kind: .progress,
+                title: "Checking RDP endpoint",
+                subtitle: session.profile.address,
+                detail: securityDetailText,
+                primaryButton: nil,
+                secondaryButton: CinematicSessionScreen.ButtonSpec(
+                    title: "Cancel",
+                    systemImage: "xmark",
+                    style: .ghost,
+                    action: { disconnect() }
+                )
+            )
 
         case .credentialsRequired:
             VStack(spacing: 14) {
                 Image(systemName: "person.badge.key")
                     .font(.system(size: 42))
-                    .foregroundColor(.accentColor)
+                    .foregroundColor(ScreenQTheme.cosmicAmber)
+                    .accessibilityHidden(true)
                 Text("Windows Credentials Required")
-                    .font(.headline)
+                    .font(.sqTitle)
                 Text(credentialPromptMessage)
-                    .font(.body)
+                    .font(.sqBody)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
                 profileSummary
-                Button("Enter Credentials") {
+                Button {
+                    SQHaptics.tap()
                     syncCredentialFields(from: session.phase)
+                } label: {
+                    Label("Enter Credentials", systemImage: "key.fill")
+                        .font(.sqHeadline)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 9)
+                        .foregroundColor(.white)
+                        .background(Capsule().fill(ScreenQTheme.accent(ScreenQTheme.cosmicAmber)))
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
             }
+            .screenQCard(tint: ScreenQTheme.cosmicAmber)
 
         case .connecting:
-            VStack(spacing: 12) {
-                ProgressView()
-                Text("Starting RDP session...")
-                    .font(.headline)
-                Text(session.profile.address)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                securityBadge
-            }
+            CinematicSessionScreen(
+                kind: .progress,
+                title: "Starting RDP session",
+                subtitle: session.profile.address,
+                detail: securityDetailText,
+                primaryButton: nil,
+                secondaryButton: CinematicSessionScreen.ButtonSpec(
+                    title: "Cancel",
+                    systemImage: "xmark",
+                    style: .ghost,
+                    action: { disconnect() }
+                )
+            )
 
         case .certificateTrustRequired:
             VStack(spacing: 14) {
                 Image(systemName: "lock.trianglebadge.exclamationmark")
                     .font(.system(size: 42))
-                    .foregroundColor(.orange)
+                    .foregroundColor(ScreenQTheme.cosmicAmber)
+                    .accessibilityHidden(true)
                 Text("Review Windows Certificate")
-                    .font(.headline)
+                    .font(.sqTitle)
                 Text("The RDP engine needs a certificate trust decision before sending credentials.")
-                    .font(.body)
+                    .font(.sqBody)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
                 securityBadge
             }
+            .screenQCard(tint: ScreenQTheme.cosmicAmber)
 
         case .connected:
             rdpCanvas
 
         case .engineUnavailable(let detail):
-            VStack(spacing: 14) {
-                Image(systemName: "display.trianglebadge.exclamationmark")
-                    .font(.system(size: 42))
-                    .foregroundColor(.orange)
-                Text("Native RDP Engine Not Linked")
-                    .font(.headline)
-                Text(detail)
-                    .font(.body)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                profileSummary
-                securityBadge
-                Button("Done") { onDisconnect() }
-                    .buttonStyle(.bordered)
-            }
+            CinematicSessionScreen(
+                kind: .failure,
+                title: "Native RDP Engine Not Linked",
+                subtitle: detail,
+                primaryButton: CinematicSessionScreen.ButtonSpec(
+                    title: "Done",
+                    systemImage: "xmark.circle",
+                    style: .destructive,
+                    action: { onDisconnect() }
+                ),
+                secondaryButton: nil
+            )
 
         case .failed(let reason):
-            VStack(spacing: 14) {
-                Image(systemName: "xmark.octagon")
-                    .font(.system(size: 42))
-                    .foregroundColor(.red)
-                Text("RDP Connection Failed")
-                    .font(.headline)
-                Text(reason)
-                    .font(.body)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                HStack {
-                    if session.hasSavedCredentials {
-                        Button("Forget Saved Login") {
-                            credentialPassword = ""
-                            session.forgetSavedCredentials(message: "Enter a different Windows account allowed to sign in through Remote Desktop on this PC.")
+            ZStack {
+                CinematicSessionScreen(
+                    kind: .failure,
+                    title: "RDP Connection Failed",
+                    subtitle: reason,
+                    detail: secondaryFailureDetail,
+                    primaryButton: CinematicSessionScreen.ButtonSpec(
+                        title: "Retry",
+                        systemImage: "arrow.clockwise",
+                        style: .filled,
+                        action: {
+                            SQHaptics.tap()
+                            Task { await session.connect() }
                         }
-                        .buttonStyle(.bordered)
-                    }
-                    if session.hasTrustedCertificate {
-                        Button("Forget Trusted Certificate") {
-                            session.forgetTrustedCertificate()
+                    ),
+                    secondaryButton: CinematicSessionScreen.ButtonSpec(
+                        title: "Disconnect",
+                        systemImage: "xmark",
+                        style: .ghost,
+                        action: { onDisconnect() }
+                    )
+                )
+                if session.hasSavedCredentials || session.hasTrustedCertificate {
+                    VStack { Spacer()
+                        HStack(spacing: 10) {
+                            if session.hasSavedCredentials {
+                                Button("Forget Saved Login") {
+                                    SQHaptics.tap()
+                                    credentialPassword = ""
+                                    session.forgetSavedCredentials(message: "Enter a different Windows account allowed to sign in through Remote Desktop on this PC.")
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                            if session.hasTrustedCertificate {
+                                Button("Forget Trusted Certificate") {
+                                    SQHaptics.tap()
+                                    session.forgetTrustedCertificate()
+                                }
+                                .buttonStyle(.bordered)
+                            }
                         }
-                        .buttonStyle(.bordered)
+                        .font(.sqCallout)
+                        .padding(.bottom, 28)
                     }
-                    Button("Done") { onDisconnect() }
-                        .buttonStyle(.bordered)
                 }
             }
 
         case .ended(let reason):
-            VStack(spacing: 12) {
-                Image(systemName: "rectangle.badge.xmark")
-                    .font(.largeTitle)
-                    .foregroundColor(.secondary)
-                Text("Session Ended")
-                    .font(.headline)
-                Text(reason)
-                    .foregroundColor(.secondary)
-                Button("Done") { onDisconnect() }
-                    .buttonStyle(.bordered)
-            }
+            CinematicSessionScreen(
+                kind: .ended,
+                title: "Session Ended",
+                subtitle: reason,
+                primaryButton: CinematicSessionScreen.ButtonSpec(
+                    title: "Done",
+                    systemImage: "arrow.backward",
+                    style: .filled,
+                    action: { onDisconnect() }
+                ),
+                secondaryButton: nil
+            )
         }
+    }
+
+    private var securityDetailText: String? {
+        let title = session.securityStatus.title
+        return title.isEmpty ? nil : title
+    }
+
+    private var secondaryFailureDetail: String? {
+        if session.hasSavedCredentials || session.hasTrustedCertificate {
+            return "If the wrong Windows account or a stale host certificate is to blame, clear the cached value below before retrying."
+        }
+        return nil
     }
 
     private var rdpCanvas: some View {
@@ -380,8 +459,20 @@ struct RDPViewerView: View {
                     rdpInputOverlay(canvasSize: proxy.size)
                     #endif
                 } else {
-                    ProgressView("Waiting for first RDP frame...")
-                        .foregroundColor(.white)
+                    VStack(spacing: 14) {
+                        ScreenQBrandMark(size: 56)
+                        Text("Waiting for first RDP frame")
+                            .font(.sqHeadline)
+                            .foregroundColor(.white)
+                        Text(session.profile.address)
+                            .font(.sqCaption)
+                            .foregroundColor(.white.opacity(0.65))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 32)
+                        ScreenQActivityTrail(tint: .white)
+                            .padding(.top, 6)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 if showStats {
                     rdpStatsBadge
@@ -489,13 +580,14 @@ struct RDPViewerView: View {
         HStack(spacing: 8) {
             Label(String(format: "%.0f fps", stats.fps), systemImage: "speedometer")
             Label("\(ByteFormatting.bytesPerSecond(stats.bytesPerSecond)) decoded", systemImage: "rectangle.compress.vertical")
-            Label("RDP", systemImage: "pc")
+            SQPill(text: "RDP", status: .info, compact: true)
         }
-        .font(.caption.monospacedDigit())
+        .font(.sqCaption.monospacedDigit())
+        .foregroundColor(.white)
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
-        .background(Color.black.opacity(0.68))
-        .clipShape(Capsule())
+        .background(Capsule().fill(Color.black.opacity(0.55)))
+        .overlay(Capsule().stroke(ScreenQTheme.cosmicAmber.opacity(0.45), lineWidth: 0.5))
     }
 
     private var remotePixelSize: CGSize {
@@ -590,13 +682,15 @@ struct RDPViewerView: View {
 
     private var recordingButton: some View {
         Button {
+            SQHaptics.tap()
             toggleRecording()
         } label: {
             Image(systemName: recorder.isRecording ? "stop.circle.fill" : "record.circle")
-                .foregroundColor(recorder.isRecording ? .red : .primary)
+                .foregroundColor(recorder.isRecording ? ScreenQTheme.cosmicRose : .primary)
         }
         .disabled(!recorder.isRecording && session.currentImage == nil && (session.remoteWidth <= 0 || session.remoteHeight <= 0))
         .help(recorder.isRecording ? "Stop recording" : "Record session")
+        .accessibilityLabel(recorder.isRecording ? "Stop recording" : "Record session")
     }
 
     private func toggleRecording() {
@@ -620,6 +714,17 @@ struct RDPViewerView: View {
     }
 
     private func disconnect() {
+        if let stats = currentSummaryStats() {
+            summaryStats = stats
+            if recorder.isRecording {
+                recorder.stop()
+            }
+            Task { await session.disconnect() }
+            #if os(macOS)
+            app.viewerFocusMode = false
+            #endif
+            return
+        }
         if recorder.isRecording {
             recorder.stop()
         }
@@ -630,31 +735,109 @@ struct RDPViewerView: View {
         onDisconnect()
     }
 
+    // MARK: - Disconnect summary
+
+    private func handlePhaseChange(_ phase: RDPSession.Phase) {
+        switch phase {
+        case .connected:
+            if sessionStartedAt == nil {
+                sessionStartedAt = Date()
+                peakSessionFPS = 0
+            }
+        case .ended:
+            presentSummaryIfActive()
+        default:
+            break
+        }
+    }
+
+    private func presentSummaryIfActive() {
+        guard summaryStats == nil, let stats = currentSummaryStats() else { return }
+        summaryStats = stats
+    }
+
+    private func currentSummaryStats() -> SessionSummarySheet.Stats? {
+        guard let started = sessionStartedAt else { return nil }
+        let duration = Date().timeIntervalSince(started)
+        let bytesIn = UInt64(max(0, stats.totalBytes))
+        let avgRTT = stats.roundTripMillis > 0 ? stats.roundTripMillis : nil
+        let peak = peakSessionFPS > 0 ? peakSessionFPS : nil
+        return SessionSummarySheet.Stats(
+            duration: duration,
+            bytesIn: bytesIn,
+            bytesOut: 0,
+            averageRTT: avgRTT,
+            peakFPS: peak,
+            protocolName: "RDP",
+            hostDisplayName: session.profile.displayName
+        )
+    }
+
+    private var isConnectionAlreadySaved: Bool {
+        let host = session.profile.host
+        let port = session.profile.port
+        return app.savedConnections.connections.contains { entry in
+            entry.host.caseInsensitiveCompare(host) == .orderedSame &&
+            entry.port == port &&
+            entry.resolvedProtocol == .rdp
+        }
+    }
+
+    private func saveConnectionToFavorites() {
+        let host = session.profile.host
+        let port = session.profile.port
+        guard !host.isEmpty else { return }
+        app.savedConnections.addOrUpdate(
+            host: host,
+            port: port,
+            displayName: session.profile.displayName,
+            connectionProtocol: .rdp,
+            source: .manual,
+            isBookmark: true
+        )
+    }
+
+    private func reconnectFromSummary() {
+        let host = session.profile.host
+        let port = session.profile.port
+        guard !host.isEmpty else { return }
+        let pending: PendingViewerConnection = .manual(
+            host: host,
+            port: port,
+            displayName: session.profile.displayName,
+            connectionProtocol: .rdp
+        )
+        app.requestViewerConnection(pending)
+    }
+
     #if os(iOS)
     private func zoomHUD(scale: CGFloat) -> some View {
         Text("\(Int((scale * 100).rounded()))%")
-            .font(.caption.monospacedDigit().bold())
+            .font(.sqCaption.monospacedDigit())
+            .foregroundColor(.white)
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(.ultraThinMaterial)
-            .clipShape(Capsule())
+            .background(Capsule().fill(Color.black.opacity(0.55)))
+            .overlay(Capsule().stroke(ScreenQTheme.cosmicAmber.opacity(0.55), lineWidth: 0.5))
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .padding(.top, 12)
             .allowsHitTesting(false)
     }
 
     private func dragFeedbackOverlay(_ feedback: IOSDragFeedback) -> some View {
-        let color: Color = feedback.kind == .right ? .orange : .accentColor
+        let color: Color = feedback.kind == .right ? ScreenQTheme.cosmicAmber : ScreenQTheme.cosmicCyan
         return ZStack {
             Circle()
                 .stroke(color, lineWidth: 2)
                 .frame(width: 44, height: 44)
             Image(systemName: feedback.kind == .right ? "contextualmenu.and.cursorarrow" : "cursorarrow.motionlines")
-                .font(.caption.bold())
+                .font(.sqCaption.bold())
                 .foregroundStyle(color)
+                .accessibilityHidden(true)
         }
         .position(feedback.point)
         .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
     #endif
 
@@ -676,8 +859,7 @@ struct RDPViewerView: View {
             }
         }
         .padding(12)
-        .background(Color.black.opacity(0.68))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .screenQGlass(cornerRadius: 12)
     }
     #endif
 
@@ -697,12 +879,10 @@ struct RDPViewerView: View {
                 Label("Clipboard redirection requested", systemImage: "doc.on.clipboard")
             }
         }
-        .font(.caption)
+        .font(.sqCaption)
         .foregroundColor(.secondary)
-        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.primary.opacity(0.06))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .screenQCard(cornerRadius: 10, padding: 12)
     }
 
     private var credentialsSheetBinding: Binding<Bool> {
@@ -750,23 +930,23 @@ struct RDPViewerView: View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: session.securityStatus.symbolName)
                 .foregroundColor(session.securityStatus.tint)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
                 Text(session.securityStatus.title)
-                    .font(.caption.weight(.semibold))
+                    .font(.sqCaption)
                 Text(session.securityStatus.detail)
-                    .font(.caption2)
+                    .font(.sqCaption)
                     .foregroundColor(.secondary)
                 if let action = session.securityStatus.recommendedAction {
                     Text(action)
-                        .font(.caption2.weight(.medium))
-                        .foregroundColor(.orange)
+                        .font(.sqCaption)
+                        .foregroundColor(ScreenQTheme.cosmicAmber)
                 }
             }
+            Spacer(minLength: 0)
         }
-        .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.primary.opacity(0.06))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .screenQCard(tint: session.securityStatus.tint, cornerRadius: 10, padding: 10)
     }
 }
 
@@ -785,12 +965,13 @@ private struct RDPCredentialsSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Label("Windows Credentials", systemImage: "person.badge.key")
-                .font(.headline)
+                .font(.sqTitle)
+                .foregroundColor(ScreenQTheme.cosmicAmber)
             Text(message)
-                .font(.footnote)
+                .font(.sqCallout)
                 .foregroundColor(.secondary)
             Text("For local accounts use PC-NAME\\username or .\\username. For Microsoft or Entra accounts use MicrosoftAccount\\email@example.com or AzureAD\\email@example.com.")
-                .font(.caption)
+                .font(.sqCaption)
                 .foregroundColor(.secondary)
 
             TextField("Domain (optional)", text: $domain)
@@ -807,10 +988,12 @@ private struct RDPCredentialsSheet: View {
                 .textContentType(.password)
                 #endif
             Toggle("Remember in Keychain", isOn: $rememberCredentials)
+                .font(.sqBody)
             if rememberCredentials {
                 Toggle("Require Touch ID / Face ID / passcode before reuse", isOn: $requireLocalAuthenticationForSavedCredentials)
+                    .font(.sqCallout)
                 Text("Recommended for Windows accounts with administrative or remote-login rights.")
-                    .font(.caption)
+                    .font(.sqCaption)
                     .foregroundColor(.secondary)
             }
 
@@ -823,6 +1006,7 @@ private struct RDPCredentialsSheet: View {
                 Button("Connect", action: onConnect)
                     .buttonStyle(.bordered)
                     .disabled(username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || password.isEmpty)
+                    .foregroundColor(ScreenQTheme.cosmicAmber)
             }
         }
         .padding(20)
@@ -839,19 +1023,21 @@ private struct RDPCertificateTrustSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Label("Review RDP Certificate", systemImage: "lock.trianglebadge.exclamationmark")
-                .font(.headline)
+                .font(.sqTitle)
+                .foregroundColor(ScreenQTheme.cosmicAmber)
             Text("Only trust this certificate if it matches the Windows PC you intended to control.")
-                .font(.footnote)
+                .font(.sqCallout)
                 .foregroundColor(.secondary)
             certificateRows
             HStack {
                 Button("Reject", action: onReject)
-                    .foregroundColor(.red)
+                    .foregroundColor(ScreenQTheme.cosmicRose)
                 Spacer()
                 Button("Trust Once", action: onTrustOnce)
                     .buttonStyle(.bordered)
                 Button("Trust Always", action: onTrustAlways)
                     .buttonStyle(.bordered)
+                    .foregroundColor(ScreenQTheme.cosmicAmber)
             }
         }
         .padding(20)
@@ -868,10 +1054,8 @@ private struct RDPCertificateTrustSheet: View {
                 row("Valid Until", Self.dateFormatter.string(from: validUntil))
             }
         }
-        .font(.caption)
-        .padding(10)
-        .background(Color.primary.opacity(0.06))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .font(.sqCaption)
+        .screenQCard(tint: ScreenQTheme.cosmicAmber, cornerRadius: 10, padding: 10)
     }
 
     private func row(_ label: String, _ value: String) -> some View {
@@ -909,6 +1093,7 @@ private struct RDPCertificateMenu: View {
             Image(systemName: session.hasTrustedCertificate ? "lock.shield.fill" : "lock.shield")
         }
         .help("RDP certificate trust")
+        .accessibilityLabel("RDP certificate trust")
     }
 }
 #endif
@@ -933,6 +1118,7 @@ private struct RDPIOSControlSurface: View {
 
     @State private var dragStartOffset: CGSize?
     @State private var showGestureHelp = false
+    @State private var showToolbarCustomization = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -953,6 +1139,9 @@ private struct RDPIOSControlSurface: View {
         .allowsHitTesting(true)
         .sheet(isPresented: $showGestureHelp) {
             gestureHelp
+        }
+        .sheet(isPresented: $showToolbarCustomization) {
+            SQToolbarCustomizationSheet(preferences: preferences, isPresented: $showToolbarCustomization)
         }
     }
 
@@ -1099,6 +1288,7 @@ private struct RDPIOSControlSurface: View {
                     specialKeysMenu
                     functionKeysMenu
                     shortcutsMenu
+                    customizeButton
                     actionMenu
                 }
                 toolbarSection(vertical: vertical, prominent: true) {
@@ -1113,6 +1303,23 @@ private struct RDPIOSControlSurface: View {
         )
         .rdpToolbarChromeStyle()
         .accessibilityElement(children: .contain)
+    }
+
+    private var customizeButton: some View {
+        // Discoverable always-on gear so toolbar customization is one tap away.
+        Button {
+            SQHaptics.tap()
+            showToolbarCustomization = true
+        } label: {
+            Image(systemName: "gearshape.fill")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(ScreenQTheme.cosmicCyan)
+                .frame(width: 38, height: 38)
+                .background(Circle().fill(ScreenQTheme.cosmicCyan.opacity(0.12)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Customize toolbar")
     }
 
     private func toolbarChrome<Content: View>(@ViewBuilder content: () -> Content) -> some View {
@@ -1133,7 +1340,8 @@ private struct RDPIOSControlSurface: View {
     }
 
     private var disconnectButton: some View {
-        iconButton(systemName: "xmark.circle", label: "Disconnect", tint: .red) {
+        iconButton(systemName: "xmark.circle", label: "Disconnect", tint: ScreenQTheme.cosmicRose) {
+            SQHaptics.warning()
             onDisconnect()
         }
     }
@@ -1141,7 +1349,7 @@ private struct RDPIOSControlSurface: View {
     private var statusPill: some View {
         Image(systemName: inputMapper.isControlEnabled ? "cursorarrow.click" : "eye")
             .font(.system(size: 15, weight: .semibold))
-            .foregroundStyle(inputMapper.isControlEnabled ? .green : .orange)
+            .foregroundStyle(inputMapper.isControlEnabled ? ScreenQTheme.cosmicMint : ScreenQTheme.cosmicAmber)
             .frame(width: 38, height: 38)
             .background(Color.primary.opacity(0.08))
             .clipShape(Circle())
@@ -1187,39 +1395,18 @@ private struct RDPIOSControlSurface: View {
     }
 
     private func modifierButtons(vertical: Bool) -> some View {
-        stack(vertical: vertical) {
-            ForEach(RemoteModifier.allCases) { modifier in
-                modifierButton(modifier)
-            }
-        }
-    }
-
-    private func modifierButton(_ modifier: RemoteModifier) -> some View {
-        let state = modifiers.state(for: modifier)
-        return Text(modifier.textSymbol)
-            .font(.system(size: 17, weight: .semibold))
-            .frame(width: 38, height: 38)
-            .foregroundStyle(state == .off ? Color.primary : Color.white)
-            .background(modifierBackground(for: state))
-            .clipShape(Circle())
-            .opacity(inputMapper.isControlEnabled ? 1 : 0.35)
-            .onTapGesture(count: 2) {
+        // Phase 3: render through the shared SQModifierBar so chip colour,
+        // latch state, and STICKY pill stay consistent across viewers.
+        SQModifierBar(
+            snapshot: modifiers.sqModifierSnapshot,
+            orientation: vertical ? .vertical : .horizontal,
+            stickyOnLongPress: preferences.stickyModifierOnLongPress,
+            enabled: inputMapper.isControlEnabled,
+            onToggle: { mod, gesture in
                 guard inputMapper.isControlEnabled else { return }
-                modifiers.toggleLocked(modifier)
+                modifiers.apply(mod, gesture: gesture)
             }
-            .onTapGesture {
-                guard inputMapper.isControlEnabled else { return }
-                modifiers.toggleMomentary(modifier)
-            }
-            .accessibilityLabel("\(modifier.label) modifier")
-    }
-
-    private func modifierBackground(for state: ModifierLatchState) -> Color {
-        switch state {
-        case .off: return Color.primary.opacity(0.08)
-        case .momentary: return Color.accentColor.opacity(0.72)
-        case .locked: return Color.accentColor
-        }
+        )
     }
 
     private var arrowsMenu: some View {
@@ -1307,20 +1494,8 @@ private struct RDPIOSControlSurface: View {
                     Label("Hide Overlay Cursor", systemImage: !preferences.showCursorOverlay ? "checkmark" : "eye.slash")
                 }
             }
-            Menu("Toolbar Position") {
-                Picker("Style", selection: $preferences.toolbarStyle) {
-                    Text(ViewerToolbarStyle.dockedFloating.label).tag(ViewerToolbarStyle.dockedFloating)
-                    Text(ViewerToolbarStyle.docked.label).tag(ViewerToolbarStyle.docked)
-                    Text(ViewerToolbarStyle.floating.label).tag(ViewerToolbarStyle.floating)
-                }
-                Picker("Placement", selection: $preferences.toolbarPlacement) {
-                    ForEach(ViewerToolbarPlacement.allCases) { placement in
-                        Label(placement.label, systemImage: placement.icon).tag(placement)
-                    }
-                }
-                Button("Reset Drag Offset") {
-                    preferences.toolbarOffset = .zero
-                }
+            Button("Customize Toolbar") {
+                showToolbarCustomization = true
             }
             Button("Condense Controls") {
                 preferences.toolbarCondensed = true
@@ -1375,7 +1550,7 @@ private struct RDPIOSControlSurface: View {
         stack(vertical: vertical, content: content)
             .padding(3)
             .background(
-                prominent ? Color.red.opacity(0.14) : Color.primary.opacity(0.08),
+                prominent ? ScreenQTheme.cosmicRose.opacity(0.14) : Color.primary.opacity(0.08),
                 in: RoundedRectangle(cornerRadius: vertical ? 22 : 24, style: .continuous)
             )
     }
