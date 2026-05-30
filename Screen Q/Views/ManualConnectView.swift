@@ -370,7 +370,15 @@ struct ManualConnectView: View {
                 SQHaptics.tap()
                 selectProtocol(.screenQ)
             } label: {
-                Label("Screen Q", systemImage: selectedProtocol == .screenQ ? "checkmark" : "display")
+                if selectedProtocol == .screenQ {
+                    Label("Screen Q", systemImage: "checkmark")
+                } else {
+                    HStack {
+                        ScreenQLogoGlyph()
+                            .frame(width: 16, height: 16)
+                        Text("Screen Q")
+                    }
+                }
             }
 
             Button {
@@ -395,8 +403,7 @@ struct ManualConnectView: View {
             }
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: selectedProtocol.systemImage)
-                    .accessibilityHidden(true)
+                selectedProtocolMark
                 Text(selectedProtocol.displayName)
             }
             .font(.sqCallout)
@@ -409,6 +416,18 @@ struct ManualConnectView: View {
         }
         .menuStyle(.borderlessButton)
         .accessibilityLabel("Protocol: \(selectedProtocol.displayName)")
+    }
+
+    @ViewBuilder
+    private var selectedProtocolMark: some View {
+        if selectedProtocol == .screenQ {
+            ScreenQLogoGlyph()
+                .frame(width: 16, height: 16)
+                .accessibilityHidden(true)
+        } else {
+            Image(systemName: selectedProtocol.systemImage)
+                .accessibilityHidden(true)
+        }
     }
 
     private var vncSecurityScope: NetworkTrustScope {

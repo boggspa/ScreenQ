@@ -675,8 +675,8 @@ private struct HostSessionRow: View {
 
     var body: some View {
         HStack {
-            Image(systemName: "rectangle.connected.to.line.below")
-                .foregroundColor(ScreenQTheme.cosmicCyan)
+            ScreenQLogoGlyph()
+                .frame(width: 18, height: 18)
                 .accessibilityHidden(true)
             Text(box.peerName)
                 .font(.sqBody)

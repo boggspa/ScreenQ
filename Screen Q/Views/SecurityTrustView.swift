@@ -89,7 +89,8 @@ struct SecurityTrustSettingsContent: View {
                 title: "Screen Q Native",
                 detail: "Best path: encrypted handshake, pinned device identity, host approval, and granular permissions. Clipboard and file transfer are available only when granted for the session.",
                 systemImage: "display",
-                tint: ScreenQTheme.cosmicMint
+                tint: ScreenQTheme.cosmicMint,
+                usesBrandMark: true
             )
             protocolRow(
                 title: "RDP",
@@ -317,12 +318,25 @@ struct SecurityTrustSettingsContent: View {
         }
     }
 
-    private func protocolRow(title: String, detail: String, systemImage: String, tint: Color) -> some View {
+    private func protocolRow(
+        title: String,
+        detail: String,
+        systemImage: String,
+        tint: Color,
+        usesBrandMark: Bool = false
+    ) -> some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: systemImage)
-                .foregroundColor(tint)
-                .frame(width: 22)
-                .accessibilityHidden(true)
+            Group {
+                if usesBrandMark {
+                    ScreenQLogoGlyph()
+                        .frame(width: 20, height: 20)
+                } else {
+                    Image(systemName: systemImage)
+                        .foregroundColor(tint)
+                }
+            }
+            .frame(width: 22)
+            .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.sqHeadline)

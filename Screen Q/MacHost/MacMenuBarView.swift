@@ -58,9 +58,7 @@ struct MacMenuBarView: View {
     private var header: some View {
         VStack(spacing: 8) {
             HStack(spacing: 10) {
-                Image(systemName: "rectangle.connected.to.line.below")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundColor(.accentColor)
+                ScreenQBrandMark(size: 28, cornerRadius: 7, glyphScale: 0.72)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Screen Q").font(.headline)
                     Text(statusLine)

@@ -288,18 +288,23 @@ struct HomeView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            #if os(iOS)
-            Text("Control Macs and Windows PCs over LAN, Tailscale, or VPN.")
-                .font(.sqHeadline)
-                .foregroundColor(.secondary)
-            #else
-            Text("Screen Q")
-                .font(.sqDisplay)
-            Text("Control Macs and Windows PCs over LAN, Tailscale, or VPN.")
-                .font(.sqTitle)
-                .foregroundColor(.secondary)
+        HStack(alignment: .top, spacing: 14) {
+            #if os(macOS)
+            ScreenQBrandMark(size: 54, cornerRadius: 14)
             #endif
+            VStack(alignment: .leading, spacing: 8) {
+                #if os(iOS)
+                Text("Control Macs and Windows PCs over LAN, Tailscale, or VPN.")
+                    .font(.sqHeadline)
+                    .foregroundColor(.secondary)
+                #else
+                Text("Screen Q")
+                    .font(.sqDisplay)
+                Text("Control Macs and Windows PCs over LAN, Tailscale, or VPN.")
+                    .font(.sqTitle)
+                    .foregroundColor(.secondary)
+                #endif
+            }
         }
     }
 
@@ -532,16 +537,7 @@ private struct RoleCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(ScreenQTheme.accent(tint))
-                    Image(systemName: role.systemImage)
-                        .font(.system(size: 22, weight: .semibold))
-                        .foregroundColor(.white)
-                        .accessibilityHidden(true)
-                }
-                .frame(width: 46, height: 46)
-                .shadow(color: tint.opacity(0.45), radius: 8, x: 0, y: 4)
+                RoleIcon(role: role, tint: tint)
 
                 Spacer()
 
@@ -595,6 +591,41 @@ private struct RoleCard: View {
         case .viewer:                   return ScreenQTheme.cosmicCyan
         case .iosScreenShare:           return ScreenQTheme.cosmicAmber
         case .appleNativeAlternatives:  return ScreenQTheme.cosmicRose
+        }
+    }
+}
+
+private struct RoleIcon: View {
+    let role: DeviceRole
+    let tint: Color
+
+    var body: some View {
+        Group {
+            if role.usesScreenQBrandMark {
+                ScreenQBrandMark(size: 46, cornerRadius: 12, glyphScale: 0.72)
+            } else {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(ScreenQTheme.accent(tint))
+                    Image(systemName: role.systemImage)
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundColor(.white)
+                        .accessibilityHidden(true)
+                }
+                .frame(width: 46, height: 46)
+                .shadow(color: tint.opacity(0.45), radius: 8, x: 0, y: 4)
+            }
+        }
+    }
+}
+
+private extension DeviceRole {
+    var usesScreenQBrandMark: Bool {
+        switch self {
+        case .hostMac, .viewer:
+            return true
+        case .iosScreenShare, .appleNativeAlternatives:
+            return false
         }
     }
 }

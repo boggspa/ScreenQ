@@ -432,15 +432,7 @@ private struct DiscoveryRow: View {
     let host: DiscoveredHost
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(ScreenQTheme.accent(ScreenQTheme.cosmicCyan))
-                    .frame(width: 38, height: 38)
-                Image(systemName: hostSymbol)
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundColor(.white)
-                    .accessibilityHidden(true)
-            }
+            ScreenQBrandMark(size: 38, cornerRadius: 10, glyphScale: 0.72)
             VStack(alignment: .leading, spacing: 3) {
                 Text(host.displayName)
                     .font(.sqHeadline)
@@ -477,16 +469,6 @@ private struct DiscoveryRow: View {
         }
         .screenQCard(tint: ScreenQTheme.cosmicCyan, padding: 12)
         .accessibilityElement(children: .combine)
-    }
-
-    private var hostSymbol: String {
-        switch host.advertisedPlatform {
-        case "macOS": return "desktopcomputer"
-        case "iPadOS": return "ipad"
-        case "iOS":   return "iphone"
-        case "visionOS": return "visionpro"
-        default: return "tv"
-        }
     }
 }
 
@@ -566,7 +548,11 @@ private struct TailnetDiscoveryRow: View {
                 Button {
                     onConnect(.screenQ)
                 } label: {
-                    Label("Screen Q Native", systemImage: "display")
+                    HStack {
+                        ScreenQLogoGlyph()
+                            .frame(width: 16, height: 16)
+                        Text("Screen Q Native")
+                    }
                 }
                 Button {
                     onConnect(.macScreenSharing)

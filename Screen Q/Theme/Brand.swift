@@ -15,12 +15,25 @@ import SwiftUI
 
 // MARK: - Brand mark
 
+/// Asset-backed Screen Q glyph. Use this anywhere the product mark itself
+/// is needed rather than a symbolic control icon.
+struct ScreenQLogoGlyph: View {
+    var body: some View {
+        Image("ScreenQMenuBarIconActive")
+            .resizable()
+            .renderingMode(.original)
+            .interpolation(.high)
+            .scaledToFit()
+            .accessibilityHidden(true)
+    }
+}
+
 /// Gradient-filled rounded rectangle with the brand glyph centred. Used
 /// inside hero headers, loading screens, the onboarding sheet, etc.
 struct ScreenQBrandMark: View {
     var size: CGFloat = 44
     var cornerRadius: CGFloat = 12
-    var glyphScale: CGFloat = 0.55
+    var glyphScale: CGFloat = 0.68
 
     var body: some View {
         ZStack {
@@ -35,11 +48,11 @@ struct ScreenQBrandMark: View {
                         endPoint:   .bottomTrailing
                     )
                 )
-            Image(systemName: "rectangle.connected.to.line.below")
-                .resizable()
-                .scaledToFit()
+            RoundedRectangle(cornerRadius: cornerRadius * 0.72, style: .continuous)
+                .fill(Color.white.opacity(0.16))
+                .padding(size * 0.12)
+            ScreenQLogoGlyph()
                 .padding(size * (1.0 - glyphScale) / 2)
-                .foregroundColor(.white.opacity(0.95))
         }
         .frame(width: size, height: size)
         .shadow(color: ScreenQTheme.cosmicViolet.opacity(0.35), radius: 8, x: 0, y: 4)

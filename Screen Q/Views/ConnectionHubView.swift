@@ -177,9 +177,7 @@ struct ConnectionHubView: View {
     private var heroHeader: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 14) {
-                #if os(iOS)
                 ScreenQBrandMark(size: 48)
-                #endif
                 VStack(alignment: .leading, spacing: 4) {
                     Text(timeOfDayGreeting)
                         .font(.sqCaption)
@@ -306,7 +304,10 @@ struct ConnectionHubView: View {
                             }
                         }
                     } label: {
-                        Label(quickConnectProtocol.displayName, systemImage: quickConnectProtocol.systemImage)
+                        HStack(spacing: 6) {
+                            quickConnectProtocolMark
+                            Text(quickConnectProtocol.displayName)
+                        }
                             .frame(minWidth: 128)
                     }
                     .buttonStyle(.bordered)
@@ -1091,6 +1092,18 @@ struct ConnectionHubView: View {
         app.browserStatus.isBrowsing ? .healthy : .attention
     }
 
+    @ViewBuilder
+    private var quickConnectProtocolMark: some View {
+        if quickConnectProtocol == .screenQ {
+            ScreenQLogoGlyph()
+                .frame(width: 16, height: 16)
+                .accessibilityHidden(true)
+        } else {
+            Image(systemName: quickConnectProtocol.systemImage)
+                .accessibilityHidden(true)
+        }
+    }
+
     private var networkStatusText: String {
         if app.browserStatus.isBrowsing {
             let n = app.discoveredHosts.count + app.discoveredRFBHosts.count
@@ -1158,10 +1171,7 @@ private struct ActiveSessionCard: View {
                     )
                     .frame(width: 240, height: 130)
                     .overlay(
-                        Image(systemName: slot.systemImage)
-                            .font(.system(size: 44, weight: .light))
-                            .foregroundColor(.white.opacity(0.8))
-                            .accessibilityHidden(true)
+                        activeSessionMark
                     )
 
                     HStack(spacing: 6) {
@@ -1233,6 +1243,22 @@ private struct ActiveSessionCard: View {
         case .screenQ:  return [ScreenQTheme.cosmicCyan, ScreenQTheme.cosmicViolet]
         case .vnc:      return [ScreenQTheme.cosmicTeal, ScreenQTheme.cosmicCyan]
         case .rdp:      return [ScreenQTheme.cosmicAmber, ScreenQTheme.cosmicRose]
+        }
+    }
+
+    @ViewBuilder
+    private var activeSessionMark: some View {
+        switch slot.kind {
+        case .screenQ:
+            ScreenQLogoGlyph()
+                .frame(width: 72, height: 72)
+                .opacity(0.92)
+                .accessibilityHidden(true)
+        case .vnc, .rdp:
+            Image(systemName: slot.systemImage)
+                .font(.system(size: 44, weight: .light))
+                .foregroundColor(.white.opacity(0.8))
+                .accessibilityHidden(true)
         }
     }
 }
@@ -1341,11 +1367,25 @@ private struct SavedConnectionCard: View {
         } else {
             ZStack {
                 ScreenQTheme.accent(protocolTint)
-                Image(systemName: protocolIcon)
-                    .font(.system(size: large ? 56 : 40, weight: .light))
-                    .foregroundColor(.white.opacity(0.78))
-                    .accessibilityHidden(true)
+                placeholderMark
             }
+        }
+    }
+
+    @ViewBuilder
+    private var placeholderMark: some View {
+        if saved.resolvedProtocol == .screenQ {
+            ScreenQBrandMark(
+                size: large ? 74 : 58,
+                cornerRadius: large ? 18 : 14,
+                glyphScale: 0.72
+            )
+            .accessibilityHidden(true)
+        } else {
+            Image(systemName: protocolIcon)
+                .font(.system(size: large ? 56 : 40, weight: .light))
+                .foregroundColor(.white.opacity(0.78))
+                .accessibilityHidden(true)
         }
     }
 
