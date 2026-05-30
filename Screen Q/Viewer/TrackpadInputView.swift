@@ -76,11 +76,7 @@ final class TrackpadTouchView: UIView {
     private var longPressTimer: Timer?
     private var pendingTwoFingerTapTimer: Timer?
     private var lastTouchCount: Int = 0
-    private var previousScrollPoint: CGPoint?
-    private var previousPinchCenter: CGPoint?
-    private var pinchStartDistance: CGFloat?
-    private var previousPinchDistance: CGFloat?
-    private var isViewportGesture = false
+    private var twoFingerResolver = TrackpadTwoFingerGestureResolver()
     private var pendingOneFingerTapTimer: Timer?
     private var lastOneFingerTapTime: Date?
     private var touchStartTime: Date?
@@ -96,8 +92,6 @@ final class TrackpadTouchView: UIView {
     private var localInteractionStarted = false
     private let longPressDuration: TimeInterval = 0.5
     private let tapMaxDistance: CGFloat = 10
-    private let pinchActivationDistance: CGFloat = 8
-    private let pinchActivationRatio: CGFloat = 0.03
     private let doubleTapInterval: TimeInterval = 0.32
     private let edgeActivationInset: CGFloat = 28
     private let edgeSwipeDistance: CGFloat = 52
@@ -155,21 +149,17 @@ final class TrackpadTouchView: UIView {
             // Two-finger scroll / pinch starting point. A stationary two-finger
             // hold starts a secondary-button drag.
             let center = averageLocation(allTouches)
-            previousScrollPoint = center
-            previousPinchCenter = center
             previousTrackpadPoint = center
             let distance = distanceBetweenTouches(allTouches)
+            twoFingerResolver.begin(center: center, distance: distance)
             pendingTwoFingerTapTimer?.invalidate()
             pendingTwoFingerTapTimer = nil
-            pinchStartDistance = distance
-            previousPinchDistance = distance
-            isViewportGesture = false
             longPressTimer?.invalidate()
             if touchMode != .scrollOnly {
                 longPressTimer = Timer.scheduledTimer(withTimeInterval: longPressDuration, repeats: false) { [weak self] _ in
                     guard let self else { return }
                     Task { @MainActor in
-                        guard !self.didMoveBeyondTap, !self.isViewportGesture else { return }
+                        guard !self.didMoveBeyondTap else { return }
                         if self.touchMode == .trackpad {
                             self.inputMapper?.sendPointerDownAtCurrent(button: .right)
                         } else {
@@ -220,20 +210,9 @@ final class TrackpadTouchView: UIView {
         }
 
         if allTouches.count == 2 {
-            // Keep normal trackpad scrolling intact. Only switch this
-            // two-finger gesture to local viewport control once the finger
-            // spacing clearly changes like a pinch.
             let center = averageLocation(allTouches)
             let distance = distanceBetweenTouches(allTouches)
-            let startDistance = max(pinchStartDistance ?? distance, 1)
-            let distanceChange = abs(distance - startDistance)
-            let ratioChange = abs(distance / startDistance - 1)
-
-            if isViewportGesture || distanceChange > pinchActivationDistance || ratioChange > pinchActivationRatio {
-                isViewportGesture = true
-                longPressTimer?.invalidate()
-                applyViewportGesture(center: center, distance: distance)
-            } else if isDragging {
+            if isDragging {
                 if touchMode == .trackpad {
                     let previous = previousTrackpadPoint ?? center
                     let delta = CGSize(width: center.x - previous.x, height: center.y - previous.y)
@@ -244,21 +223,24 @@ final class TrackpadTouchView: UIView {
                     mapper.sendPointerMove(localPoint: center)
                 }
                 onDragFeedbackChange?(IOSDragFeedback(kind: dragButton == .right ? .right : .left, point: center))
-            } else if let prev = previousScrollPoint {
-                let delta = CGSize(width: center.x - prev.x, height: center.y - prev.y)
-                if touchMode == .trackpad {
-                    if viewport.scale > ViewportTransform.minimumScale + 0.001 {
-                        panViewport(by: delta)
-                    } else {
+            } else {
+                switch twoFingerResolver.update(center: center, distance: distance) {
+                case .none:
+                    break
+                case .remoteScroll(let delta):
+                    didMoveBeyondTap = true
+                    longPressTimer?.invalidate()
+                    if touchMode == .trackpad {
                         mapper.sendScrollAtCurrent(deltaX: Double(delta.width) * 3.0, deltaY: Double(delta.height) * 3.0)
+                    } else {
+                        mapper.sendScroll(deltaX: Double(delta.width) * 3.0, deltaY: Double(delta.height) * 3.0, localPoint: center)
                     }
-                } else {
-                    mapper.sendScroll(deltaX: Double(delta.width) * 3.0, deltaY: Double(delta.height) * 3.0, localPoint: center)
+                case .viewportPinch(let update):
+                    didMoveBeyondTap = true
+                    longPressTimer?.invalidate()
+                    applyViewportGesture(update)
                 }
             }
-            previousScrollPoint = center
-            previousPinchCenter = center
-            previousPinchDistance = distance
         }
     }
 
@@ -322,12 +304,8 @@ final class TrackpadTouchView: UIView {
     }
 
     private func resetGestureState() {
-        previousScrollPoint = nil
-        previousPinchCenter = nil
-        pinchStartDistance = nil
-        previousPinchDistance = nil
+        twoFingerResolver.reset()
         previousTrackpadPoint = nil
-        isViewportGesture = false
         lastTouchCount = 0
         touchStartTime = nil
         didMoveBeyondTap = false
@@ -444,7 +422,7 @@ final class TrackpadTouchView: UIView {
         return false
     }
 
-    private func applyViewportGesture(center: CGPoint, distance: CGFloat) {
+    private func applyViewportGesture(_ update: TrackpadTwoFingerGestureResolver.ViewportPinchUpdate) {
         let geometry = CanvasGeometry(
             canvasSize: canvasSize,
             remotePixelSize: remotePixelSize,
@@ -453,14 +431,15 @@ final class TrackpadTouchView: UIView {
         )
 
         var nextViewport = viewport
-        if let previousDistance = previousPinchDistance, previousDistance > 0 {
-            let magnification = distance / previousDistance
-            nextViewport = nextViewport.applyingMagnification(magnification, around: center, in: geometry)
+        if update.previousDistance > 0 {
+            let magnification = update.distance / update.previousDistance
+            nextViewport = nextViewport.applyingMagnification(magnification, around: update.center, in: geometry)
         }
-        if let previousCenter = previousPinchCenter {
-            let delta = CGSize(width: center.x - previousCenter.x, height: center.y - previousCenter.y)
-            nextViewport = nextViewport.translated(by: delta, in: geometry)
-        }
+        let delta = CGSize(
+            width: update.center.x - update.previousCenter.x,
+            height: update.center.y - update.previousCenter.y
+        )
+        nextViewport = nextViewport.translated(by: delta, in: geometry)
 
         if nextViewport != viewport {
             setLocalViewport(nextViewport)
@@ -519,8 +498,8 @@ final class TrackpadTouchView: UIView {
             let dx = Double(translation.x - previousIndirectScrollTranslation.x) * 3.0
             let dy = Double(translation.y - previousIndirectScrollTranslation.y) * 3.0
             if dx != 0 || dy != 0 {
-                if touchMode == .trackpad, viewport.scale > ViewportTransform.minimumScale + 0.001 {
-                    panViewport(by: CGSize(width: CGFloat(dx / 3.0), height: CGFloat(dy / 3.0)))
+                if touchMode == .trackpad {
+                    inputMapper?.sendScrollAtCurrent(deltaX: dx, deltaY: dy)
                 } else {
                     inputMapper?.sendScroll(deltaX: dx, deltaY: dy, localPoint: recognizer.location(in: self))
                 }
@@ -605,3 +584,127 @@ final class TrackpadTouchView: UIView {
     }
 }
 #endif
+
+nonisolated struct TrackpadTwoFingerGestureResolver {
+    enum Action: Equatable {
+        case none
+        case remoteScroll(delta: CGSize)
+        case viewportPinch(ViewportPinchUpdate)
+    }
+
+    struct ViewportPinchUpdate: Equatable {
+        var center: CGPoint
+        var previousCenter: CGPoint
+        var distance: CGFloat
+        var previousDistance: CGFloat
+    }
+
+    private enum Lock {
+        case undecided
+        case remoteScroll
+        case viewportPinch
+    }
+
+    private var lock: Lock = .undecided
+    private var startCenter: CGPoint?
+    private var previousCenter: CGPoint?
+    private var startDistance: CGFloat?
+    private var previousDistance: CGFloat?
+    private let scrollActivationDistance: CGFloat
+    private let pinchActivationDistance: CGFloat
+    private let pinchActivationRatio: CGFloat
+    private let pinchDominanceRatio: CGFloat
+
+    init(
+        scrollActivationDistance: CGFloat = 4,
+        pinchActivationDistance: CGFloat = 8,
+        pinchActivationRatio: CGFloat = 0.03,
+        pinchDominanceRatio: CGFloat = 1.2
+    ) {
+        self.scrollActivationDistance = scrollActivationDistance
+        self.pinchActivationDistance = pinchActivationDistance
+        self.pinchActivationRatio = pinchActivationRatio
+        self.pinchDominanceRatio = pinchDominanceRatio
+    }
+
+    mutating func begin(center: CGPoint, distance: CGFloat) {
+        lock = .undecided
+        startCenter = center
+        previousCenter = center
+        startDistance = max(distance, 1)
+        previousDistance = distance
+    }
+
+    mutating func update(center: CGPoint, distance: CGFloat) -> Action {
+        guard let startCenter,
+              let previousCenter,
+              let startDistance,
+              let previousDistance else {
+            begin(center: center, distance: distance)
+            return .none
+        }
+
+        let delta = CGSize(width: center.x - previousCenter.x, height: center.y - previousCenter.y)
+        if lock == .undecided {
+            lock = resolvedLock(
+                center: center,
+                startCenter: startCenter,
+                distance: distance,
+                startDistance: startDistance
+            )
+        }
+
+        let action: Action
+        switch lock {
+        case .undecided:
+            action = .none
+        case .remoteScroll:
+            action = abs(delta.width) > 0.001 || abs(delta.height) > 0.001
+                ? .remoteScroll(delta: delta)
+                : .none
+        case .viewportPinch:
+            action = .viewportPinch(ViewportPinchUpdate(
+                center: center,
+                previousCenter: previousCenter,
+                distance: distance,
+                previousDistance: previousDistance
+            ))
+        }
+
+        self.previousCenter = center
+        self.previousDistance = distance
+        return action
+    }
+
+    mutating func reset() {
+        lock = .undecided
+        startCenter = nil
+        previousCenter = nil
+        startDistance = nil
+        previousDistance = nil
+    }
+
+    private func resolvedLock(
+        center: CGPoint,
+        startCenter: CGPoint,
+        distance: CGFloat,
+        startDistance: CGFloat
+    ) -> Lock {
+        let translation = hypot(center.x - startCenter.x, center.y - startCenter.y)
+        let distanceChange = abs(distance - startDistance)
+        let ratioChange = abs(distance / max(startDistance, 1) - 1)
+        let pinchThresholdPassed = distanceChange >= pinchActivationDistance || ratioChange >= pinchActivationRatio
+        let pinchDominatesTranslation = distanceChange >= max(
+            pinchActivationDistance,
+            translation * pinchDominanceRatio
+        )
+
+        if pinchThresholdPassed && pinchDominatesTranslation {
+            return .viewportPinch
+        }
+        if translation >= scrollActivationDistance {
+            return .remoteScroll
+        }
+        return .undecided
+    }
+}
