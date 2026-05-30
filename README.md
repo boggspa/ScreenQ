@@ -453,6 +453,7 @@ pure-Swift tests covering:
 - Streaming decoder accepting byte-by-byte feeds.
 - Streaming decoder rejecting bad magic.
 - Coordinate mapping (fit + fill + out-of-bounds).
+- Trackpad two-finger scroll/pinch gesture resolution.
 - `NormalisedPoint` clamping.
 - `RemoteInputEvent` Codable round-trip.
 

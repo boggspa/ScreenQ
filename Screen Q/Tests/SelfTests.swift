@@ -37,6 +37,10 @@ enum SelfTests {
         results.append(testViewportZoomKeepsAnchorStable())
         results.append(testViewportVisibleRect())
         results.append(testViewportPanInsetsAllowZoomOverscroll())
+        results.append(testTrackpadTwoFingerSlideScrollsThroughDistanceJitter())
+        results.append(testTrackpadTwoFingerSlideScrollsWhenViewportIsZoomed())
+        results.append(testTrackpadTwoFingerPinchDoesNotScroll())
+        results.append(testTrackpadTwoFingerScrollDeltasAreIncremental())
         results.append(testNormalisedClamping())
         results.append(testRemoteInputEventCodableRoundTrip())
         results.append(testRemoteInputMessageCodableCompatibility())
@@ -363,6 +367,82 @@ enum SelfTests {
             return fail("Viewport overscroll padding", "bottom inset did not extend clamp: \(paddedClamped.offset)")
         }
         return ok("Viewport zoom overscroll uses pan insets")
+    }
+
+    private static func testTrackpadTwoFingerSlideScrollsThroughDistanceJitter() -> Result {
+        var resolver = TrackpadTwoFingerGestureResolver()
+        resolver.begin(center: CGPoint(x: 100, y: 100), distance: 80)
+        if resolver.update(center: CGPoint(x: 101, y: 102), distance: 82) != .none {
+            return fail("Trackpad two-finger slide jitter", "tiny movement should not lock")
+        }
+        let action = resolver.update(center: CGPoint(x: 103, y: 120), distance: 84)
+        guard case .remoteScroll(let delta) = action else {
+            return fail("Trackpad two-finger slide jitter", "slide with spacing jitter did not scroll: \(action)")
+        }
+        guard abs(delta.width - 2) < 0.001, abs(delta.height - 18) < 0.001 else {
+            return fail("Trackpad two-finger slide jitter", "unexpected delta \(delta)")
+        }
+        return ok("Trackpad two-finger slide tolerates spacing jitter")
+    }
+
+    private static func testTrackpadTwoFingerSlideScrollsWhenViewportIsZoomed() -> Result {
+        let viewport = ViewportTransform(scale: 2, offset: CGSize(width: -120, height: 80))
+        guard viewport.scale > ViewportTransform.minimumScale else {
+            return fail("Trackpad zoomed two-finger scroll", "test viewport is not zoomed")
+        }
+
+        var resolver = TrackpadTwoFingerGestureResolver()
+        resolver.begin(center: CGPoint(x: 200, y: 200), distance: 90)
+        let action = resolver.update(center: CGPoint(x: 200, y: 230), distance: 92)
+        guard case .remoteScroll(let delta) = action else {
+            return fail("Trackpad zoomed two-finger scroll", "zoomed slide should choose remote scroll: \(action)")
+        }
+        guard abs(delta.height - 30) < 0.001 else {
+            return fail("Trackpad zoomed two-finger scroll", "unexpected delta \(delta)")
+        }
+        return ok("Trackpad two-finger slide scrolls while zoomed")
+    }
+
+    private static func testTrackpadTwoFingerPinchDoesNotScroll() -> Result {
+        var resolver = TrackpadTwoFingerGestureResolver()
+        resolver.begin(center: CGPoint(x: 150, y: 150), distance: 80)
+        let action = resolver.update(center: CGPoint(x: 151, y: 151), distance: 96)
+        guard case .viewportPinch(let update) = action else {
+            return fail("Trackpad two-finger pinch", "pinch should choose viewport zoom: \(action)")
+        }
+        guard abs(update.distance - 96) < 0.001, abs(update.previousDistance - 80) < 0.001 else {
+            return fail("Trackpad two-finger pinch", "unexpected pinch distances \(update)")
+        }
+
+        let nextAction = resolver.update(center: CGPoint(x: 152, y: 152), distance: 110)
+        guard case .viewportPinch = nextAction else {
+            return fail("Trackpad two-finger pinch", "locked pinch should stay viewport zoom: \(nextAction)")
+        }
+        return ok("Trackpad two-finger pinch does not scroll")
+    }
+
+    private static func testTrackpadTwoFingerScrollDeltasAreIncremental() -> Result {
+        var resolver = TrackpadTwoFingerGestureResolver()
+        resolver.begin(center: CGPoint(x: 50, y: 50), distance: 70)
+
+        guard case .remoteScroll(let first) = resolver.update(center: CGPoint(x: 50, y: 60), distance: 70) else {
+            return fail("Trackpad scroll incremental deltas", "first slide did not scroll")
+        }
+        guard case .remoteScroll(let second) = resolver.update(center: CGPoint(x: 50, y: 75), distance: 70) else {
+            return fail("Trackpad scroll incremental deltas", "second slide did not scroll")
+        }
+        resolver.reset()
+        resolver.begin(center: CGPoint(x: 200, y: 200), distance: 70)
+        guard case .remoteScroll(let afterReset) = resolver.update(center: CGPoint(x: 200, y: 212), distance: 70) else {
+            return fail("Trackpad scroll incremental deltas", "post-reset slide did not scroll")
+        }
+
+        guard abs(first.height - 10) < 0.001,
+              abs(second.height - 15) < 0.001,
+              abs(afterReset.height - 12) < 0.001 else {
+            return fail("Trackpad scroll incremental deltas", "unexpected deltas \(first), \(second), \(afterReset)")
+        }
+        return ok("Trackpad two-finger scroll uses incremental deltas")
     }
 
     private static func testNormalisedClamping() -> Result {
