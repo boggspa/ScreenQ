@@ -40,11 +40,17 @@ assert_not_matching 'SUPPORTED_PLATFORMS = .*xros' "$project_file"
 assert_not_matching 'SUPPORTED_PLATFORMS = .*xrsimulator' "$project_file"
 assert_not_matching 'TARGETED_DEVICE_FAMILY = ".*7' "$project_file"
 assert_not_matching 'Embed App Extensions|ScreenQBroadcastExtension\.appex in Embed' "$project_file"
-assert_not_matching 'DEVELOPMENT_TEAM =|8CZML8FK2D|/Users/chrisizatt|com\.chrisizatt' "$project_file"
+assert_not_matching 'DEVELOPMENT_TEAM =|/Users/[^/" ]+' "$project_file"
 assert_not_matching 'CODE_SIGN_ENTITLEMENTS = "Screen Q/Screen Q\.entitlements"' "$project_file"
 assert_matching 'CODE_SIGN_ENTITLEMENTS\[sdk=iphoneos\*\].*ScreenQ-iOS\.entitlements' "$project_file"
 assert_matching 'CODE_SIGN_ENTITLEMENTS\[sdk=iphonesimulator\*\].*ScreenQ-iOS\.entitlements' "$project_file"
 assert_matching 'CODE_SIGN_ENTITLEMENTS\[sdk=macosx\*\].*ScreenQ-macOS-DeveloperID\.entitlements' "$project_file"
+
+if grep -E 'PRODUCT_BUNDLE_IDENTIFIER|SCREENQ_BUNDLE_ID' "$project_file" \
+    | grep -E 'com\.' \
+    | grep -Ev 'com\.example\.Screen-Q' >/dev/null; then
+    fail "$project_file contains a hard-coded non-example bundle identifier"
+fi
 
 assert_matching 'com\.apple\.developer\.ubiquity-kvstore-identifier' "$repo_root/Screen Q/Entitlements/ScreenQ-iOS.entitlements"
 assert_not_matching 'com\.apple\.developer\.ubiquity-kvstore-identifier' "$repo_root/Screen Q/Entitlements/ScreenQ-macOS-DeveloperID.entitlements"
