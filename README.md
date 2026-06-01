@@ -12,6 +12,29 @@ focuses on consent-based personal and studio workflows, local network
 discovery, Tailscale/VPN reachability, and platform behavior that stays
 inside public Apple APIs.
 
+## Why this matters
+
+Most remote access tools ask users to trust a relay service, a broad
+device-management agent, or opaque platform workarounds. Screen Q takes a
+smaller and more inspectable path: local-first discovery, VPN-friendly
+manual connections, explicit host approval, pinned device identities, and
+clear boundaries around what Apple platforms safely allow.
+
+The project is also intentionally honest about iPhone and iPad. Screen Q
+does not claim third-party remote control where Apple provides no public,
+App Store-safe input API. Instead, it keeps the macOS remote-control path
+auditable and points iOS users toward Apple-managed alternatives when
+those are the right tool.
+
+![Screen Q role selection and host setup](Docs/Media/screenq-role-selection.png)
+
+See [Docs/Demo.md](Docs/Demo.md) for the current preview flow and release
+demo notes.
+
+## Roadmap
+
+See [ROADMAP.md](ROADMAP.md) for the public roadmap and issue queue.
+
 ## Capabilities
 
 ### Shipping
