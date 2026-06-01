@@ -1,0 +1,46 @@
+name: Release Guard
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  public-release-guard:
+    name: Public Release Guard
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Static release guards
+        run: Scripts/check_public_release_guards.sh
+
+      - name: Build macOS Release
+        run: |
+          xcodebuild \
+            -scheme "Screen Q" \
+            -destination "platform=macOS" \
+            -configuration Release \
+            -derivedDataPath "$RUNNER_TEMP/screenq-mac-dd" \
+            build \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Build iOS Simulator Release
+        run: |
+          xcodebuild \
+            -scheme "Screen Q" \
+            -destination "generic/platform=iOS Simulator" \
+            -configuration Release \
+            -derivedDataPath "$RUNNER_TEMP/screenq-ios-dd" \
+            build \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Built artifact guards
+        env:
+          SCREENQ_MAC_APP_PATH: ${{ runner.temp }}/screenq-mac-dd/Build/Products/Release/Screen Q.app
+          SCREENQ_IOS_APP_PATH: ${{ runner.temp }}/screenq-ios-dd/Build/Products/Release-iphonesimulator/Screen Q.app
+        run: Scripts/check_public_release_guards.sh

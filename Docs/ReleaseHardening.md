@@ -49,6 +49,26 @@ SCREENQ_VERSION=1.0.0 Scripts/generate_sbom.sh dist/release/ScreenQ-sbom.json
 
 The generated SBOM records Screen Q, the embedded ScreenQFreeRDPBridge, FreeRDP, OpenSSL, and the git revision used for the build.
 
+## CI Release Guard
+
+Run the public-release guard locally before opening a release PR:
+
+```sh
+Scripts/check_public_release_guards.sh
+```
+
+After local Release builds, pass the built app paths to verify that public
+artifacts do not embed unfinished app extensions:
+
+```sh
+SCREENQ_MAC_APP_PATH="/path/to/Screen Q.app" \
+SCREENQ_IOS_APP_PATH="/path/to/Release-iphonesimulator/Screen Q.app" \
+Scripts/check_public_release_guards.sh
+```
+
+The GitHub Actions workflow in `.github/workflows/release-guard.yml` runs the
+same guard before and after unsigned macOS and iOS Simulator Release builds.
+
 ## Notarize macOS App
 
 Create the notary profile once:
