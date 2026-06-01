@@ -83,12 +83,12 @@ xcodebuild archive \
   DEVELOPMENT_TEAM=TEAMID
 ```
 
-The shared entitlements file currently includes iCloud key-value storage. A
-macOS Developer ID archive therefore needs a matching provisioning profile for
-the release bundle identifier and enabled iCloud capability. If iCloud sync is
-not part of a public release, split or remove that entitlement from the macOS
-release signing configuration instead of signing with a stale or mismatched
-profile.
+Entitlements are split by SDK. iOS and iPadOS builds use
+`Screen Q/Entitlements/ScreenQ-iOS.entitlements`, which keeps iCloud key-value
+storage available for future TestFlight/App Store work. macOS Developer ID
+builds use `Screen Q/Entitlements/ScreenQ-macOS-DeveloperID.entitlements`,
+which intentionally omits iCloud so notarized public macOS releases do not
+require a Developer ID provisioning profile for iCloud.
 
 iOS, iPadOS, TestFlight, and App Store archives need an Apple Distribution
 certificate plus matching distribution provisioning profiles. Keep

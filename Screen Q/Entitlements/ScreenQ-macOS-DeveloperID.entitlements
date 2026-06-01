@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        Developer ID releases run outside the Mac App Store sandbox so the host
+        can post Accessibility-backed CGEvents for remote control. Keep this
+        file intentionally narrow; add capabilities here only when they are
+        provisioned for Developer ID signing.
+    -->
+</dict>
+</plist>
