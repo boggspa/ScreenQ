@@ -10,7 +10,7 @@
 //
 //    1. In Xcode, File → New → Target → Broadcast Upload Extension.
 //       Name it "ScreenQBroadcastExtension". Pick the same team and a bundle
-//       id of the form com.chrisizatt.Screen-Q.ScreenQBroadcastExtension.
+//       id of the form <your-app-bundle-id>.ScreenQBroadcastExtension.
 //
 //    2. Replace Xcode's auto-generated SampleHandler.swift with this file.
 //       Keep Xcode's Info.plist / entitlements unless you have a reason
@@ -22,7 +22,7 @@
 //
 //    4. In the host app, set
 //         appState.replayKitModel.broadcastExtensionBundleID =
-//             "com.chrisizatt.Screen-Q.ScreenQBroadcastExtension"
+//             "<your-app-bundle-id>.ScreenQBroadcastExtension"
 //       before presenting BroadcastPicker.
 //
 //  Touch / keyboard injection from the broadcast extension is NOT possible

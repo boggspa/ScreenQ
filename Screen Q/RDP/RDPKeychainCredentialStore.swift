@@ -10,7 +10,7 @@ import Foundation
 import Security
 
 nonisolated enum RDPKeychainCredentialStore {
-    private static let service = "com.chrisizatt.ScreenQ.rdp"
+    private static let service = BundleIdentity.service("rdp")
 
     static func load(host: String, port: UInt16, operationPrompt: String? = nil) -> RDPCredentials? {
         let query: [String: Any] = [

@@ -81,7 +81,7 @@ inside public Apple APIs.
 
 ### Demoted / not marketed
 
-- **Vision Pro** remains a compile target experiment only until it can be
+- **Vision Pro** is not part of the public build settings until it can be
   tested as a first-class viewer surface.
 - **iPhone / iPad screen sharing** remains Apple-native guidance rather
   than a Screen Q product path.
@@ -105,7 +105,7 @@ well-behaved third-party app)
 ## Project layout
 
 ```
-Screen Q.xcodeproj          // multiplatform target (macOS, iOS, iPadOS; visionOS experimental)
+Screen Q.xcodeproj          // multiplatform target (macOS, iOS, iPadOS)
 Screen Q/
   Screen_QApp.swift         // app entry point
   AppState.swift            // top-level observable state
@@ -185,8 +185,8 @@ Screen Q/
     AuditLog.swift
   Tests/
     SelfTests.swift          // deterministic, runnable from DiagnosticsView
-ScreenQBroadcastExtension/   // scaffolding for the Broadcast Upload Extension
-                             // target (NOT part of the main target; see below)
+ScreenQBroadcastExtension/   // development-only Broadcast Upload Extension
+                             // scaffolding; not embedded by the app target
 ```
 
 ## Wire format
@@ -236,6 +236,15 @@ Screen Q does not claim E2EE for those routes.
   enabled, notarized, and ship signed/pinned FreeRDP/OpenSSL bridge
   dependencies with an SBOM and documented update process. See
   `Docs/ReleaseHardening.md`.
+- The macOS host build is intended for Developer ID distribution, not the
+  Mac App Store. It disables App Sandbox so it can use Accessibility-backed
+  `CGEvent` input injection. iOS and iPadOS distribution can remain
+  App Store-oriented, but public builds do not embed the unfinished
+  ReplayKit Broadcast Upload Extension.
+- The checked-in Xcode project uses `com.example.Screen-Q` as its neutral
+  default bundle identifier. For signed local, TestFlight, App Store, or
+  Developer ID builds, override `SCREENQ_BUNDLE_ID` with your registered app
+  identifier.
 
 ## Required macOS permissions
 
@@ -299,7 +308,7 @@ Screen Q's native port `38745` for a Windows RDP target.
    copies `.build/ScreenQFreeRDPBridge/dist/libScreenQFreeRDPBridge.dylib`
    into `Screen Q.app/Contents/Frameworks`.
 3. For a manual local debug run outside Xcode, either set
-   `SCREENQ_FREERDP_BRIDGE_PATH=/Users/chrisizatt/Documents/Screen Q/.build/ScreenQFreeRDPBridge/dist/libScreenQFreeRDPBridge.dylib`
+   `SCREENQ_FREERDP_BRIDGE_PATH="$(pwd)/.build/ScreenQFreeRDPBridge/dist/libScreenQFreeRDPBridge.dylib"`
    or copy it into an app bundle:
    `Scripts/build_freerdp_bridge.sh --install-to-app "/path/to/Screen Q.app"`.
 4. In Screen Q, connect to the Windows PC's Tailscale IP or MagicDNS name
@@ -345,9 +354,11 @@ dependency packaging and tests.
 ## iOS Broadcast Upload Extension (demoted)
 
 The companion `ScreenQBroadcastExtension/` target remains in the repository as
-a ReplayKit experiment and compatibility reference. It is not a marketed Screen
-Q remote-control path because iOS and iPadOS do not expose public input
-injection APIs to third-party apps.
+a ReplayKit experiment and compatibility reference. The main app target does
+not depend on or embed it, and the default broadcast picker extension id is
+`nil` in public builds. It is not a marketed Screen Q remote-control path
+because iOS and iPadOS do not expose public input injection APIs to
+third-party apps.
 
 The `ScreenQBroadcastExtension/` folder contains:
 
@@ -415,16 +426,20 @@ Screen Sharing and Windows VNC hosts.
 - **Wake-on-LAN** — UDP magic packet sender
 - **Performance graphs** — real-time sparkline for bandwidth, FPS, and RTT
 
-### Planned administrative features
+### Administrative feature status
 
-- **Granular permission model** — 9 flags (observe, control, clipboard, file transfer, remote command, system actions, package install, audio, report) with presets (Full Access / Standard / View Only)
-- **Remote Unix command execution** — shell via `Process`, streamed stdout/stderr in a terminal view
-- **System report / audit** — hardware model, serial, CPU, RAM, disk, IP addresses, installed apps
-- **Connection lists** — saved hosts, recents, groups, and detail sheets for personal/studio organization
-- **Custom cursor bitmap** — actual `NSCursor.image` PNG sent to viewer
-- **Restart / Sleep / Lock / Log Out / Shutdown** — system actions via AppleScript / pmset
-- **Remote package install** — file transfer + `installer -pkg` CLI
-- **Audit log** — persistent JSON-lines log at `~/Library/Logs/ScreenQ/audit.jsonl`
+Public release builds expose observe, control, clipboard, file transfer, and
+audio permissions. Debug builds also expose the privileged admin experiments
+below; release builds ignore their protocol messages on the macOS host until
+they have release-grade hardening and review.
+
+- **Remote Unix command execution** — shell via `Process`, streamed stdout/stderr in a terminal view.
+- **System report / audit** — hardware model, serial, CPU, RAM, disk, IP addresses, installed apps.
+- **Restart / Sleep / Lock / Log Out / Shutdown** — system actions via AppleScript / pmset.
+- **Remote package install** — file transfer + `installer -pkg` CLI.
+
+The broader admin/supportability roadmap still includes richer connection
+lists, custom cursor bitmaps, and persistent audit-log presentation.
 
 ## Known limitations
 
@@ -498,6 +513,16 @@ full handshake.
 After tapping **Start Hosting**, a new card appears listing the host's
 LAN and Tailscale IPv4 addresses with copy-to-clipboard buttons. If the
 card is empty, check that the host has an active network interface.
+
+## License
+
+Screen Q source code is licensed under the Apache License, Version 2.0. See
+`LICENSE` and `NOTICE`.
+
+The Screen Q name, logo, app icon, visual identity, screenshots, and
+app-store or marketing assets are not licensed for use as the identity of a
+forked or redistributed product. Public forks should use their own name,
+bundle identifier, icon, and branding.
 
 ## Build commands used
 

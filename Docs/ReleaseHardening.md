@@ -2,13 +2,27 @@
 
 This document covers the release controls that keep Screen Q self-contained and auditable.
 
+## Distribution Position
+
+- macOS public releases are Developer ID + hardened runtime + notarization
+  builds. They are not Mac App Store builds because the Mac host disables App
+  Sandbox to perform Accessibility-backed `CGEvent` input injection.
+- iOS and iPadOS releases can be App Store-oriented, but public builds must not
+  embed the unfinished `ScreenQBroadcastExtension.appex`.
+- visionOS is not in the public app target's supported platforms until the
+  viewer surface is tested and reviewed.
+- Override the neutral default bundle identifier during signing, for example
+  `SCREENQ_BUNDLE_ID=com.yourcompany.Screen-Q`.
+
 ## Required Release Artifacts
 
 - Signed `Screen Q.app`
 - Signed embedded RDP bridge dependencies
 - Notarization archive and stapled notarized app
 - CycloneDX SBOM
+- Apache-2.0 `LICENSE` and `NOTICE`
 - Dependency version record for FreeRDP and OpenSSL
+- Third-party license/notices archive matching the SBOM
 - Manual security test results for Screen Q Native, Mac Screen Sharing, Generic VNC, and RDP
 
 ## Build Dependencies
@@ -75,3 +89,9 @@ Do not ship a release build if:
 - RDP certificate pin change handling does not hard-stop.
 - Native Screen Q sessions can exchange privileged messages before encryption is active.
 - Saved admin-level credentials can be reused without either explicit fresh entry or local device-owner authentication when that option was enabled.
+- `Screen Q.app/PlugIns/ScreenQBroadcastExtension.appex` is present in an iOS
+  or iPadOS public build.
+- The main app target includes `xros` or `xrsimulator` in `SUPPORTED_PLATFORMS`
+  for a public release.
+- A release build exposes or executes remote command, system action, system
+  report, or package install protocol messages.

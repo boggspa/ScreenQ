@@ -89,6 +89,7 @@ final class ViewerSession: ObservableObject {
             guard let self else { return }
             Task { try? await self.connection.sendJSON(type, msg) }
         }
+#if DEBUG
         terminalState.sendCommand = { [weak self] cmd in
             guard let self else { return }
             Task { try? await self.connection.sendJSON(.remoteCommand, cmd) }
@@ -98,6 +99,7 @@ final class ViewerSession: ObservableObject {
             let req = SystemReportRequestMessage(requestID: UUID())
             Task { try? await self.connection.sendJSON(.systemReportRequest, req) }
         }
+#endif
     }
 
     func beginHandshake() async {
@@ -607,6 +609,7 @@ final class ViewerSession: ObservableObject {
             fileTransfer.handleChunk(chunk)
         case .fileComplete(let complete):
             fileTransfer.handleComplete(complete)
+#if DEBUG
         case .commandOutput(let output):
             terminalState.handleOutput(output)
         case .systemActionResult(let result):
@@ -615,6 +618,10 @@ final class ViewerSession: ObservableObject {
             reportState.handleReport(report)
         case .packageInstallResult(let result):
             Logger.shared.info("PackageInstall result: \(result.success) — \(result.output)")
+#else
+        case .commandOutput, .systemActionResult, .systemReport, .packageInstallResult:
+            break
+#endif
         case .pong(let p):
             let now = Date().timeIntervalSince1970
             updateLatencyOffset(from: p, receivedAt: now)

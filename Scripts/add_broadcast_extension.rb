@@ -1,7 +1,9 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Adds the ScreenQBroadcastExtension target to the Screen Q Xcode project.
+# Adds a standalone development ScreenQBroadcastExtension target to the Screen Q
+# Xcode project. Public app builds must not depend on or embed this target until
+# the ReplayKit upload transport is implemented and reviewed.
 #
 # Run from the project root:
 #
@@ -16,10 +18,11 @@ require "fileutils"
 PROJECT_PATH      = "Screen Q.xcodeproj"
 HOST_TARGET_NAME  = "Screen Q"
 EXT_TARGET_NAME   = "ScreenQBroadcastExtension"
-EXT_BUNDLE_ID     = "com.chrisizatt.Screen-Q.ScreenQBroadcastExtension"
-DEV_TEAM          = "8CZML8FK2D"
+DEFAULT_APP_BUNDLE_ID = ENV.fetch("SCREENQ_BUNDLE_ID", "com.example.Screen-Q")
+EXT_BUNDLE_ID     = ENV.fetch("SCREENQ_BROADCAST_EXTENSION_BUNDLE_ID", "#{DEFAULT_APP_BUNDLE_ID}.ScreenQBroadcastExtension")
+DEV_TEAM          = ENV["DEVELOPMENT_TEAM"]
 EXT_FOLDER        = "ScreenQBroadcastExtension"
-IOS_DEPLOY_TARGET = "26.2"
+IOS_DEPLOY_TARGET = ENV.fetch("IOS_DEPLOYMENT_TARGET", "17.0")
 SWIFT_VERSION     = "5.0"
 
 abort "❌ #{PROJECT_PATH} not found" unless File.directory?(PROJECT_PATH)
@@ -35,9 +38,6 @@ if project.targets.any? { |t| t.name == EXT_TARGET_NAME }
   puts "✅ #{EXT_TARGET_NAME} target already exists — nothing to do"
   exit 0
 end
-
-host_target = project.targets.find { |t| t.name == HOST_TARGET_NAME }
-abort "❌ Could not find host target '#{HOST_TARGET_NAME}'" unless host_target
 
 # ----------------------------------------------------------------------------
 # 1. Create the extension target
@@ -57,7 +57,8 @@ ext_target.build_configurations.each do |config|
   bs = config.build_settings
   bs["PRODUCT_BUNDLE_IDENTIFIER"]            = EXT_BUNDLE_ID
   bs["PRODUCT_NAME"]                         = "$(TARGET_NAME)"
-  bs["DEVELOPMENT_TEAM"]                     = DEV_TEAM
+  bs["SCREENQ_BUNDLE_ID"]                    = DEFAULT_APP_BUNDLE_ID
+  bs["DEVELOPMENT_TEAM"]                     = DEV_TEAM if DEV_TEAM
   bs["CODE_SIGN_STYLE"]                      = "Automatic"
   bs["INFOPLIST_FILE"]                       = "#{EXT_FOLDER}/Info.plist"
   bs["GENERATE_INFOPLIST_FILE"]              = "NO"
@@ -128,36 +129,9 @@ end
 # Resources build phase (empty for the extension)
 ext_target.resources_build_phase
 
-# ----------------------------------------------------------------------------
-# 3. Embed the extension into the host app — iOS only
-# ----------------------------------------------------------------------------
-
-# 3a. Make the host depend on the extension (so it builds first).
-host_target.add_dependency(ext_target)
-
-# 3b. Add an Embed App Extensions copy-files phase to the host app.
-embed_phase = host_target.copy_files_build_phases.find { |p| p.name == "Embed App Extensions" }
-unless embed_phase
-  embed_phase = host_target.new_copy_files_build_phase("Embed App Extensions")
-  embed_phase.symbol_dst_subfolder_spec = :plug_ins   # PBX destination 13
-end
-
-# Add the extension's product reference to the embed phase, with iOS-only filter.
-product_ref = ext_target.product_reference
-unless embed_phase.files.any? { |f| f.file_ref == product_ref }
-  build_file = embed_phase.add_file_reference(product_ref)
-  build_file.settings = { "ATTRIBUTES" => ["RemoveHeadersOnCopy"] }
-  # Restrict to iOS so macOS / visionOS builds don't try to embed it.
-  build_file.platform_filter = "ios"
-end
-
-# ----------------------------------------------------------------------------
-# 4. Save
-# ----------------------------------------------------------------------------
-
 project.save
 puts "✅ Added target '#{EXT_TARGET_NAME}' to #{PROJECT_PATH}"
 puts "   - Bundle id: #{EXT_BUNDLE_ID}"
 puts "   - Sources:   #{EXT_FOLDER}/SampleHandler.swift, #{EXT_FOLDER}/BroadcastSetupViewController.swift"
 puts "   - Info.plist: #{EXT_FOLDER}/Info.plist"
-puts "   - Embedded into '#{HOST_TARGET_NAME}' (iOS only) via Embed App Extensions"
+puts "   - Standalone development target only; not embedded into '#{HOST_TARGET_NAME}'"

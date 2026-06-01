@@ -18,11 +18,10 @@ import Combine
 @MainActor
 final class ReplayKitBroadcastModel: ObservableObject {
 
-    static let defaultBroadcastExtensionBundleID = "com.chrisizatt.Screen-Q.ScreenQBroadcastExtension"
+    static let defaultBroadcastExtensionBundleID: String? = nil
 
-    /// Should match the bundle id of a Broadcast Upload Extension target if
-    /// one has been added. When `nil`, the system picker shows all extensions
-    /// registered on the device.
+    /// Public builds do not ship the experimental Broadcast Upload Extension.
+    /// Set this from a development build only after wiring a working transport.
     @Published var broadcastExtensionBundleID: String? = defaultBroadcastExtensionBundleID
 
     @Published private(set) var isBroadcastingHint: Bool = false

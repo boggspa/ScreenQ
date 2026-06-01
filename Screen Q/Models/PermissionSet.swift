@@ -22,12 +22,17 @@ struct PermissionSet: OptionSet, Codable, Hashable, Sendable {
     static let audioForward    = PermissionSet(rawValue: 1 << 7)
     static let reportInfo      = PermissionSet(rawValue: 1 << 8)
 
-    /// Default for a full-access admin session.
-    static let fullAccess: PermissionSet = [
-        .observe, .control, .clipboard, .fileTransfer,
-        .remoteCommand, .systemActions, .packageInstall,
-        .audioForward, .reportInfo
-    ]
+    /// Default for a full-access session. Privileged admin tools are limited to
+    /// development builds until they have release-grade hardening and review.
+    static let fullAccess: PermissionSet = {
+        var permissions: PermissionSet = [
+            .observe, .control, .clipboard, .fileTransfer, .audioForward
+        ]
+#if DEBUG
+        permissions.formUnion([.remoteCommand, .systemActions, .packageInstall, .reportInfo])
+#endif
+        return permissions
+    }()
 
     /// View-only: can observe and hear audio.
     static let viewOnly: PermissionSet = [.observe, .audioForward]
@@ -39,15 +44,22 @@ struct PermissionSet: OptionSet, Codable, Hashable, Sendable {
 
     // MARK: - Human-readable labels
 
-    static let allCases: [(flag: PermissionSet, label: String, icon: String)] = [
-        (.observe,        "Observe screen",           "eye"),
-        (.control,        "Control (pointer & keyboard)", "cursorarrow.click.2"),
-        (.clipboard,      "Clipboard sharing",        "doc.on.clipboard"),
-        (.fileTransfer,   "File transfer",            "doc.badge.arrow.up"),
-        (.remoteCommand,  "Remote Unix commands",     "terminal"),
-        (.systemActions,  "System actions (restart/sleep/lock)", "power"),
-        (.packageInstall, "Install packages (.pkg)",  "shippingbox"),
-        (.audioForward,   "Audio forwarding",         "speaker.wave.2"),
-        (.reportInfo,     "System report / audit",    "info.circle"),
-    ]
+    static let allCases: [(flag: PermissionSet, label: String, icon: String)] = {
+        var cases: [(flag: PermissionSet, label: String, icon: String)] = [
+            (.observe,        "Observe screen",           "eye"),
+            (.control,        "Control (pointer & keyboard)", "cursorarrow.click.2"),
+            (.clipboard,      "Clipboard sharing",        "doc.on.clipboard"),
+            (.fileTransfer,   "File transfer",            "doc.badge.arrow.up"),
+            (.audioForward,   "Audio forwarding",         "speaker.wave.2"),
+        ]
+#if DEBUG
+        cases.append(contentsOf: [
+            (.remoteCommand,  "Remote Unix commands",     "terminal"),
+            (.systemActions,  "System actions (restart/sleep/lock)", "power"),
+            (.packageInstall, "Install packages (.pkg)",  "shippingbox"),
+            (.reportInfo,     "System report / audit",    "info.circle"),
+        ])
+#endif
+        return cases
+    }()
 }

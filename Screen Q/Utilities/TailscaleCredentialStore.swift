@@ -10,7 +10,7 @@ import Foundation
 import Security
 
 nonisolated enum TailscaleCredentialStore {
-    private static let service = "com.chrisizatt.ScreenQ.tailscale"
+    private static let service = BundleIdentity.service("tailscale")
     private static let apiTokenAccount = "tailnet-devices-api-token"
     private static let oauthClientIDAccount = "tailnet-devices-oauth-client-id"
     private static let oauthClientSecretAccount = "tailnet-devices-oauth-client-secret"

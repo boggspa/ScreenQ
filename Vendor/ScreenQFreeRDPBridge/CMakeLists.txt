@@ -7,6 +7,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 set(SCREENQ_FREERDP_PREFIX "" CACHE PATH "FreeRDP install prefix for static/non-pkg-config builds")
 set(SCREENQ_OPENSSL_PREFIX "" CACHE PATH "OpenSSL install prefix for static/non-pkg-config builds")
+set(SCREENQ_FREERDP_BRIDGE_BUNDLE_ID "com.example.ScreenQFreeRDPBridge" CACHE STRING "iOS framework bundle identifier")
 
 add_library(ScreenQFreeRDPBridge SHARED
     src/ScreenQFreeRDPBridge.c
@@ -100,7 +101,7 @@ if(APPLE AND (IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS"))
     set_target_properties(ScreenQFreeRDPBridge PROPERTIES
         FRAMEWORK TRUE
         FRAMEWORK_VERSION A
-        MACOSX_FRAMEWORK_IDENTIFIER "com.chrisizatt.ScreenQFreeRDPBridge"
+        MACOSX_FRAMEWORK_IDENTIFIER "${SCREENQ_FREERDP_BRIDGE_BUNDLE_ID}"
         MACOSX_FRAMEWORK_BUNDLE_VERSION "1"
         MACOSX_FRAMEWORK_SHORT_VERSION_STRING "1.0"
         XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO"

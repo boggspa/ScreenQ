@@ -999,6 +999,7 @@ final class MacHostRuntime: ObservableObject {
         case .fileComplete(let complete):
             guard hostSession(box, allows: .fileTransfer) else { break }
             hostFileTransfer.handleComplete(complete)
+#if DEBUG
         case .remoteCommand(let cmd):
             guard hostSession(box, allows: .remoteCommand) else { break }
             app.remoteCommandService.sendOutput = { [weak box] output in
@@ -1036,6 +1037,10 @@ final class MacHostRuntime: ObservableObject {
                 event: .packageInstalled,
                 detail: "\(req.fileName): \(result.success ? "OK" : result.output)"
             )
+#else
+        case .remoteCommand, .systemAction, .systemReportRequest, .packageInstallReq:
+            break
+#endif
         case .ping(let p):
             try? await box.connection.sendJSON(.pong, PongMessage(
                 clientTimestamp: p.clientTimestamp,

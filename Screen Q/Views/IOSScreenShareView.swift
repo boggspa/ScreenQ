@@ -192,15 +192,9 @@ struct IOSScreenShareView: View {
     private var broadcastExtensionEmptyState: some View {
         SQEmptyState(
             icon: "antenna.radiowaves.left.and.right.slash",
-            title: "Broadcast extension not installed",
-            message: "Re-install Screen Q from the App Store so iOS can share this screen.",
-            tint: ScreenQTheme.cosmicAmber,
-            primary: .init("Get help", systemImage: "questionmark.circle") {
-                SQHaptics.tap()
-                if let url = URL(string: "https://screenq.app/help/broadcast-extension") {
-                    UIApplication.shared.open(url)
-                }
-            }
+            title: "Broadcast extension unavailable",
+            message: "This build does not include Screen Q's experimental ReplayKit uploader. Use Apple's built-in screen sharing options instead.",
+            tint: ScreenQTheme.cosmicAmber
         )
         .screenQCard()
     }

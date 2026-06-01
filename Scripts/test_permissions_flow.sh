@@ -25,7 +25,7 @@
 
 set -euo pipefail
 
-BUNDLE_ID="com.chrisizatt.Screen-Q"
+BUNDLE_ID="${SCREENQ_BUNDLE_ID:-com.example.Screen-Q}"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT="${PROJECT_DIR}/Screen Q.xcodeproj"
 SCHEME="Screen Q"

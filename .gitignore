@@ -1,5 +1,8 @@
 .build/
 DerivedData/
+xcuserdata/
+*.xcuserdatad/
+*.xcuserstate
 *.xcresult
 dist/
 *.xcarchive

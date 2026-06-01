@@ -15,7 +15,7 @@ nonisolated struct VNCStoredCredential: Codable, Equatable, Sendable {
 }
 
 nonisolated enum VNCKeychainCredentialStore {
-    private static let service = "com.chrisizatt.ScreenQ.vnc"
+    private static let service = BundleIdentity.service("vnc")
 
     static func load(host: String, port: UInt16, operationPrompt: String? = nil) -> VNCStoredCredential? {
         let query: [String: Any] = [

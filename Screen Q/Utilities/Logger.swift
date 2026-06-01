@@ -14,7 +14,7 @@ nonisolated final class Logger: @unchecked Sendable {
 
     static let shared = Logger()
 
-    private let osLog = os.Logger(subsystem: "com.chrisizatt.Screen-Q", category: "ScreenQ")
+    private let osLog = os.Logger(subsystem: BundleIdentity.identifier, category: "ScreenQ")
 
     func info(_ message: String, file: String = #fileID, line: Int = #line) {
         osLog.info("\(self.prefix(file, line)): \(message)")
