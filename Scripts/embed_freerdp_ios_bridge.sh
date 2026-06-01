@@ -26,6 +26,12 @@ if [[ "${PLATFORM_NAME:-}" == macosx ]]; then
     exit 0
 fi
 
+destination_dir="${TARGET_BUILD_DIR:?}/${FRAMEWORKS_FOLDER_PATH:?}"
+destination_framework="$destination_dir/ScreenQFreeRDPBridge.framework"
+mkdir -p "$destination_dir"
+rm -rf "$destination_framework"
+rm -f "$destination_dir/libScreenQFreeRDPBridge.dylib"
+
 if [[ ! -d "$xcframework" ]]; then
     echo "ScreenQFreeRDPBridge.xcframework not found; skipping optional RDP bridge embed."
     exit 0
@@ -49,11 +55,6 @@ if [[ ! -d "$source_framework" ]]; then
     exit 1
 fi
 
-destination_dir="${TARGET_BUILD_DIR:?}/${FRAMEWORKS_FOLDER_PATH:?}"
-destination_framework="$destination_dir/ScreenQFreeRDPBridge.framework"
-mkdir -p "$destination_dir"
-rm -rf "$destination_framework"
-rm -f "$destination_dir/libScreenQFreeRDPBridge.dylib"
 cp -R "$source_framework" "$destination_framework"
 
 plist="$destination_framework/Info.plist"
