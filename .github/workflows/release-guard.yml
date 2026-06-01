@@ -9,12 +9,15 @@ on:
 jobs:
   public-release-guard:
     name: Public Release Guard
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 45
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: xcodebuild -version
 
       - name: Static release guards
         run: Scripts/check_public_release_guards.sh
