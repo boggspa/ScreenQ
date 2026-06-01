@@ -69,6 +69,31 @@ Scripts/check_public_release_guards.sh
 The GitHub Actions workflow in `.github/workflows/release-guard.yml` runs the
 same guard before and after unsigned macOS and iOS Simulator Release builds.
 
+## Signing Prerequisites
+
+Use a registered bundle identifier and Apple team for signed archives:
+
+```sh
+xcodebuild archive \
+  -scheme "Screen Q" \
+  -destination "generic/platform=macOS" \
+  -configuration Release \
+  -archivePath "dist/release/ScreenQ-macOS.xcarchive" \
+  SCREENQ_BUNDLE_ID=com.yourcompany.Screen-Q \
+  DEVELOPMENT_TEAM=TEAMID
+```
+
+The shared entitlements file currently includes iCloud key-value storage. A
+macOS Developer ID archive therefore needs a matching provisioning profile for
+the release bundle identifier and enabled iCloud capability. If iCloud sync is
+not part of a public release, split or remove that entitlement from the macOS
+release signing configuration instead of signing with a stale or mismatched
+profile.
+
+iOS, iPadOS, TestFlight, and App Store archives need an Apple Distribution
+certificate plus matching distribution provisioning profiles. Keep
+`SCREENQ_BUNDLE_ID` set to the registered App ID when archiving.
+
 ## Notarize macOS App
 
 Create the notary profile once:
