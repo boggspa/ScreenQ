@@ -29,6 +29,7 @@
 		B03AAB1A2C472D9EEF840377 /* Exceptions for "Screen Q" folder in "Screen Q" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				"Info-macOS.plist",
 				Info.plist,
 			);
 			target = A4D54D302F9F2D49005C5E5A /* Screen Q */;
@@ -385,6 +386,7 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Screen Q/Info.plist";
+				"INFOPLIST_FILE[sdk=macosx*]" = "Screen Q/Info-macOS.plist";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Screen Q uses the local network to discover and connect to nearby Screen Q hosts via Bonjour and to relay screen sharing data over LAN, VPN, or Tailscale.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
@@ -404,7 +406,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "$(SCREENQ_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
-				SCREENQ_BUNDLE_ID = "com.example.Screen-Q";
+				SCREENQ_BUNDLE_ID = "com.chrisizatt.Screen-Q";
 				SDKROOT = auto;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
@@ -434,6 +436,7 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Screen Q/Info.plist";
+				"INFOPLIST_FILE[sdk=macosx*]" = "Screen Q/Info-macOS.plist";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Screen Q uses the local network to discover and connect to nearby Screen Q hosts via Bonjour and to relay screen sharing data over LAN, VPN, or Tailscale.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
@@ -453,7 +456,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "$(SCREENQ_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
-				SCREENQ_BUNDLE_ID = "com.example.Screen-Q";
+				SCREENQ_BUNDLE_ID = "com.chrisizatt.Screen-Q";
 				SDKROOT = auto;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
@@ -487,7 +490,7 @@
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(SCREENQ_BUNDLE_ID).ScreenQBroadcastExtension";
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				SCREENQ_BUNDLE_ID = "com.example.Screen-Q";
+				SCREENQ_BUNDLE_ID = "com.chrisizatt.Screen-Q";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -519,7 +522,7 @@
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(SCREENQ_BUNDLE_ID).ScreenQBroadcastExtension";
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				SCREENQ_BUNDLE_ID = "com.example.Screen-Q";
+				SCREENQ_BUNDLE_ID = "com.chrisizatt.Screen-Q";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";

@@ -132,7 +132,7 @@ struct StreamQualityPanel: View {
 
                 Slider(value: qualityBinding, in: StreamQualityPreference.allowedRange)
                     .accentColor(ScreenQTheme.cosmicCyan)
-                    .onChange(of: quality) { _ in
+                    .screenQOnChange(of: quality) { _ in
                         #if os(iOS)
                         SQHaptics.tap()
                         #endif

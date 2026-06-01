@@ -212,7 +212,6 @@ final class MetalFrameBufferRenderer {
         guard w > 0, h > 0 else { return }
 
         let bytesPerRow = w * 4
-        let byteCount = bytesPerRow * h
         guard let context = CGContext(
             data: nil,
             width: w,

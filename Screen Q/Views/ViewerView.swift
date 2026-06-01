@@ -148,8 +148,8 @@ struct ViewerView: View {
                     )
                 }
             },
-            onImportRDP: { profile in
-                sessionStore.startRDPSession(profile: profile, app: app)
+            onImportRDP: { profile, wakeMAC in
+                sessionStore.startRDPSession(profile: profile, app: app, wakeMACAddress: wakeMAC)
             }
         )
         .sheet(item: $selectedShareOnlyDevice) { host in
@@ -605,21 +605,42 @@ final class ViewerSessionStore: ObservableObject {
 
     // MARK: - RDP connections
 
-    func startRDPSession(host: String, port: UInt16 = RemoteConnectionProtocol.rdp.defaultPort, label: String, app: AppState) {
+    func startRDPSession(
+        host: String,
+        port: UInt16 = RemoteConnectionProtocol.rdp.defaultPort,
+        label: String,
+        app: AppState,
+        wakeMACAddress: String? = nil
+    ) {
         let profile = RDPConnectionProfile(displayName: label, host: host, port: port)
-        startRDPSession(profile: profile, app: app)
+        startRDPSession(profile: profile, app: app, wakeMACAddress: wakeMACAddress)
     }
 
-    func startRDPSession(profile: RDPConnectionProfile, app: AppState) {
+    func startRDPSession(profile: RDPConnectionProfile, app: AppState, wakeMACAddress: String? = nil) {
+        let wakeMAC = WakeOnLAN.normalizedMACString(wakeMACAddress)
+            ?? app.wakeMACAddress(forHost: profile.host, port: profile.port)
         app.savedConnections.addOrUpdate(
             host: profile.host,
             port: profile.port,
             displayName: profile.displayName,
-            connectionProtocol: .rdp
+            connectionProtocol: .rdp,
+            wakeMACAddress: wakeMAC
         )
         let session = RDPSession(profile: profile)
         append(ViewerSessionSlot(kind: .rdp(session)))
-        Task { await session.connect() }
+        Task {
+            if let wakeMAC {
+                let didSendWake = await sendWakePacketIfPossible(
+                    macAddress: wakeMAC,
+                    host: profile.host,
+                    port: profile.port
+                )
+                if didSendWake {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                }
+            }
+            await session.connect()
+        }
     }
 
     func tearDownRDP() async {

@@ -313,7 +313,7 @@ struct SettingsScene: View {
                 ) {
                     Toggle("", isOn: $curtainModeDefault)
                         .labelsHidden()
-                        .onChange(of: curtainModeDefault) { _ in
+                        .screenQOnChange(of: curtainModeDefault) { _ in
                             SQHaptics.tap()
                         }
                 }
@@ -672,7 +672,7 @@ private struct ToolbarGesturesSettings: View {
                         step: 0.5
                     )
                     .labelsHidden()
-                    .onChange(of: modifierAutoReleaseSeconds) { _ in
+                    .screenQOnChange(of: modifierAutoReleaseSeconds) { _ in
                         SQHaptics.tap()
                     }
                 }
@@ -687,7 +687,7 @@ private struct ToolbarGesturesSettings: View {
                 ) {
                     Toggle("", isOn: $stickyModifierOnLongPress)
                         .labelsHidden()
-                        .onChange(of: stickyModifierOnLongPress) { _ in
+                        .screenQOnChange(of: stickyModifierOnLongPress) { _ in
                             SQHaptics.tap()
                         }
                 }
@@ -714,7 +714,7 @@ private struct ToolbarGesturesSettings: View {
                 ) {
                     Toggle("", isOn: $statsHUDCollapsed)
                         .labelsHidden()
-                        .onChange(of: statsHUDCollapsed) { _ in
+                        .screenQOnChange(of: statsHUDCollapsed) { _ in
                             SQHaptics.tap()
                         }
                 }
@@ -836,7 +836,7 @@ private struct MenuBarShortcutSettingsRow: View {
             .labelsHidden()
             .pickerStyle(.menu)
             .frame(maxWidth: 160)
-            .onChange(of: manager.current) { _ in
+            .screenQOnChange(of: manager.current) { _ in
                 SQHaptics.tap()
             }
         }

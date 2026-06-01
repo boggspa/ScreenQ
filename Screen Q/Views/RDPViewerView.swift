@@ -194,12 +194,12 @@ struct RDPViewerView: View {
         .onReceive(controlPreferences.$streamProfile.removeDuplicates().dropFirst()) { _ in
             applyStreamControls()
         }
-        .onChange(of: session.phase) { newPhase in
+        .screenQOnChange(of: session.phase) { newPhase in
             syncCredentialFields(from: newPhase)
             stopRecordingIfSessionInactive()
             handlePhaseChange(newPhase)
         }
-        .onChange(of: stats.fps) { newFPS in
+        .screenQOnChange(of: stats.fps) { newFPS in
             if newFPS > peakSessionFPS {
                 peakSessionFPS = newFPS
             }
@@ -534,9 +534,9 @@ struct RDPViewerView: View {
                 #endif
             }
             .onAppear { updateCanvas(size: proxy.size) }
-            .onChange(of: proxy.size) { updateCanvas(size: $0) }
-            .onChange(of: session.fitMode) { _ in clampViewport(for: proxy.size) }
-            .onChange(of: viewport) { updateCanvas(size: proxy.size, viewport: $0) }
+            .screenQOnChange(of: proxy.size) { updateCanvas(size: $0) }
+            .screenQOnChange(of: session.fitMode) { _ in clampViewport(for: proxy.size) }
+            .screenQOnChange(of: viewport) { updateCanvas(size: proxy.size, viewport: $0) }
             .clipped()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -876,7 +876,7 @@ struct RDPViewerView: View {
                 Label("Dynamic resolution requested", systemImage: "arrow.up.left.and.arrow.down.right")
             }
             if session.profile.redirectClipboard {
-                Label("Clipboard redirection requested", systemImage: "doc.on.clipboard")
+                Label("Clipboard redirection enabled", systemImage: "doc.on.clipboard")
             }
         }
         .font(.sqCaption)

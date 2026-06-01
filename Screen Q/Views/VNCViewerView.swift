@@ -167,11 +167,11 @@ struct VNCViewerView: View {
         .onReceive(controlPreferences.$streamProfile.removeDuplicates()) { _ in
             Task { await applyStreamControls() }
         }
-        .onChange(of: session.phase) { _ in
+        .screenQOnChange(of: session.phase) { _ in
             stopRecordingIfSessionInactive()
             handlePhaseChange(session.phase)
         }
-        .onChange(of: session.measuredFPS) { newFPS in
+        .screenQOnChange(of: session.measuredFPS) { newFPS in
             if newFPS > peakSessionFPS {
                 peakSessionFPS = newFPS
             }

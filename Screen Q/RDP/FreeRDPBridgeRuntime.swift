@@ -19,7 +19,7 @@ private typealias SQFreeRDPSendInputFn = @convention(c) (UnsafeMutableRawPointer
 private typealias SQFreeRDPResizeFn = @convention(c) (UnsafeMutableRawPointer?, Int32, Int32, Double) -> Int32
 private typealias SQFreeRDPLastErrorFn = @convention(c) (UnsafeMutableRawPointer?) -> UnsafePointer<CChar>?
 
-nonisolated final class FreeRDPBridgeRuntime {
+nonisolated final class FreeRDPBridgeRuntime: @unchecked Sendable {
     private let libraryHandle: UnsafeMutableRawPointer
     private let createSessionFn: SQFreeRDPCreateSessionFn
     private let destroySessionFn: SQFreeRDPDestroySessionFn

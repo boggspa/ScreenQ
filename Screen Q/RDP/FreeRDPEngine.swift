@@ -52,6 +52,7 @@ final class FreeRDPEngine: RDPEngine {
             streamContinuation = continuation
             sessionHandle = handle
             runtime.setEventCallback(handle, FreeRDPBridgeCallbacks.eventCallback, Unmanaged.passUnretained(self).toOpaque())
+            let handleBits = UInt(bitPattern: handle)
 
             let engine = self
             continuation.onTermination = { _ in
@@ -63,6 +64,10 @@ final class FreeRDPEngine: RDPEngine {
             // Dispatch the potentially-blocking TLS/NLA connect off the main
             // thread so the UI stays responsive during handshake.
             DispatchQueue.global(qos: .userInitiated).async {
+                guard let handle = UnsafeMutableRawPointer(bitPattern: handleBits) else {
+                    continuation.finish(throwing: RDPEngineError.engineUnavailable(detail: "The FreeRDP bridge lost its RDP session handle."))
+                    return
+                }
                 let result = withBridgeConfig(
                     profile: profile,
                     credentials: credentials,

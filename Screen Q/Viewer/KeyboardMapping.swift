@@ -13,22 +13,22 @@ import SwiftUI
 enum KeyboardMapping {
 
     static func keyCode(forSwiftUI key: KeyEquivalent) -> KeyCode? {
-        switch key {
-        case .return:        return .returnKey
-        case .escape:        return .escape
-        case .tab:            return .tab
-        case .delete:         return .backspace
-        case .deleteForward:  return .delete
-        case .upArrow:        return .arrowUp
-        case .downArrow:      return .arrowDown
-        case .leftArrow:      return .arrowLeft
-        case .rightArrow:     return .arrowRight
-        case .space:          return .spacebar
-        case .home:           return .home
-        case .end:            return .end
-        case .pageUp:         return .pageUp
-        case .pageDown:       return .pageDown
-        default:              return nil
+        switch key.character.unicodeScalars.first?.value {
+        case 0x000D: return .returnKey
+        case 0x001B: return .escape
+        case 0x0009: return .tab
+        case 0x0008: return .backspace
+        case 0xF728: return .delete
+        case 0xF700: return .arrowUp
+        case 0xF701: return .arrowDown
+        case 0xF702: return .arrowLeft
+        case 0xF703: return .arrowRight
+        case 0x0020: return .spacebar
+        case 0xF729: return .home
+        case 0xF72B: return .end
+        case 0xF72C: return .pageUp
+        case 0xF72D: return .pageDown
+        default: return nil
         }
     }
 

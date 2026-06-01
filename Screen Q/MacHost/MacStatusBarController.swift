@@ -281,7 +281,13 @@ final class MacStatusBarController: NSObject, ObservableObject {
         case .vnc:
             store.startVNCSession(host: saved.host, port: saved.port, label: saved.displayName, profile: .genericVNC)
         case .rdp:
-            store.startRDPSession(host: saved.host, port: saved.port, label: saved.displayName, app: app)
+            store.startRDPSession(
+                host: saved.host,
+                port: saved.port,
+                label: saved.displayName,
+                app: app,
+                wakeMACAddress: saved.wakeMACAddress
+            )
         case .screenQ:
             Task {
                 await store.connect(via: app, hostText: saved.host, port: saved.port, connectionProtocol: .screenQ, displayName: saved.displayName)

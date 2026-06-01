@@ -18,14 +18,15 @@ struct ManualConnectView: View {
     @State private var importedRDPProfile: RDPConnectionProfile?
     @State private var importError: String?
     @State private var wakeMACText: String = ""
+    @State private var rdpClipboardRedirection = RDPConnectionProfile.defaultRedirectClipboard
     var onConnect: (String, UInt16, RemoteConnectionProtocol, String?) -> Void
-    var onImportRDP: (RDPConnectionProfile) -> Void
+    var onImportRDP: (RDPConnectionProfile, String?) -> Void
 
     init(
         initialProtocol: RemoteConnectionProtocol = .screenQ,
         launchRDPImporter: Bool = false,
         onConnect: @escaping (String, UInt16, RemoteConnectionProtocol) -> Void,
-        onImportRDP: @escaping (RDPConnectionProfile) -> Void = { _ in }
+        onImportRDP: @escaping (RDPConnectionProfile, String?) -> Void = { _, _ in }
     ) {
         self._selectedProtocol = State(initialValue: initialProtocol)
         self._portText = State(initialValue: String(initialProtocol.defaultPort))
@@ -40,7 +41,7 @@ struct ManualConnectView: View {
         initialProtocol: RemoteConnectionProtocol = .screenQ,
         launchRDPImporter: Bool = false,
         onConnectWithWake: @escaping (String, UInt16, RemoteConnectionProtocol, String?) -> Void,
-        onImportRDP: @escaping (RDPConnectionProfile) -> Void = { _ in }
+        onImportRDP: @escaping (RDPConnectionProfile, String?) -> Void = { _, _ in }
     ) {
         self._selectedProtocol = State(initialValue: initialProtocol)
         self._portText = State(initialValue: String(initialProtocol.defaultPort))
@@ -58,7 +59,7 @@ struct ManualConnectView: View {
         self._portText = State(initialValue: String(initialProtocol.defaultPort))
         self._shouldLaunchRDPImporter = State(initialValue: launchRDPImporter)
         self.onConnect = { host, port, _, _ in onConnect(host, port) }
-        self.onImportRDP = { _ in }
+        self.onImportRDP = { _, _ in }
     }
 
     var body: some View {
@@ -342,6 +343,12 @@ struct ManualConnectView: View {
                 Label("Screen Q imports .rdp profiles, stores credentials in Keychain, reviews certificates, and uses the bundled FreeRDP bridge for live sessions.", systemImage: "puzzlepiece.extension")
                 Label(rdpSecurityHint, systemImage: rdpSecurityIcon)
                     .foregroundColor(rdpSecurityTint)
+                Toggle(isOn: $rdpClipboardRedirection) {
+                    Label("Share clipboard with RDP session", systemImage: "doc.on.clipboard")
+                }
+                .toggleStyle(.switch)
+                Label(rdpClipboardDisclosure, systemImage: rdpClipboardDisclosureIcon)
+                    .foregroundColor(rdpClipboardDisclosureTint)
                 Button {
                     SQHaptics.tap()
                     isImportingRDP = true
@@ -538,7 +545,19 @@ struct ManualConnectView: View {
            let importedRDPProfile,
            importedRDPProfile.host == host,
            importedRDPProfile.port == port {
-            onImportRDP(importedRDPProfile)
+            var profile = importedRDPProfile
+            profile.redirectClipboard = rdpClipboardRedirection
+            onImportRDP(profile, wakeMAC)
+            return
+        }
+
+        if selectedProtocol == .rdp {
+            onImportRDP(RDPConnectionProfile(
+                displayName: host,
+                host: host,
+                port: port,
+                redirectClipboard: rdpClipboardRedirection
+            ), wakeMAC)
             return
         }
         onConnect(host, port, connectionProtocol, wakeMAC)
@@ -578,6 +597,7 @@ struct ManualConnectView: View {
             hostText = profile.host
             portText = String(profile.port)
             importedRDPProfile = profile
+            rdpClipboardRedirection = RDPConnectionProfile.defaultRedirectClipboard
             importError = nil
             probeResult = nil
             SQHaptics.success()
@@ -585,6 +605,24 @@ struct ManualConnectView: View {
             importError = error.localizedDescription
             SQHaptics.error()
         }
+    }
+
+    private var rdpClipboardDisclosure: String {
+        if rdpClipboardRedirection {
+            return "The next RDP session may read and write the local clipboard through the RDP channel."
+        }
+        if importedRDPProfile?.redirectClipboard == true {
+            return "The imported .rdp file requested clipboard redirection; Screen Q keeps it off until you enable it."
+        }
+        return "Clipboard redirection is off by default. Enable it only when this Windows session should share pasteboard contents."
+    }
+
+    private var rdpClipboardDisclosureIcon: String {
+        rdpClipboardRedirection ? "checkmark.shield" : "hand.raised"
+    }
+
+    private var rdpClipboardDisclosureTint: Color {
+        rdpClipboardRedirection ? ScreenQTheme.cosmicAmber : Color.secondary
     }
 }
 

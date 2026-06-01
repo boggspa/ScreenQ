@@ -89,7 +89,7 @@ struct RemoteTerminalView: View {
                     }
                     .padding(12)
                 }
-                .onChange(of: state.history.count) { _ in
+                .screenQOnChange(of: state.history.count) { _ in
                     proxy.scrollTo("bottom", anchor: .bottom)
                 }
             }

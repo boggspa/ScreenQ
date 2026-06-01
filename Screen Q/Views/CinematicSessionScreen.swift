@@ -313,7 +313,7 @@ struct CinematicSessionPairingScreen: View {
             .keyboardType(.numberPad)
             .textContentType(.oneTimeCode)
             #endif
-            .onChange(of: pairingPrompt) { newValue in
+            .screenQOnChange(of: pairingPrompt) { newValue in
                 // Strip non-digits and cap to 6.
                 let digits = newValue.filter { $0.isNumber }
                 let limited = String(digits.prefix(6))

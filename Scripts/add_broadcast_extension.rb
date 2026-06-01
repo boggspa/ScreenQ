@@ -18,7 +18,7 @@ require "fileutils"
 PROJECT_PATH      = "Screen Q.xcodeproj"
 HOST_TARGET_NAME  = "Screen Q"
 EXT_TARGET_NAME   = "ScreenQBroadcastExtension"
-DEFAULT_APP_BUNDLE_ID = ENV.fetch("SCREENQ_BUNDLE_ID", "com.example.Screen-Q")
+DEFAULT_APP_BUNDLE_ID = ENV.fetch("SCREENQ_BUNDLE_ID", "com.chrisizatt.Screen-Q")
 EXT_BUNDLE_ID     = ENV.fetch("SCREENQ_BROADCAST_EXTENSION_BUNDLE_ID", "#{DEFAULT_APP_BUNDLE_ID}.ScreenQBroadcastExtension")
 DEV_TEAM          = ENV["DEVELOPMENT_TEAM"]
 EXT_FOLDER        = "ScreenQBroadcastExtension"

@@ -69,9 +69,8 @@ nonisolated enum CredentialInventoryStore {
         let cleanedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanedHost.isEmpty else { return }
 
-        let cleanedUsername = username?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .nilIfEmpty
+        let trimmedUsername = username?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedUsername = trimmedUsername?.isEmpty == true ? nil : trimmedUsername
 
         let metadata = StoredCredentialMetadata(
             kind: kind,
@@ -105,11 +104,5 @@ nonisolated enum CredentialInventoryStore {
     private static func saveRecords(_ records: [String: StoredCredentialMetadata]) {
         guard let data = try? JSONEncoder().encode(records) else { return }
         UserDefaults.standard.set(data, forKey: storeKey)
-    }
-}
-
-private extension String {
-    var nilIfEmpty: String? {
-        isEmpty ? nil : self
     }
 }

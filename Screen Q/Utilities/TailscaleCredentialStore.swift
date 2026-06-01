@@ -102,14 +102,16 @@ nonisolated enum TailscaleCredentialStore {
     }
 
     private static func loadString(account: String, operationPrompt: String) -> String? {
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecUseOperationPrompt as String: operationPrompt
+            kSecMatchLimit as String: kSecMatchLimitOne
         ]
+        for (key, value) in CredentialKeychainAccess.reuseQueryAttributes(operationPrompt: operationPrompt) {
+            query[key] = value
+        }
 
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)

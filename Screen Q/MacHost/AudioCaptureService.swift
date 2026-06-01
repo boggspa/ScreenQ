@@ -78,7 +78,7 @@ final class AudioCaptureService: ObservableObject {
         guard let dataBuffer = CMSampleBufferGetDataBuffer(buffer) else { return }
         let length = CMBlockBufferGetDataLength(dataBuffer)
         var data = Data(count: length)
-        data.withUnsafeMutableBytes { ptr in
+        _ = data.withUnsafeMutableBytes { ptr in
             CMBlockBufferCopyDataBytes(dataBuffer, atOffset: 0, dataLength: length, destination: ptr.baseAddress!)
         }
         audioSink?(data)
@@ -88,7 +88,7 @@ final class AudioCaptureService: ObservableObject {
 /// Minimal SCStreamOutput delegate that forwards audio buffers.
 @available(macOS 13.0, *)
 private final class AudioOutputDelegate: NSObject, SCStreamOutput {
-    let onBuffer: (CMSampleBuffer, CMTime) -> Void
+    nonisolated(unsafe) let onBuffer: (CMSampleBuffer, CMTime) -> Void
 
     init(onBuffer: @escaping (CMSampleBuffer, CMTime) -> Void) {
         self.onBuffer = onBuffer

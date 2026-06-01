@@ -27,6 +27,14 @@ nonisolated struct RDPConnectionProfile: Codable, Hashable, Sendable {
     var allowFontSmoothing: Bool
     var rawSettings: [String: String]
 
+    static var defaultRedirectClipboard: Bool {
+        #if os(iOS)
+        return false
+        #else
+        return true
+        #endif
+    }
+
     init(
         displayName: String,
         host: String,
@@ -40,7 +48,7 @@ nonisolated struct RDPConnectionProfile: Codable, Hashable, Sendable {
         dynamicResolution: Bool = true,
         administrativeSession: Bool = false,
         connectToConsole: Bool = false,
-        redirectClipboard: Bool = true,
+        redirectClipboard: Bool = RDPConnectionProfile.defaultRedirectClipboard,
         redirectAudio: Bool = false,
         allowFontSmoothing: Bool = true,
         rawSettings: [String: String] = [:]
@@ -88,7 +96,7 @@ nonisolated struct RDPConnectionProfile: Codable, Hashable, Sendable {
             dynamicResolution: Self.boolValue(settings["dynamic resolution"]) ?? true,
             administrativeSession: Self.boolValue(settings["administrative session"]) ?? false,
             connectToConsole: Self.boolValue(settings["connect to console"]) ?? false,
-            redirectClipboard: Self.boolValue(settings["redirectclipboard"]) ?? true,
+            redirectClipboard: Self.boolValue(settings["redirectclipboard"]) ?? Self.defaultRedirectClipboard,
             redirectAudio: Self.intValue(settings["audiomode"]) == 0,
             allowFontSmoothing: Self.boolValue(settings["allow font smoothing"]) ?? true,
             rawSettings: settings

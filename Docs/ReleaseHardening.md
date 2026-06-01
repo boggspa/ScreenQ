@@ -11,8 +11,9 @@ This document covers the release controls that keep Screen Q self-contained and 
   embed the unfinished `ScreenQBroadcastExtension.appex`.
 - visionOS is not in the public app target's supported platforms until the
   viewer surface is tested and reviewed.
-- Override the neutral default bundle identifier during signing, for example
-  `SCREENQ_BUNDLE_ID=com.yourcompany.Screen-Q`.
+- Screen Q's public bundle identifier is `com.chrisizatt.Screen-Q`. Forks and
+  private builds should override `SCREENQ_BUNDLE_ID` with their own registered
+  app identifier.
 
 ## Required Release Artifacts
 
@@ -79,13 +80,13 @@ xcodebuild archive \
   -destination "generic/platform=macOS" \
   -configuration Release \
   -archivePath "dist/release/ScreenQ-macOS.xcarchive" \
-  SCREENQ_BUNDLE_ID=com.yourcompany.Screen-Q \
+  SCREENQ_BUNDLE_ID=com.chrisizatt.Screen-Q \
   DEVELOPMENT_TEAM=TEAMID
 ```
 
 Entitlements are split by SDK. iOS and iPadOS builds use
 `Screen Q/Entitlements/ScreenQ-iOS.entitlements`, which keeps iCloud key-value
-storage available for future TestFlight/App Store work. macOS Developer ID
+storage available for TestFlight/App Store work. macOS Developer ID
 builds use `Screen Q/Entitlements/ScreenQ-macOS-DeveloperID.entitlements`,
 which intentionally omits iCloud so notarized public macOS releases do not
 require a Developer ID provisioning profile for iCloud.
@@ -93,6 +94,13 @@ require a Developer ID provisioning profile for iCloud.
 iOS, iPadOS, TestFlight, and App Store archives need an Apple Distribution
 certificate plus matching distribution provisioning profiles. Keep
 `SCREENQ_BUNDLE_ID` set to the registered App ID when archiving.
+
+For the iOS App Store Connect path, use
+`Docs/iOSAppStoreConnectReadiness.md` and the repo-safe archive helper:
+
+```sh
+DEVELOPMENT_TEAM=TEAMID Scripts/archive_ios_appstore.sh
+```
 
 ## Notarize macOS App
 

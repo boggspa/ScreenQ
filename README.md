@@ -267,12 +267,11 @@ Screen Q does not claim E2EE for those routes.
   App Store-oriented, but public builds do not embed the unfinished
   ReplayKit Broadcast Upload Extension.
 - Entitlements are split by SDK: iOS and iPadOS keep iCloud key-value storage
-  for future TestFlight/App Store work, while macOS Developer ID releases use
+  for TestFlight/App Store work, while macOS Developer ID releases use
   a narrower entitlement file that does not require iCloud provisioning.
-- The checked-in Xcode project uses `com.example.Screen-Q` as its neutral
-  default bundle identifier. For signed local, TestFlight, App Store, or
-  Developer ID builds, override `SCREENQ_BUNDLE_ID` with your registered app
-  identifier.
+- The checked-in Xcode project uses `com.chrisizatt.Screen-Q` as Screen Q's public
+  bundle identifier. Forks and private builds can override `SCREENQ_BUNDLE_ID`
+  with their own registered app identifier.
 
 ## Required macOS permissions
 

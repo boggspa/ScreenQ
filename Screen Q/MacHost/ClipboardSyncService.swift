@@ -31,7 +31,8 @@ final class ClipboardSyncService {
 
         // Poll pasteboard every 500ms (Apple doesn't provide a notification for general pasteboard).
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.checkPasteboard() }
+            guard let service = self else { return }
+            Task { @MainActor in service.checkPasteboard() }
         }
     }
 

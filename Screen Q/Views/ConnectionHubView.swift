@@ -27,7 +27,7 @@ struct ConnectionHubView: View {
     var onConnectTailnet: (TailnetDevice, RemoteConnectionProtocol) -> Void
     var onConnectSaved: (SavedConnection) -> Void
     var onManualConnect: (String, UInt16, RemoteConnectionProtocol, String?) -> Void
-    var onImportRDP: (RDPConnectionProfile) -> Void
+    var onImportRDP: (RDPConnectionProfile, String?) -> Void
 
     @State private var showManualSheet = false
     @State private var selectedSavedConnection: SavedConnection?
@@ -693,9 +693,9 @@ struct ConnectionHubView: View {
                         showManualSheet = false
                         onManualConnect(host, port, proto, wakeMAC)
                     },
-                    onImportRDP: { profile in
+                    onImportRDP: { profile, wakeMAC in
                         showManualSheet = false
-                        onImportRDP(profile)
+                        onImportRDP(profile, wakeMAC)
                     }
                 )
                 .padding(20)
@@ -1349,7 +1349,7 @@ private struct SavedConnectionCard: View {
         .onHover { isHovered = $0 }
         #endif
         .onAppear { loadCachedThumbnail() }
-        .onChange(of: saved.thumbnailUpdatedAt) { _ in
+        .screenQOnChange(of: saved.thumbnailUpdatedAt) { _ in
             loadCachedThumbnail()
         }
         .accessibilityElement(children: .combine)

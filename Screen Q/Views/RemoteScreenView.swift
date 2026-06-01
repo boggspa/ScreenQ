@@ -854,15 +854,15 @@ struct RemoteScreenView: View {
         .onReceive(controlPreferences.$streamProfile.removeDuplicates()) { _ in
             applyStreamControls()
         }
-        .onChange(of: session.phase) { _ in
+        .screenQOnChange(of: session.phase) { _ in
             applyStreamControls()
             stopRecordingIfSessionInactive()
             handlePhaseChange(session.phase)
         }
-        .onChange(of: session.activeShareTargetID) { _ in
+        .screenQOnChange(of: session.activeShareTargetID) { _ in
             resetViewport()
         }
-        .onChange(of: stats.fps) { newFPS in
+        .screenQOnChange(of: stats.fps) { newFPS in
             if newFPS > peakSessionFPS {
                 peakSessionFPS = newFPS
             }
@@ -1359,13 +1359,13 @@ struct RemoteScreenView: View {
                 .opacity(0.01)
                 #endif
             }
-            .onChange(of: proxy.size) { new in
+            .screenQOnChange(of: proxy.size) { new in
                 updateCanvas(size: new)
             }
-            .onChange(of: session.fitMode) { _ in
+            .screenQOnChange(of: session.fitMode) { _ in
                 clampViewport(for: proxy.size)
             }
-            .onChange(of: viewport) { new in
+            .screenQOnChange(of: viewport) { new in
                 updateCanvas(size: proxy.size, viewport: new)
             }
             .onAppear { updateCanvas(size: proxy.size) }

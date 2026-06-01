@@ -56,6 +56,16 @@ rm -rf "$destination_framework"
 rm -f "$destination_dir/libScreenQFreeRDPBridge.dylib"
 cp -R "$source_framework" "$destination_framework"
 
+plist="$destination_framework/Info.plist"
+minimum_os_version="${IPHONEOS_DEPLOYMENT_TARGET:-${DEPLOYMENT_TARGET:-17.0}}"
+if [[ -f "$plist" ]]; then
+    if /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$plist" >/dev/null 2>&1; then
+        /usr/libexec/PlistBuddy -c "Set :MinimumOSVersion $minimum_os_version" "$plist"
+    else
+        /usr/libexec/PlistBuddy -c "Add :MinimumOSVersion string $minimum_os_version" "$plist"
+    fi
+fi
+
 if [[ "${CODE_SIGNING_ALLOWED:-YES}" != "NO" && -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]]; then
     /usr/bin/codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --preserve-metadata=identifier,entitlements "$destination_framework"
 fi

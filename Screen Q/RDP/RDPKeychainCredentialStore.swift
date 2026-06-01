@@ -13,14 +13,18 @@ nonisolated enum RDPKeychainCredentialStore {
     private static let service = BundleIdentity.service("rdp")
 
     static func load(host: String, port: UInt16, operationPrompt: String? = nil) -> RDPCredentials? {
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account(host: host, port: port),
             kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecUseOperationPrompt as String: operationPrompt ?? CredentialKeychainAccess.operationPrompt(protocolName: "RDP", host: host)
+            kSecMatchLimit as String: kSecMatchLimitOne
         ]
+        for (key, value) in CredentialKeychainAccess.reuseQueryAttributes(
+            operationPrompt: operationPrompt ?? CredentialKeychainAccess.operationPrompt(protocolName: "RDP", host: host)
+        ) {
+            query[key] = value
+        }
 
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)

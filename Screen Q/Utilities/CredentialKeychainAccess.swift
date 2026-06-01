@@ -8,6 +8,7 @@
 //
 
 import Foundation
+import LocalAuthentication
 import Security
 
 nonisolated enum CredentialKeychainAccess {
@@ -38,6 +39,14 @@ nonisolated enum CredentialKeychainAccess {
 
     static func operationPrompt(protocolName: String, host: String) -> String {
         "Authenticate to reuse saved \(protocolName) credentials for \(host)."
+    }
+
+    static func reuseQueryAttributes(operationPrompt: String) -> [String: Any] {
+        let context = LAContext()
+        context.localizedReason = operationPrompt
+        return [
+            kSecUseAuthenticationContext as String: context
+        ]
     }
 
     static func normalizedAccount(host: String, port: UInt16) -> String {

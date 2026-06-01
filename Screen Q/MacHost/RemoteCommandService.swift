@@ -70,6 +70,8 @@ final class RemoteCommandService {
             // Read any remaining data.
             let remainStdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
             let remainStderr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            let terminationStatus = proc.terminationStatus
+            guard let service = self else { return }
 
             Task { @MainActor in
                 if !remainStdout.isEmpty {
@@ -91,9 +93,9 @@ final class RemoteCommandService {
                     commandID: commandID, stream: .stdout,
                     base64Data: "",
                     isComplete: true,
-                    exitCode: proc.terminationStatus
+                    exitCode: terminationStatus
                 ))
-                self?.runningProcesses.removeValue(forKey: commandID)
+                service.runningProcesses.removeValue(forKey: commandID)
             }
         }
 

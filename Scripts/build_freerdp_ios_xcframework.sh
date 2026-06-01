@@ -194,6 +194,20 @@ build_bridge_slice() {
     fi
 
     cp -R "$built_framework" "$framework_output"
+
+    local plist="$framework_output/Info.plist"
+    if [[ -f "$plist" ]]; then
+        if /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$plist" >/dev/null 2>&1; then
+            /usr/libexec/PlistBuddy -c "Set :MinimumOSVersion $deployment_target" "$plist"
+        else
+            /usr/libexec/PlistBuddy -c "Add :MinimumOSVersion string $deployment_target" "$plist"
+        fi
+    fi
+
+    local dsym_output="$frameworks_dir/ScreenQFreeRDPBridge.framework.dSYM"
+    rm -rf "$dsym_output"
+    /usr/bin/dsymutil "$framework_output/ScreenQFreeRDPBridge" -o "$dsym_output"
+
     echo "Built bridge framework for $slice at $framework_output"
 }
 
@@ -210,7 +224,9 @@ mkdir -p "$dist_dir"
 
 xcodebuild -create-xcframework \
     -framework "$build_root/ScreenQFreeRDPBridge-iOS/frameworks/iphoneos-arm64/ScreenQFreeRDPBridge.framework" \
+    -debug-symbols "$(cd "$build_root/ScreenQFreeRDPBridge-iOS/frameworks/iphoneos-arm64" && pwd -P)/ScreenQFreeRDPBridge.framework.dSYM" \
     -framework "$build_root/ScreenQFreeRDPBridge-iOS/frameworks/iphonesimulator-arm64/ScreenQFreeRDPBridge.framework" \
+    -debug-symbols "$(cd "$build_root/ScreenQFreeRDPBridge-iOS/frameworks/iphonesimulator-arm64" && pwd -P)/ScreenQFreeRDPBridge.framework.dSYM" \
     -output "$xcframework"
 
 echo "Built $xcframework"
